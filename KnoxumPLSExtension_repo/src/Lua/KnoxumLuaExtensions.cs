@@ -6,7 +6,7 @@
 //   - DoorProxy: door control (open/close/lock)
 //   - CellProxy extensions: neighbors, doors, occupancy
 //   - RoomProxy extensions: doors list
-//   - NPCProxy extensions: Say, behavior state, navigation
+//   - NPCProxy extensions: Say, behavior state
 //   - EditorLuaGameProxy extensions: CreateTalk, timer, HUD, map, audio, FX
 //   - New Lua callbacks: OnNPCTalk, OnDoorOpened, OnPlayerEnterRoom, etc.
 //   - wait() coroutine helper
@@ -21,13 +21,14 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using HarmonyLib;
-using MoonSharp.Interpreter;
 using MTM101BaldAPI;
 using PlusLevelStudio.Editor;
 using PlusLevelStudio.Lua;
 using PlusStudioLevelLoader;
 using UnityEngine;
 using UnityEngine.UI;
+using MoonSharpType = MoonSharp.Interpreter.DataType;
+using MoonSharpUserDataUtil = MoonSharp.Interpreter.UserData;
 
 namespace KnoxumPLSExtension.Features
 {
@@ -35,7 +36,7 @@ namespace KnoxumPLSExtension.Features
     // 1. TALK PROXY — NPC dialogue queue
     // ========================================================================
 
-    [MoonSharpUserData]
+    [MoonSharp.Interpreter.MoonSharpUserData]
     public class TalkLine
     {
         public string soundId;
@@ -43,14 +44,14 @@ namespace KnoxumPLSExtension.Features
         public float pauseAfter;     // seconds of silence after this line
     }
 
-    [MoonSharpUserData]
+    [MoonSharp.Interpreter.MoonSharpUserData]
     public class TalkProxy
     {
-        [MoonSharpHidden] public NPC npc;
-        [MoonSharpHidden] public MonoBehaviour host; // coroutine host
+        [MoonSharp.Interpreter.MoonSharpHidden] public NPC npc;
+        [MoonSharp.Interpreter.MoonSharpHidden] public MonoBehaviour host; // coroutine host
 
         private readonly Queue<TalkLine> queue = new Queue<TalkLine>();
-        private Coroutine activeCoroutine;
+        private UnityEngine.Coroutine activeCoroutine;
         private bool playing;
 
         /// <summary>Add a dialogue line (plays via NPC's AudioManager).</summary>
@@ -133,17 +134,69 @@ namespace KnoxumPLSExtension.Features
     }
 
     // ========================================================================
-    // 2. DOOR PROXY
+    // 2. DOOR PROXY — uses reflection for state (GetOpen/GetLocked don't exist)
     // ========================================================================
 
-    [MoonSharpUserData]
+    [MoonSharp.Interpreter.MoonSharpUserData]
     public class DoorProxy
     {
-        [MoonSharpHidden] public Door door;
+        [MoonSharp.Interpreter.MoonSharpHidden] public Door door;
+
+        // Cached reflection fields
+        private static FieldInfo _lockedField;
+        private static FieldInfo _openField;
 
         public DoorProxy(Door door)
         {
             this.door = door;
+        }
+
+        private static FieldInfo GetLockedField()
+        {
+            if (_lockedField == null)
+            {
+                _lockedField = AccessTools.Field(typeof(Door), "locked");
+                if (_lockedField == null)
+                    _lockedField = AccessTools.Field(typeof(Door), "isLocked");
+            }
+            return _lockedField;
+        }
+
+        private static FieldInfo GetOpenField()
+        {
+            if (_openField == null)
+            {
+                _openField = AccessTools.Field(typeof(Door), "open");
+                if (_openField == null)
+                    _openField = AccessTools.Field(typeof(Door), "isOpen");
+            }
+            return _openField;
+        }
+
+        /// <summary>Check if door is locked (via reflection).</summary>
+        public bool isLocked
+        {
+            get
+            {
+                if (door == null) return false;
+                var field = GetLockedField();
+                if (field != null)
+                    return (bool)field.GetValue(door);
+                return false;
+            }
+        }
+
+        /// <summary>Check if door is open (via reflection).</summary>
+        public bool isOpen
+        {
+            get
+            {
+                if (door == null) return false;
+                var field = GetOpenField();
+                if (field != null)
+                    return (bool)field.GetValue(door);
+                return false;
+            }
         }
 
         /// <summary>"Open", "Closed", or "Locked".</summary>
@@ -152,27 +205,27 @@ namespace KnoxumPLSExtension.Features
             get
             {
                 if (door == null) return "Unknown";
-                if (door.GetLocked()) return "Locked";
-                if (door.GetOpen()) return "Open";
+                if (isLocked) return "Locked";
+                if (isOpen) return "Open";
                 return "Closed";
             }
         }
 
-        public bool isOpen => door != null && door.GetOpen();
-        public bool isLocked => door != null && door.GetLocked();
-
-        public void Open()
+        /// <summary>Open the door. cancelTimer=true stops any timed lock.</summary>
+        public void Open(bool cancelTimer = false, bool openAll = false)
         {
             if (door == null) return;
-            door.Open();
+            door.Open(cancelTimer, openAll);
         }
 
+        /// <summary>Close the door.</summary>
         public void Close()
         {
             if (door == null) return;
             door.Shut();
         }
 
+        /// <summary>Lock the door. If shut=true, close it first.</summary>
         public void Lock(bool shut)
         {
             if (door == null) return;
@@ -180,6 +233,7 @@ namespace KnoxumPLSExtension.Features
             door.Lock(false);
         }
 
+        /// <summary>Lock the door for a duration, then close it first.</summary>
         public void LockTimed(float time)
         {
             if (door == null) return;
@@ -187,6 +241,7 @@ namespace KnoxumPLSExtension.Features
             door.LockTimed(time);
         }
 
+        /// <summary>Unlock the door.</summary>
         public void Unlock()
         {
             if (door == null) return;
@@ -259,15 +314,12 @@ namespace KnoxumPLSExtension.Features
         {
             if (npc == null) return;
 
-            // Resolve the SoundObject
             SoundObject soundObj = ResolveSound(soundId);
             if (soundObj == null) return;
 
             AudioManager audMan = GetNPCAudioManager(npc);
             if (audMan == null) return;
 
-            // If subtitle override needed, we'd need to patch SubtitleController
-            // For now, play with default subtitles
             audMan.PlaySingle(soundObj);
         }
 
@@ -301,31 +353,15 @@ namespace KnoxumPLSExtension.Features
         {
             if (string.IsNullOrEmpty(soundId)) return null;
 
-            // Try LevelStudioPlugin sounds
-            if (LevelStudioPlugin.Instance != null)
-            {
-                var soundsField = AccessTools.Field(typeof(LevelStudioPlugin), "sounds");
-                if (soundsField != null)
-                {
-                    var sounds = soundsField.GetValue(LevelStudioPlugin.Instance)
-                        as Dictionary<string, SoundObject>;
-                    if (sounds != null && sounds.ContainsKey(soundId))
-                        return sounds[soundId];
-                }
-            }
-
-            // Try direct field access patterns
             try
             {
                 var plugin = LevelStudioPlugin.Instance;
                 if (plugin != null)
                 {
-                    // Try property or field with different names
-                    var prop = plugin.GetType().GetField("sounds",
-                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (prop != null)
+                    var soundsField = AccessTools.Field(plugin.GetType(), "sounds");
+                    if (soundsField != null)
                     {
-                        var dict = prop.GetValue(plugin) as Dictionary<string, SoundObject>;
+                        var dict = soundsField.GetValue(plugin) as Dictionary<string, SoundObject>;
                         if (dict != null && dict.ContainsKey(soundId))
                             return dict[soundId];
                     }
@@ -347,14 +383,10 @@ namespace KnoxumPLSExtension.Features
     }
 
     // ========================================================================
-    // 4. EXTENDED NPC PROXY — Say, behavior, navigation
+    // 4. EXTENDED NPC PROXY — Say, behavior
     // ========================================================================
 
-    // We can't modify the original NPCProxy class directly (it's from PLS).
-    // Instead, we use extension methods registered with MoonSharp via UserData.
-    // MoonSharp supports extension methods via UserData.RegisterExtensionType.
-
-    [MoonSharpUserData]
+    [MoonSharp.Interpreter.MoonSharpUserData]
     public static class NPCProxyExtensions
     {
         /// <summary>Make this NPC say a registered sound.</summary>
@@ -394,7 +426,7 @@ namespace KnoxumPLSExtension.Features
             return new TalkProxy
             {
                 npc = proxy.npc,
-                host = proxy.npc  // NPC extends MonoBehaviour → can run coroutines
+                host = proxy.npc
             };
         }
 
@@ -426,58 +458,16 @@ namespace KnoxumPLSExtension.Features
 
             return "Unknown";
         }
-
-        /// <summary>Make NPC navigate toward a world position.</summary>
-        public static void NavigateTo(this NPCProxy proxy, Vector3Proxy target)
-        {
-            if (proxy == null || proxy.npc == null || target == null) return;
-
-            try
-            {
-                var navigator = proxy.npc.GetComponent<AINavigator>();
-                if (navigator != null)
-                {
-                    navigator.FindPath(target.ToVector());
-                }
-            }
-            catch { }
-        }
-
-        /// <summary>Make the NPC wander randomly.</summary>
-        public static void Wander(this NPCProxy proxy)
-        {
-            if (proxy == null || proxy.npc == null) return;
-
-            try
-            {
-                // Try to find and invoke a wander behavior via reflection
-                var bsm = AccessTools.Field(typeof(NPC), "behaviorStateMachine");
-                if (bsm != null)
-                {
-                    var machine = bsm.GetValue(proxy.npc);
-                    if (machine != null)
-                    {
-                        var setState = machine.GetType()
-                            .GetMethod("SendSignal",
-                                BindingFlags.Public | BindingFlags.Instance,
-                                null, new Type[] { typeof(string) }, null);
-                        if (setState != null)
-                            setState.Invoke(machine, new object[] { "wander" });
-                    }
-                }
-            }
-            catch { }
-        }
     }
 
     // ========================================================================
     // 5. EXTENDED CELL PROXY — neighbors, doors, occupancy
     // ========================================================================
 
-    [MoonSharpUserData]
+    [MoonSharp.Interpreter.MoonSharpUserData]
     public static class CellProxyExtensions
     {
-        /// <summary>Get the 4 neighboring cells (N, E, S, W). Nulls for missing neighbors.</summary>
+        /// <summary>Get the 4 neighboring cells (N, E, S, W).</summary>
         public static List<CellProxy> GetNeighbors(this CellProxy proxy)
         {
             if (proxy == null) return new List<CellProxy>();
@@ -517,7 +507,6 @@ namespace KnoxumPLSExtension.Features
             Cell cell = ec.CellFromPosition(proxy.position.ToVector());
             if (cell == null) return doors;
 
-            // Look for Door components in cell objects
             if (cell.ObjectBase != null)
             {
                 Door[] doorComps = cell.ObjectBase.GetComponentsInChildren<Door>();
@@ -527,7 +516,6 @@ namespace KnoxumPLSExtension.Features
                 }
             }
 
-            // Also check room's door list
             if (cell.room != null)
             {
                 foreach (var d in cell.room.doors)
@@ -562,18 +550,21 @@ namespace KnoxumPLSExtension.Features
         {
             if (proxy == null) return false;
 
-            for (int i = 0; i < Singleton<CoreGameManager>.Instance.playerCount; i++)
+            try
             {
-                var pm = Singleton<CoreGameManager>.Instance.GetPlayer(i);
-                if (pm == null) continue;
+                // Single-player: just check player 0
+                var pm = Singleton<CoreGameManager>.Instance.GetPlayer(0);
+                if (pm == null) return false;
 
                 EnvironmentController ec = GetEC();
-                if (ec == null) continue;
+                if (ec == null) return false;
 
                 Cell playerCell = ec.CellFromPosition(pm.transform.position);
                 if (playerCell != null && playerCell.position == proxy.position.ToVector())
                     return true;
             }
+            catch { }
+
             return false;
         }
 
@@ -597,14 +588,13 @@ namespace KnoxumPLSExtension.Features
     // 6. EXTENDED ROOM PROXY
     // ========================================================================
 
-    [MoonSharpUserData]
+    [MoonSharp.Interpreter.MoonSharpUserData]
     public static class RoomProxyExtensions
     {
         /// <summary>Get all doors in this room.</summary>
         public static List<DoorProxy> GetDoors(this RoomProxy proxy)
         {
             var doors = new List<DoorProxy>();
-            // RoomProxy.roomController is private, access via reflection
             var rc = GetRoomController(proxy);
             if (rc == null) return doors;
 
@@ -613,25 +603,6 @@ namespace KnoxumPLSExtension.Features
                 if (d != null) doors.Add(new DoorProxy(d));
             }
             return doors;
-        }
-
-        /// <summary>Get the number of activities/notebooks in this room.</summary>
-        public static int GetNotebookCount(this RoomProxy proxy)
-        {
-            var rc = GetRoomController(proxy);
-            if (rc == null) return 0;
-
-            var activityField = AccessTools.Field(typeof(RoomController), "activity");
-            if (activityField == null) return 0;
-
-            var activity = activityField.GetValue(rc) as Activity;
-            if (activity == null) return 0;
-
-            var notebookField = AccessTools.Field(typeof(Activity), "notebook");
-            if (notebookField == null) return 0;
-
-            var notebook = notebookField.GetValue(activity) as Notebook;
-            return notebook != null ? 1 : 0;
         }
 
         /// <summary>Lock all doors in this room for a duration.</summary>
@@ -660,7 +631,7 @@ namespace KnoxumPLSExtension.Features
     // 7. EXTENDED EDITOR LUA GAME PROXY — timer, HUD, map, audio, FX, talk
     // ========================================================================
 
-    [MoonSharpUserData]
+    [MoonSharp.Interpreter.MoonSharpUserData]
     public static class EditorLuaGameProxyExtensions
     {
         // --- Talk ---
@@ -686,7 +657,6 @@ namespace KnoxumPLSExtension.Features
         private static bool timerRunning;
         private static float timerElapsed;
 
-        /// <summary>Start a countdown timer (seconds). Triggers OnTimerExpired when done.</summary>
         public static void SetTimer(this EditorLuaGameProxy proxy, float seconds)
         {
             timerSeconds = seconds;
@@ -694,26 +664,22 @@ namespace KnoxumPLSExtension.Features
             timerRunning = true;
         }
 
-        /// <summary>Stop the countdown timer.</summary>
         public static void StopTimer(this EditorLuaGameProxy proxy)
         {
             timerRunning = false;
         }
 
-        /// <summary>Get remaining timer seconds (0 if not running).</summary>
         public static float GetTimerValue(this EditorLuaGameProxy proxy)
         {
             if (!timerRunning) return 0f;
             return Mathf.Max(0f, timerSeconds - timerElapsed);
         }
 
-        /// <summary>True if timer is running.</summary>
         public static bool IsTimerRunning(this EditorLuaGameProxy proxy)
         {
             return timerRunning;
         }
 
-        // Called from Update patch
         internal static void TickTimer(float dt)
         {
             if (!timerRunning) return;
@@ -728,10 +694,9 @@ namespace KnoxumPLSExtension.Features
         // --- HUD ---
 
         private static GameObject hudMessageObject;
-        private static UnityEngine.UI.Text hudMessageText;
+        private static Text hudMessageText;
         private static float hudMessageTimer;
 
-        /// <summary>Show a message on screen for a duration.</summary>
         public static void ShowMessage(this EditorLuaGameProxy proxy, string text, float duration)
         {
             EnsureHUDMessageObject();
@@ -743,7 +708,6 @@ namespace KnoxumPLSExtension.Features
             }
         }
 
-        /// <summary>Hide the current HUD message.</summary>
         public static void HideMessage(this EditorLuaGameProxy proxy)
         {
             if (hudMessageObject != null)
@@ -751,7 +715,6 @@ namespace KnoxumPLSExtension.Features
             hudMessageTimer = 0f;
         }
 
-        /// <summary>Show or hide the notebook counter display.</summary>
         public static void SetNotebookDisplay(this EditorLuaGameProxy proxy, bool visible)
         {
             try
@@ -784,7 +747,7 @@ namespace KnoxumPLSExtension.Features
             rt.pivot = new Vector2(0.5f, 0.5f);
             rt.sizeDelta = new Vector2(600f, 60f);
 
-            hudMessageText = hudMessageObject.AddComponent<UnityEngine.UI.Text>();
+            hudMessageText = hudMessageObject.AddComponent<Text>();
             hudMessageText.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
             hudMessageText.fontSize = 24;
             hudMessageText.alignment = TextAnchor.MiddleCenter;
@@ -807,26 +770,13 @@ namespace KnoxumPLSExtension.Features
 
         // --- Map ---
 
-        /// <summary>Reveal the entire map.</summary>
         public static void RevealMap(this EditorLuaGameProxy proxy)
         {
             try { Singleton<BaseGameManager>.Instance.Ec.map.CompleteMap(); } catch { }
         }
 
-        /// <summary>Hide the entire map (reset fog of war).</summary>
-        public static void HideMap(this EditorLuaGameProxy proxy)
-        {
-            try
-            {
-                var ec = Singleton<BaseGameManager>.Instance.Ec;
-                ec.map.ClearMap();
-            }
-            catch { }
-        }
-
         // --- Audio ---
 
-        /// <summary>Play a sound globally (through player's AudioManager).</summary>
         public static void PlaySound(this EditorLuaGameProxy proxy, string soundId)
         {
             KnoxumLuaAudioHelper.PlayGlobalSound(soundId);
@@ -839,7 +789,6 @@ namespace KnoxumPLSExtension.Features
         private static float shakeIntensity;
         private static Vector3 shakeOriginalPos;
 
-        /// <summary>Shake the screen for a duration.</summary>
         public static void ShakeScreen(this EditorLuaGameProxy proxy, float intensity, float duration)
         {
             if (mainCam == null)
@@ -851,10 +800,8 @@ namespace KnoxumPLSExtension.Features
             shakeOriginalPos = mainCam.transform.localPosition;
         }
 
-        /// <summary>Flash the screen with a color for a duration.</summary>
         public static void FlashScreen(this EditorLuaGameProxy proxy, int r, int g, int b, float duration)
         {
-            // Create a full-screen overlay that fades out
             try
             {
                 Canvas canvas = Singleton<CoreGameManager>.Instance.GetHud(0)
@@ -873,7 +820,6 @@ namespace KnoxumPLSExtension.Features
                 img.color = new Color(r / 255f, g / 255f, b / 255f, 0.7f);
                 img.raycastTarget = false;
 
-                // Fade out via coroutine on a persistent object
                 var runner = flash.AddComponent<KnoxumLuaCoroutineRunner>();
                 runner.StartCoroutine(FadeAndDestroy(flash, img, duration));
             }
@@ -925,15 +871,14 @@ namespace KnoxumPLSExtension.Features
 
     public static class KnoxumLuaCallbacks
     {
-        private static CustomChallengeManager GetCCM()
+        public static CustomChallengeManager GetCCM()
         {
-            // CustomChallengeManager is the active game mode manager
             if (Singleton<BaseGameManager>.Instance is CustomChallengeManager ccm)
                 return ccm;
             return null;
         }
 
-        private static Script GetScript()
+        private static MoonSharp.Interpreter.Script GetScript()
         {
             var ccm = GetCCM();
             return ccm?.script;
@@ -944,8 +889,8 @@ namespace KnoxumPLSExtension.Features
             var script = GetScript();
             if (script == null) return;
 
-            DynValue func = script.Globals.Get(name);
-            if (func.Type != DataType.Function) return;
+            MoonSharp.Interpreter.DynValue func = script.Globals.Get(name);
+            if (func.Type != MoonSharpType.Function) return;
 
             try
             {
@@ -959,8 +904,6 @@ namespace KnoxumPLSExtension.Features
                 Debug.LogWarning("[KnoxumLua] Callback '" + name + "' error: " + e.Message);
             }
         }
-
-        // --- Callbacks ---
 
         public static void FireOnNPCTalk(NPCProxy npc, string soundId)
         {
@@ -999,7 +942,7 @@ namespace KnoxumPLSExtension.Features
     }
 
     // ========================================================================
-    // 9. HARMONY PATCHES — hook into game systems
+    // 9. HARMONY PATCHES
     // ========================================================================
 
     // --- Update tick for timer, HUD, screen shake ---
@@ -1032,7 +975,6 @@ namespace KnoxumPLSExtension.Features
             string soundId = "unknown";
             try
             {
-                // Try to find the sound ID from LevelStudioPlugin
                 var plugin = LevelStudioPlugin.Instance;
                 if (plugin != null)
                 {
@@ -1109,26 +1051,24 @@ namespace KnoxumPLSExtension.Features
     {
         private static void Postfix(CustomChallengeManager __instance)
         {
-            // Register our extension types so MoonSharp sees them
-            UserData.RegisterExtensionType(typeof(NPCProxyExtensions));
-            UserData.RegisterExtensionType(typeof(CellProxyExtensions));
-            UserData.RegisterExtensionType(typeof(RoomProxyExtensions));
-            UserData.RegisterExtensionType(typeof(EditorLuaGameProxyExtensions));
+            // Register extension types
+            MoonSharpUserDataUtil.RegisterExtensionType(typeof(NPCProxyExtensions));
+            MoonSharpUserDataUtil.RegisterExtensionType(typeof(CellProxyExtensions));
+            MoonSharpUserDataUtil.RegisterExtensionType(typeof(RoomProxyExtensions));
+            MoonSharpUserDataUtil.RegisterExtensionType(typeof(EditorLuaGameProxyExtensions));
 
-            // Register our new types
-            UserData.RegisterType<TalkProxy>();
-            UserData.RegisterType<TalkLine>();
-            UserData.RegisterType<DoorProxy>();
+            // Register new types
+            MoonSharpUserDataUtil.RegisterType<TalkProxy>();
+            MoonSharpUserDataUtil.RegisterType<TalkLine>();
+            MoonSharpUserDataUtil.RegisterType<DoorProxy>();
 
-            // Inject wait() coroutine helper
+            // Inject globals
             __instance.script.Globals["wait"] = (Func<float, IEnumerator>)(seconds =>
                 WaitCoroutine(seconds));
 
-            // Inject utility functions
             __instance.script.Globals["GetAllDoors"] = (Func<List<DoorProxy>>)(() =>
                 GetAllDoorsInLevel());
 
-            // Inject timer as Lua globals for convenience
             __instance.script.Globals["SetTimer"] = (Action<float>)(sec =>
                 EditorLuaGameProxyExtensions.SetTimer(__instance.myProxy, sec));
             __instance.script.Globals["StopTimer"] = (Action)(() =>
@@ -1136,19 +1076,17 @@ namespace KnoxumPLSExtension.Features
             __instance.script.Globals["GetTimerValue"] = (Func<float>)(() =>
                 EditorLuaGameProxyExtensions.GetTimerValue(__instance.myProxy));
 
-            // Inject HUD
             __instance.script.Globals["ShowMessage"] = (Action<string, float>)((text, dur) =>
                 EditorLuaGameProxyExtensions.ShowMessage(__instance.myProxy, text, dur));
             __instance.script.Globals["HideMessage"] = (Action)(() =>
                 EditorLuaGameProxyExtensions.HideMessage(__instance.myProxy));
 
-            // Inject visual effects
             __instance.script.Globals["ShakeScreen"] = (Action<float, float>)((intensity, dur) =>
                 EditorLuaGameProxyExtensions.ShakeScreen(__instance.myProxy, intensity, dur));
             __instance.script.Globals["FlashScreen"] = (Action<int, int, int, float>)((r, g, b, dur) =>
                 EditorLuaGameProxyExtensions.FlashScreen(__instance.myProxy, r, g, b, dur));
 
-            Debug.Log("[KnoxumLua] Extension globals registered: wait, GetAllDoors, SetTimer, ShowMessage, ShakeScreen, FlashScreen");
+            Debug.Log("[KnoxumLua] Extension globals registered");
         }
 
         private static IEnumerator WaitCoroutine(float seconds)
@@ -1159,7 +1097,9 @@ namespace KnoxumPLSExtension.Features
         private static List<DoorProxy> GetAllDoorsInLevel()
         {
             var doors = new List<DoorProxy>();
-            var ec = Singleton<BaseGameManager>.Instance?.Ec;
+            var bgm = Singleton<BaseGameManager>.Instance;
+            if (bgm == null) return doors;
+            var ec = bgm.Ec;
             if (ec == null) return doors;
 
             foreach (var room in ec.rooms)
