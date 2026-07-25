@@ -27,6 +27,8 @@ namespace KnoxumPLSExtension.Features
         private static Mesh cachedFloorMesh;
         private static readonly Mesh[] cachedWallMeshes = new Mesh[4];
 
+        private static readonly Dictionary<int, Dictionary<int, Texture>> roomLayerWallTextures = new Dictionary<int, Dictionary<int, Texture>>();
+
         private struct RendererState
         {
             public Material effectiveMaterial;
@@ -397,6 +399,15 @@ namespace KnoxumPLSExtension.Features
                     meshFilter.sharedMesh = GetOrCreateWallMesh(dir);
                     ApplyRendererState(meshRenderer, state, ShadowCastingMode.Off);
 
+                    Texture layerTex = GetRoomLayerWallTexture(currentRoomId, layer);
+                    if (layerTex != null)
+                    {
+                        MaterialPropertyBlock layerBlock = new MaterialPropertyBlock();
+                        meshRenderer.GetPropertyBlock(layerBlock);
+                        layerBlock.SetTexture("_MainTex", layerTex);
+                        meshRenderer.SetPropertyBlock(layerBlock);
+                    }
+
                     if (ShouldGeneratePhysicalColliders())
                         EnsureWallCollider(wallObject, dir);
                     else
@@ -744,6 +755,42 @@ namespace KnoxumPLSExtension.Features
             }
 
             return -1;
+        }
+
+        public static void SetRoomLayerWallTexture(int roomId, int layer, Texture tex)
+        {
+            if (roomId <= 0)
+                return;
+
+            Dictionary<int, Texture> layerMap;
+            if (!roomLayerWallTextures.TryGetValue(roomId, out layerMap))
+            {
+                layerMap = new Dictionary<int, Texture>();
+                roomLayerWallTextures[roomId] = layerMap;
+            }
+
+            if (tex != null)
+                layerMap[layer] = tex;
+            else
+                layerMap.Remove(layer);
+        }
+
+        public static Texture GetRoomLayerWallTexture(int roomId, int layer)
+        {
+            if (roomId <= 0)
+                return null;
+
+            Dictionary<int, Texture> layerMap;
+            if (!roomLayerWallTextures.TryGetValue(roomId, out layerMap))
+                return null;
+
+            Texture tex;
+            return layerMap.TryGetValue(layer, out tex) ? tex : null;
+        }
+
+        public static void ClearRoomLayerWallTextures(int roomId)
+        {
+            roomLayerWallTextures.Remove(roomId);
         }
     }
 

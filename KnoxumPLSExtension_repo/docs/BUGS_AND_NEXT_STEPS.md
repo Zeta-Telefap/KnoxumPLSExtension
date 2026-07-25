@@ -1,14 +1,12 @@
 # Known Issues and Next Steps
 
-## Recently completed (ramps & raised cells rework)
-- ✅ Compilation fixes: `TryGetRampOwnerAtCell`, `RampCoversCell` added
-- ✅ `SetRamp` signature updated with `length` parameter
-- ✅ `KnoxumRampData.length` field added
-- ✅ Ramp mesh rewritten: stair-step geometry, supports 1-10 steps
-- ✅ Ramp side walls on exposed edges
-- ✅ `AlignObjectToRamp` uses calculated angle, not hardcoded 45°
-- ✅ Ramp mesh cache uses `Dictionary<(dir,steps), Mesh>` for multi-step
-- ✅ Save/load serialization infrastructure (`SerializeData`/`DeserializeData`)
+## Recently completed
+- ✅ Removed ramp/raised cell system entirely (HighWallsObjects.cs, KnoxumRampSelectionUI.cs deleted)
+- ✅ Added per-layer wall texture support:
+  - `SetRoomLayerWallTexture(int roomId, int layer, Texture tex)` — set texture override per layer
+  - `GetRoomLayerWallTexture(int roomId, int layer)` — get texture override
+  - `ClearRoomLayerWallTextures(int roomId)` — clear all overrides for a room
+  - Applied via MaterialPropertyBlock in wall generation loop (both .fixed.cs and .rewrite.cs)
 
 ## Known issues in imported WIP
 - WIP high-wall files may not compile together without reconciliation.
