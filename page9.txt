@@ -1,0 +1,79 @@
+            MeshFilter mf = tile.GetComponent<MeshFilter>(); 
+            if (mf == null || mf.sharedMesh == null) return; 
+            Mesh meshCopy = UnityEngine.Object.Instantiate(mf.sharedMesh); 
+            Vector3[] vertices = meshCopy.vertices; 
+            Vector3[] normals = meshCopy.normals; 
+            int[] triangles = meshCopy.triangles; 
+            List<int> newTriangles = new List<int>(); 
+            for (int i = 0; i < triangles.Length; i += 3) 
+            { 
+                int i1 = triangles[i]; 
+                int i2 = triangles[i + 1]; 
+                int i3 = triangles[i + 2]; 
+                bool isAtFloorHeight = (vertices[i1].y <= 0.5f && vertices[i2].y <= 0.5f && vertices[i3].y <= 0.5f); 
+                bool isFacingUp = false; 
+                if (normals != null && normals.Length > i1) 
+                { 
+                    Vector3 avgNormal = (normals[i1] + normals[i2] + normals[i3]) / 3f;  
+                    if (avgNormal.y > 0.5f) isFacingUp = true; 
+                } 
+                if (!(targetHeight > 1 && isAtFloorHeight && isFacingUp)) 
+                { 
+                    newTriangles.Add(i1); 
+                    newTriangles.Add(i2); 
+                    newTriangles.Add(i3); 
+                } 
+            } 
+            meshCopy.triangles = newTriangles.ToArray(); 
+            meshCopy.RecalculateBounds(); 
+            mf.mesh = meshCopy; 
+        } 
+        private static void CreateBottomFloor(Tile tile, float topY , int targetHeight) 
+        { 
+            Transform oldFloor = tile.transform.Find("Knoxum_Floor"); 
+            if (oldFloor != null) 
+            { 
+                GameObject.DestroyImmediate(oldFloor.gameObject); 
+            } 
+            if (targetHeight <= 1) return; 
+            MeshRenderer mainRenderer = tile.GetComponent<MeshRenderer>() ?? tile.GetComponentInChildren<MeshRenderer>(); 
+            if (mainRenderer == null || mainRenderer.sharedMaterial == null) return; 
+            GameObject floorObj = GameObject.CreatePrimitive(PrimitiveType.Quad); 
+            floorObj.name = "Knoxum_Floor"; 
+            floorObj.transform.SetParent(tile.transform, false); 
+            floorObj.transform.localRotation = Quaternion.Euler(90f, 0f, 0f); 
+            floorObj.transform.localPosition = new Vector3(0f, -topY , 0f); 
+            floorObj.transform.localScale = new Vector3(10f, 10f, 1f); 
+            MeshFilter floorMf = floorObj.GetComponent<MeshFilter>(); 
+            if (floorMf != null && floorMf.sharedMesh != null) 
+            { 
+                Mesh newFloorMesh = UnityEngine.Object.Instantiate(floorMf.sharedMesh); 
+                newFloorMesh.uv = new Vector2[] 
+                { 
+                    new Vector2(0.0f, 0.0f), 
+                    new Vector2(0.5f, 0.0f), 
+                    new Vector2(0.0f, 0.5f), 
+                    new Vector2(0.5f, 0.5f) 
+                }; 
+                floorMf.mesh = newFloorMesh; 
+            } 
+            MeshRenderer floorRenderer = floorObj.GetComponent<MeshRenderer>(); 
+            if (floorRenderer != null) 
+            { 
+                floorRenderer.sharedMaterial = mainRenderer.sharedMaterial; 
+                floorRenderer.shadowCastingMode = ShadowCastingMode.On; 
+                                                DisableProbeInfluence(floorRenderer); 
+            } 
+            var col = floorObj.GetComponent<Collider>(); 
+            if (col != null) GameObject.DestroyImmediate(col); 
+        } 
+        private static void BuildStackedWalls(global::Cell cell, int targetHeight, int currentRoomId) 
+        { 
+            Tile tileComponent = cell.Tile; 
+            if (tileComponent == null) return; 
+            Transform tileTransform = tileComponent.transform; 
+            List<GameObject> toDestroy = new List<GameObject>(); 
+            foreach (Transform child in tileTransform) 
+            { 
+                if (child != null && child.name.StartsWith("Knoxum_Wall_")) 
+                { 

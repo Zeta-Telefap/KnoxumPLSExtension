@@ -1,0 +1,79 @@
+        } 
+    } 
+} 
+using System; 
+using System.Collections.Generic; 
+using UnityEngine; 
+using UnityEngine.Rendering; 
+using PlusLevelStudio.Editor; 
+namespace KnoxumPLSExtension.Features 
+{ 
+    public static class HighWallsGenerator 
+    { 
+        public static void ProcessCell3D(global::Cell cell, int roomId) 
+        { 
+            if (cell == null || cell.Tile == null || roomId <= 0) return; 
+            int yOffset = HighWallsController.GetRoomYOffset(roomId); 
+            int targetHeight = HighWallsController.GetRoomHeight(roomId); 
+            float calculatedY = (float)yOffset * 10f; 
+            float topY = calculatedY + ((float)(targetHeight - 1) * 10f); 
+                        Vector3 tilePos = cell.Tile.transform.localPosition; 
+            cell.Tile.transform.localPosition = new Vector3(tilePos.x, topY , tilePos.z); 
+                        RemoveMeshFloor(cell.Tile, targetHeight); 
+                        CreateBottomFloor(cell.Tile, topY , targetHeight); 
+                        FixAndPositionLights(cell.Tile, targetHeight); 
+                        BuildStackedWalls(cell, targetHeight, roomId); 
+        } 
+                        // 
+                                                                                                // 
+                                                private static void FixAndPositionLights(Tile tile, int targetHeight) 
+        { 
+            if (tile == null) return; 
+            float lightRange = 20f * Mathf.Max(1, targetHeight); 
+                                    LightController[] controllers = tile.GetComponentsInChildren<LightController>(true); 
+            foreach (LightController lc in controllers) 
+            { 
+                if (lc == null) continue; 
+                                                                                                Vector3 lp = lc.transform.localPosition; 
+                lc.transform.localPosition = new Vector3(lp.x, 9.5f, lp.z); 
+                                                Light l = lc.GetComponent<Light>(); 
+                if (l == null) l = lc.GetComponentInChildren<Light>(true); 
+                if (l != null) 
+                { 
+                    ApplyLightFixSettings(l, targetHeight, lightRange); 
+                } 
+                                                                                                MeshRenderer[] lampRenderers = lc.GetComponentsInChildren<MeshRenderer>(true); 
+                foreach (var mr in lampRenderers) 
+                { 
+                    DisableProbeInfluence(mr); 
+                } 
+            } 
+                                                                        if (controllers.Length == 0) 
+            { 
+                Light[] fallbackLights = tile.GetComponentsInChildren<Light>(true); 
+                foreach (Light l in fallbackLights) 
+                { 
+                    if (l == null) continue; 
+                    Vector3 lp = l.transform.localPosition; 
+                    l.transform.localPosition = new Vector3(lp.x, 9.5f, lp.z); 
+                    ApplyLightFixSettings(l, targetHeight, lightRange); 
+                } 
+            } 
+        } 
+        private static void ApplyLightFixSettings(Light l, int targetHeight, float lightRange) 
+        { 
+            l.type = LightType.Point; 
+            l.range = lightRange; 
+            l.intensity = Mathf.Max(l.intensity, 3f) * Mathf.Sqrt(targetHeight); 
+            l.bounceIntensity = 1f; 
+            l.shadows = LightShadows.None; 
+                                                                                                l.renderMode = LightRenderMode.ForcePixel; 
+        } 
+                                                                                        private static void DisableProbeInfluence(Renderer r) 
+        { 
+            if (r == null) return; 
+            r.lightProbeUsage = LightProbeUsage.Off; 
+            r.reflectionProbeUsage = ReflectionProbeUsage.Off; 
+        } 
+        private static void RemoveMeshFloor(Tile tile, int targetHeight) 
+        { 
