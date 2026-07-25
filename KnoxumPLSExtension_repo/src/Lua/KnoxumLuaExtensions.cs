@@ -134,7 +134,7 @@ namespace KnoxumPLSExtension.Features
     }
 
     // ========================================================================
-    // 2. DOOR PROXY — uses reflection for state (GetOpen/GetLocked don't exist)
+    // 2. DOOR PROXY — uses public fields open/locked and IsOpen property
     // ========================================================================
 
     [MoonSharp.Interpreter.MoonSharpUserData]
@@ -142,62 +142,11 @@ namespace KnoxumPLSExtension.Features
     {
         [MoonSharp.Interpreter.MoonSharpHidden] public Door door;
 
-        // Cached reflection fields
-        private static FieldInfo _lockedField;
-        private static FieldInfo _openField;
+        /// <summary>Check if door is locked (direct public field).</summary>
+        public bool isLocked => door != null && door.locked;
 
-        public DoorProxy(Door door)
-        {
-            this.door = door;
-        }
-
-        private static FieldInfo GetLockedField()
-        {
-            if (_lockedField == null)
-            {
-                _lockedField = AccessTools.Field(typeof(Door), "locked");
-                if (_lockedField == null)
-                    _lockedField = AccessTools.Field(typeof(Door), "isLocked");
-            }
-            return _lockedField;
-        }
-
-        private static FieldInfo GetOpenField()
-        {
-            if (_openField == null)
-            {
-                _openField = AccessTools.Field(typeof(Door), "open");
-                if (_openField == null)
-                    _openField = AccessTools.Field(typeof(Door), "isOpen");
-            }
-            return _openField;
-        }
-
-        /// <summary>Check if door is locked (via reflection).</summary>
-        public bool isLocked
-        {
-            get
-            {
-                if (door == null) return false;
-                var field = GetLockedField();
-                if (field != null)
-                    return (bool)field.GetValue(door);
-                return false;
-            }
-        }
-
-        /// <summary>Check if door is open (via reflection).</summary>
-        public bool isOpen
-        {
-            get
-            {
-                if (door == null) return false;
-                var field = GetOpenField();
-                if (field != null)
-                    return (bool)field.GetValue(door);
-                return false;
-            }
-        }
+        /// <summary>Check if door is open (use IsOpen property).</summary>
+        public bool isOpen => door != null && door.IsOpen;
 
         /// <summary>"Open", "Closed", or "Locked".</summary>
         public string state
@@ -205,17 +154,17 @@ namespace KnoxumPLSExtension.Features
             get
             {
                 if (door == null) return "Unknown";
-                if (isLocked) return "Locked";
-                if (isOpen) return "Open";
+                if (door.locked) return "Locked";
+                if (door.IsOpen) return "Open";
                 return "Closed";
             }
         }
 
-        /// <summary>Open the door. cancelTimer=true stops any timed lock.</summary>
-        public void Open(bool cancelTimer = false, bool openAll = false)
+        /// <summary>Open the door. cancelTimer stops any timed lock.</summary>
+        public void Open(bool cancelTimer = false, bool makeNoise = true)
         {
             if (door == null) return;
-            door.Open(cancelTimer, openAll);
+            door.Open(cancelTimer, makeNoise);
         }
 
         /// <summary>Close the door.</summary>
@@ -457,6 +406,50 @@ namespace KnoxumPLSExtension.Features
             catch { }
 
             return "Unknown";
+        }
+
+        /// <summary>Make NPC navigate toward a world position.</summary>
+        public static void NavigateTo(this NPCProxy proxy, Vector3Proxy target)
+        {
+            if (proxy == null || proxy.npc == null || target == null) return;
+
+            try
+            {
+                var navigator = proxy.npc.GetComponent<Navigator>();
+                if (navigator != null)
+                    navigator.FindPath(target.ToVector());
+            }
+            catch { }
+        }
+
+        /// <summary>Make the NPC wander randomly.</summary>
+        public static void Wander(this NPCProxy proxy)
+        {
+            if (proxy == null || proxy.npc == null) return;
+
+            try
+            {
+                var navigator = proxy.npc.GetComponent<Navigator>();
+                if (navigator != null)
+                    navigator.WanderRandom();
+            }
+            catch { }
+        }
+
+        /// <summary>True if the NPC has a navigation destination.</summary>
+        public static bool HasDestination(this NPCProxy proxy)
+        {
+            if (proxy == null || proxy.npc == null) return false;
+            var navigator = proxy.npc.GetComponent<Navigator>();
+            return navigator != null && navigator.HasDestination;
+        }
+
+        /// <summary>True if the NPC is currently wandering.</summary>
+        public static bool IsWandering(this NPCProxy proxy)
+        {
+            if (proxy == null || proxy.npc == null) return false;
+            var navigator = proxy.npc.GetComponent<Navigator>();
+            return navigator != null && navigator.Wandering;
         }
     }
 
