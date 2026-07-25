@@ -12,6 +12,7 @@ namespace KnoxumPLSExtension.Features
     {
         public Direction upDirection;
         public int riseSteps;
+        public int length;
     }
 
     public sealed class KnoxumBoundObject : MonoBehaviour
@@ -43,7 +44,7 @@ namespace KnoxumPLSExtension.Features
         private static readonly Dictionary<int, EditorAtlasCacheEntry> editorAtlasCache = new Dictionary<int, EditorAtlasCacheEntry>();
         private static readonly MaterialPropertyBlock EmptyPropertyBlock = new MaterialPropertyBlock();
         private static Mesh cachedRaisedFloorMesh;
-        private static readonly Mesh[] cachedRampMeshes = new Mesh[4];
+        private static readonly Dictionary<(int dir, int steps), Mesh> cachedRampMeshes = new Dictionary<(int, int), Mesh>();
         private static readonly Mesh[] cachedWallMeshes = new Mesh[4];
         private static System.Reflection.MethodInfo editorGenerateTextureAtlasMethod;
 
@@ -85,7 +86,7 @@ namespace KnoxumPLSExtension.Features
             return raisedCells.TryGetValue((x, z), out value) ? Mathf.Clamp(value, 0, 1) : 0;
         }
 
-        public static void SetRamp(int x, int z, Direction upDirection, int riseSteps = 1, bool refresh = true)
+        public static void SetRamp(int x, int z, Direction upDirection, int length = 1, int riseSteps = 1, bool refresh = true)
         {
             if (upDirection != Direction.North && upDirection != Direction.East && upDirection != Direction.South && upDirection != Direction.West)
                 return;
@@ -93,7 +94,8 @@ namespace KnoxumPLSExtension.Features
             ramps[(x, z)] = new KnoxumRampData
             {
                 upDirection = upDirection,
-                riseSteps = Mathf.Clamp(riseSteps, 1, 1)
+                riseSteps = Mathf.Clamp(riseSteps, 1, 10),
+                length = Mathf.Clamp(length, 1, 10)
             };
 
             if (refresh)
@@ -110,6 +112,53 @@ namespace KnoxumPLSExtension.Features
         public static bool TryGetRamp(int x, int z, out KnoxumRampData ramp)
         {
             return ramps.TryGetValue((x, z), out ramp);
+        }
+
+        public static bool TryGetRampOwnerAtCell(int x, int z, out (int x, int z) ownerKey, out KnoxumRampData ramp)
+        {
+            ownerKey = (0, 0);
+            ramp = default(KnoxumRampData);
+
+            if (ramps.TryGetValue((x, z), out ramp))
+            {
+                ownerKey = (x, z);
+                return true;
+            }
+
+            Direction[] dirs = new Direction[] { Direction.North, Direction.East, Direction.South, Direction.West };
+            for (int i = 0; i < dirs.Length; i++)
+            {
+                int nx = x, nz = z;
+                ApplyDirectionOffset(dirs[i], ref nx, ref nz);
+
+                KnoxumRampData neighborRamp;
+                if (ramps.TryGetValue((nx, nz), out neighborRamp))
+                {
+                    if (RampCoversCell(nx, nz, neighborRamp, x, z))
+                    {
+                        ownerKey = (nx, nz);
+                        ramp = neighborRamp;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool RampCoversCell(int ownerX, int ownerZ, KnoxumRampData ramp, int targetX, int targetZ)
+        {
+            int dx = targetX - ownerX;
+            int dz = targetZ - ownerZ;
+
+            switch (ramp.upDirection)
+            {
+                case Direction.North: return dx == 0 && dz >= 0 && dz < ramp.length;
+                case Direction.East: return dz == 0 && dx >= 0 && dx < ramp.length;
+                case Direction.South: return dx == 0 && dz <= 0 && dz > -ramp.length;
+                case Direction.West: return dz == 0 && dx <= 0 && dx > -ramp.length;
+                default: return false;
+            }
         }
 
         public static void ClearAll(bool refresh = false)
@@ -205,7 +254,7 @@ namespace KnoxumPLSExtension.Features
                         t = Mathf.InverseLerp(HalfTile, -HalfTile, localX);
                         break;
                 }
-                return baseY + t * Mathf.Clamp(ramp.riseSteps, 1, 1) * LayerHeight;
+                return baseY + t * Mathf.Clamp(ramp.riseSteps, 1, 10) * LayerHeight;
             }
 
             return baseY + GetRaisedCellSteps(cell.position.x, cell.position.z) * LayerHeight;
@@ -223,7 +272,7 @@ namespace KnoxumPLSExtension.Features
             float localTop = EvaluateSurfaceLocalY(cell, roomId, 0f, 0f);
             KnoxumRampData ramp;
             if (TryGetRamp(cell.position.x, cell.position.z, out ramp))
-                localTop = GetBaseFloorLocalY(roomId) + Mathf.Clamp(ramp.riseSteps, 1, 1) * LayerHeight;
+                localTop = GetBaseFloorLocalY(roomId) + Mathf.Clamp(ramp.riseSteps, 1, 10) * LayerHeight;
 
             return cell.TileTransform.position.y + localTop;
         }
@@ -302,19 +351,22 @@ namespace KnoxumPLSExtension.Features
             if (!TryGetRamp(cell.position.x, cell.position.z, out ramp))
                 return;
 
+            float angle = Mathf.Atan2(ramp.riseSteps * LayerHeight, TileSize) * Mathf.Rad2Deg;
+            float savedY = target.localEulerAngles.y;
+
             switch (ramp.upDirection)
             {
                 case Direction.North:
-                    target.localEulerAngles = new Vector3(-45f, 0f, 0f) + new Vector3(0f, target.localEulerAngles.y, 0f);
+                    target.localEulerAngles = new Vector3(-angle, savedY, 0f);
                     break;
                 case Direction.East:
-                    target.localEulerAngles = new Vector3(0f, 0f, 45f) + new Vector3(0f, target.localEulerAngles.y, 0f);
+                    target.localEulerAngles = new Vector3(0f, savedY, angle);
                     break;
                 case Direction.South:
-                    target.localEulerAngles = new Vector3(45f, 0f, 0f) + new Vector3(0f, target.localEulerAngles.y, 0f);
+                    target.localEulerAngles = new Vector3(angle, savedY, 0f);
                     break;
                 case Direction.West:
-                    target.localEulerAngles = new Vector3(0f, 0f, -45f) + new Vector3(0f, target.localEulerAngles.y, 0f);
+                    target.localEulerAngles = new Vector3(0f, savedY, -angle);
                     break;
             }
         }
@@ -388,7 +440,7 @@ namespace KnoxumPLSExtension.Features
 
             MeshFilter mf = EnsureComponent<MeshFilter>(rampObject);
             MeshRenderer mr = EnsureComponent<MeshRenderer>(rampObject);
-            Mesh rampMesh = GetOrCreateRampMesh(ramp.upDirection);
+            Mesh rampMesh = GetOrCreateRampMesh(ramp.upDirection, ramp.riseSteps);
             mf.sharedMesh = rampMesh;
             ApplySurfaceMaterial(mr, materialState, ShadowCastingMode.On);
 
@@ -403,6 +455,37 @@ namespace KnoxumPLSExtension.Features
             else
             {
                 RemoveComponentIfExists<MeshCollider>(rampObject);
+            }
+
+            float rampTopLocalY = baseFloorLocalY + ramp.riseSteps * LayerHeight;
+            BuildRampSideWalls(cell, roomId, baseFloorLocalY, rampTopLocalY, materialState);
+        }
+
+        private static void BuildRampSideWalls(global::Cell cell, int roomId, float rampBottomLocalY, float rampTopLocalY, SurfaceMaterialState materialState)
+        {
+            Direction[] dirs = new Direction[] { Direction.North, Direction.East, Direction.South, Direction.West };
+            for (int i = 0; i < dirs.Length; i++)
+            {
+                Direction dir = dirs[i];
+                int nx = cell.position.x;
+                int nz = cell.position.z;
+                ApplyDirectionOffset(dir, ref nx, ref nz);
+
+                global::Cell neighbor;
+                float neighborTopWorldY = 0f;
+                bool hasNeighbor = TryGetCell(nx, nz, out neighbor) && neighbor != null && !neighbor.Null;
+                if (hasNeighbor)
+                    neighborTopWorldY = GetSurfaceTopWorldY(neighbor);
+
+                float currentTopWorldY = cell.TileTransform.position.y + rampTopLocalY;
+                float visibleHeight = currentTopWorldY - neighborTopWorldY;
+                if (!hasNeighbor)
+                    visibleHeight = currentTopWorldY;
+
+                if (visibleHeight <= 0.01f)
+                    continue;
+
+                CreateRaisedWallSegment(cell.Tile.transform, dir, neighborTopWorldY - cell.TileTransform.position.y, rampTopLocalY, materialState, Prefix + "RampWall_" + dir);
             }
         }
 
@@ -722,73 +805,152 @@ namespace KnoxumPLSExtension.Features
             return mesh;
         }
 
-        private static Mesh GetOrCreateRampMesh(Direction direction)
+        private static Mesh GetOrCreateRampMesh(Direction direction, int riseSteps)
         {
+            riseSteps = Mathf.Clamp(riseSteps, 1, 10);
             int dir = DirectionToIndex(direction);
-            if (dir < 0 || dir >= cachedRampMeshes.Length)
+            if (dir < 0)
                 return null;
 
-            if (cachedRampMeshes[dir] != null)
-                return cachedRampMeshes[dir];
+            var cacheKey = (dir, riseSteps);
+            Mesh cached;
+            if (cachedRampMeshes.TryGetValue(cacheKey, out cached) && cached != null)
+                return cached;
 
-            Vector3 v0;
-            Vector3 v1;
-            Vector3 v2;
-            Vector3 v3;
+            float stepDepth = TileSize / riseSteps;
 
-            switch (direction)
+            List<Vector3> verts = new List<Vector3>(riseSteps * 8);
+            List<Vector3> norms = new List<Vector3>(riseSteps * 8);
+            List<Vector2> uvList = new List<Vector2>(riseSteps * 8);
+            List<int> tris = new List<int>(riseSteps * 12);
+
+            for (int i = 0; i < riseSteps; i++)
             {
-                case Direction.North:
-                    v0 = new Vector3(-HalfTile, 0f, -HalfTile);
-                    v1 = new Vector3(HalfTile, 0f, -HalfTile);
-                    v2 = new Vector3(-HalfTile, LayerHeight, HalfTile);
-                    v3 = new Vector3(HalfTile, LayerHeight, HalfTile);
-                    break;
-                case Direction.East:
-                    v0 = new Vector3(-HalfTile, 0f, -HalfTile);
-                    v1 = new Vector3(-HalfTile, 0f, HalfTile);
-                    v2 = new Vector3(HalfTile, LayerHeight, -HalfTile);
-                    v3 = new Vector3(HalfTile, LayerHeight, HalfTile);
-                    break;
-                case Direction.South:
-                    v0 = new Vector3(-HalfTile, LayerHeight, -HalfTile);
-                    v1 = new Vector3(HalfTile, LayerHeight, -HalfTile);
-                    v2 = new Vector3(-HalfTile, 0f, HalfTile);
-                    v3 = new Vector3(HalfTile, 0f, HalfTile);
-                    break;
-                case Direction.West:
-                    v0 = new Vector3(-HalfTile, LayerHeight, -HalfTile);
-                    v1 = new Vector3(-HalfTile, LayerHeight, HalfTile);
-                    v2 = new Vector3(HalfTile, 0f, -HalfTile);
-                    v3 = new Vector3(HalfTile, 0f, HalfTile);
-                    break;
-                default:
-                    return null;
+                float y0 = i * LayerHeight;
+                float y1 = (i + 1) * LayerHeight;
+                float t0 = -HalfTile + i * stepDepth;
+                float t1 = -HalfTile + (i + 1) * stepDepth;
+
+                int treadBase = verts.Count;
+
+                switch (direction)
+                {
+                    case Direction.North:
+                        verts.Add(new Vector3(-HalfTile, y0, t0));
+                        verts.Add(new Vector3(-HalfTile, y0, t1));
+                        verts.Add(new Vector3(HalfTile, y0, t0));
+                        verts.Add(new Vector3(HalfTile, y0, t1));
+
+                        norms.Add(Vector3.up); norms.Add(Vector3.up); norms.Add(Vector3.up); norms.Add(Vector3.up);
+
+                        tris.Add(treadBase + 0); tris.Add(treadBase + 1); tris.Add(treadBase + 2);
+                        tris.Add(treadBase + 2); tris.Add(treadBase + 1); tris.Add(treadBase + 3);
+
+                        int riserN = verts.Count;
+                        verts.Add(new Vector3(-HalfTile, y0, t1));
+                        verts.Add(new Vector3(-HalfTile, y1, t1));
+                        verts.Add(new Vector3(HalfTile, y0, t1));
+                        verts.Add(new Vector3(HalfTile, y1, t1));
+
+                        norms.Add(Vector3.back); norms.Add(Vector3.back); norms.Add(Vector3.back); norms.Add(Vector3.back);
+
+                        tris.Add(riserN + 0); tris.Add(riserN + 1); tris.Add(riserN + 2);
+                        tris.Add(riserN + 2); tris.Add(riserN + 1); tris.Add(riserN + 3);
+                        break;
+
+                    case Direction.East:
+                        verts.Add(new Vector3(t0, y0, -HalfTile));
+                        verts.Add(new Vector3(t0, y0, HalfTile));
+                        verts.Add(new Vector3(t1, y0, -HalfTile));
+                        verts.Add(new Vector3(t1, y0, HalfTile));
+
+                        norms.Add(Vector3.up); norms.Add(Vector3.up); norms.Add(Vector3.up); norms.Add(Vector3.up);
+
+                        tris.Add(treadBase + 0); tris.Add(treadBase + 1); tris.Add(treadBase + 2);
+                        tris.Add(treadBase + 2); tris.Add(treadBase + 1); tris.Add(treadBase + 3);
+
+                        int riserE = verts.Count;
+                        verts.Add(new Vector3(t1, y0, -HalfTile));
+                        verts.Add(new Vector3(t1, y1, -HalfTile));
+                        verts.Add(new Vector3(t1, y0, HalfTile));
+                        verts.Add(new Vector3(t1, y1, HalfTile));
+
+                        norms.Add(Vector3.left); norms.Add(Vector3.left); norms.Add(Vector3.left); norms.Add(Vector3.left);
+
+                        tris.Add(riserE + 0); tris.Add(riserE + 1); tris.Add(riserE + 2);
+                        tris.Add(riserE + 2); tris.Add(riserE + 1); tris.Add(riserE + 3);
+                        break;
+
+                    case Direction.South:
+                        verts.Add(new Vector3(-HalfTile, y0, t1));
+                        verts.Add(new Vector3(-HalfTile, y0, t0));
+                        verts.Add(new Vector3(HalfTile, y0, t1));
+                        verts.Add(new Vector3(HalfTile, y0, t0));
+
+                        norms.Add(Vector3.up); norms.Add(Vector3.up); norms.Add(Vector3.up); norms.Add(Vector3.up);
+
+                        tris.Add(treadBase + 0); tris.Add(treadBase + 1); tris.Add(treadBase + 2);
+                        tris.Add(treadBase + 2); tris.Add(treadBase + 1); tris.Add(treadBase + 3);
+
+                        int riserS = verts.Count;
+                        verts.Add(new Vector3(-HalfTile, y0, t0));
+                        verts.Add(new Vector3(-HalfTile, y1, t0));
+                        verts.Add(new Vector3(HalfTile, y0, t0));
+                        verts.Add(new Vector3(HalfTile, y1, t0));
+
+                        norms.Add(Vector3.forward); norms.Add(Vector3.forward); norms.Add(Vector3.forward); norms.Add(Vector3.forward);
+
+                        tris.Add(riserS + 0); tris.Add(riserS + 1); tris.Add(riserS + 2);
+                        tris.Add(riserS + 2); tris.Add(riserS + 1); tris.Add(riserS + 3);
+                        break;
+
+                    case Direction.West:
+                        verts.Add(new Vector3(t1, y0, -HalfTile));
+                        verts.Add(new Vector3(t1, y0, HalfTile));
+                        verts.Add(new Vector3(t0, y0, -HalfTile));
+                        verts.Add(new Vector3(t0, y0, HalfTile));
+
+                        norms.Add(Vector3.up); norms.Add(Vector3.up); norms.Add(Vector3.up); norms.Add(Vector3.up);
+
+                        tris.Add(treadBase + 0); tris.Add(treadBase + 1); tris.Add(treadBase + 2);
+                        tris.Add(treadBase + 2); tris.Add(treadBase + 1); tris.Add(treadBase + 3);
+
+                        int riserW = verts.Count;
+                        verts.Add(new Vector3(t0, y0, -HalfTile));
+                        verts.Add(new Vector3(t0, y1, -HalfTile));
+                        verts.Add(new Vector3(t0, y0, HalfTile));
+                        verts.Add(new Vector3(t0, y1, HalfTile));
+
+                        norms.Add(Vector3.right); norms.Add(Vector3.right); norms.Add(Vector3.right); norms.Add(Vector3.right);
+
+                        tris.Add(riserW + 0); tris.Add(riserW + 1); tris.Add(riserW + 2);
+                        tris.Add(riserW + 2); tris.Add(riserW + 1); tris.Add(riserW + 3);
+                        break;
+                }
+
+                // Tread UVs: floor region (0,0)-(0.5,0.5)
+                uvList.Add(new Vector2(0f, 0f));
+                uvList.Add(new Vector2(0f, 0.5f));
+                uvList.Add(new Vector2(0.5f, 0f));
+                uvList.Add(new Vector2(0.5f, 0.5f));
+
+                // Riser UVs: wall region (0.5,0.5)-(1,1)
+                uvList.Add(new Vector2(0.5f, 0.5f));
+                uvList.Add(new Vector2(0.5f, 1f));
+                uvList.Add(new Vector2(1f, 0.5f));
+                uvList.Add(new Vector2(1f, 1f));
             }
 
             Mesh mesh = new Mesh();
-            mesh.name = Prefix + "Ramp_" + direction;
-            mesh.vertices = new Vector3[] { v0, v1, v2, v3 };
-
-            Vector3 normal = Vector3.Cross(v2 - v0, v1 - v0).normalized;
-            mesh.normals = new Vector3[] { normal, normal, normal, normal };
-            mesh.tangents = new Vector4[]
-            {
-                new Vector4(1f, 0f, 0f, 1f),
-                new Vector4(1f, 0f, 0f, 1f),
-                new Vector4(1f, 0f, 0f, 1f),
-                new Vector4(1f, 0f, 0f, 1f)
-            };
-            mesh.uv = new Vector2[]
-            {
-                new Vector2(0f, 0f),
-                new Vector2(0.5f, 0f),
-                new Vector2(0f, 0.5f),
-                new Vector2(0.5f, 0.5f)
-            };
-            mesh.triangles = new int[] { 0, 2, 1, 1, 2, 3 };
+            mesh.name = Prefix + "RampStair_" + direction + "_S" + riseSteps;
+            mesh.SetVertices(verts);
+            mesh.SetNormals(norms);
+            mesh.SetUVs(0, uvList);
+            mesh.SetTriangles(tris, 0);
             mesh.RecalculateBounds();
-            cachedRampMeshes[dir] = mesh;
+            mesh.RecalculateTangents();
+
+            cachedRampMeshes[cacheKey] = mesh;
             return mesh;
         }
 
@@ -1006,6 +1168,116 @@ namespace KnoxumPLSExtension.Features
             else
                 UnityEngine.Object.DestroyImmediate(obj);
         }
+
+        #region Save / Load
+
+        [Serializable]
+        private class SaveContainer
+        {
+            public List<RaisedCellEntry> raisedCellEntries = new List<RaisedCellEntry>();
+            public List<RampEntry> rampEntries = new List<RampEntry>();
+        }
+
+        [Serializable]
+        private class RaisedCellEntry
+        {
+            public int x;
+            public int z;
+            public int steps;
+        }
+
+        [Serializable]
+        private class RampEntry
+        {
+            public int x;
+            public int z;
+            public int direction;
+            public int riseSteps;
+            public int length;
+        }
+
+        public static string SerializeData()
+        {
+            SaveContainer container = new SaveContainer();
+
+            foreach (var kv in raisedCells)
+            {
+                container.raisedCellEntries.Add(new RaisedCellEntry
+                {
+                    x = kv.Key.x,
+                    z = kv.Key.z,
+                    steps = kv.Value
+                });
+            }
+
+            foreach (var kv in ramps)
+            {
+                container.rampEntries.Add(new RampEntry
+                {
+                    x = kv.Key.x,
+                    z = kv.Key.z,
+                    direction = DirectionToIndex(kv.Value.upDirection),
+                    riseSteps = kv.Value.riseSteps,
+                    length = kv.Value.length
+                });
+            }
+
+            return JsonUtility.ToJson(container, false);
+        }
+
+        public static void DeserializeData(string json)
+        {
+            if (string.IsNullOrEmpty(json))
+                return;
+
+            raisedCells.Clear();
+            ramps.Clear();
+
+            SaveContainer container = JsonUtility.FromJson<SaveContainer>(json);
+            if (container == null)
+                return;
+
+            if (container.raisedCellEntries != null)
+            {
+                for (int i = 0; i < container.raisedCellEntries.Count; i++)
+                {
+                    var entry = container.raisedCellEntries[i];
+                    raisedCells[(entry.x, entry.z)] = Mathf.Clamp(entry.steps, 0, 1);
+                }
+            }
+
+            if (container.rampEntries != null)
+            {
+                for (int i = 0; i < container.rampEntries.Count; i++)
+                {
+                    var entry = container.rampEntries[i];
+                    Direction dir = IndexToDirection(entry.direction);
+                    if (dir == Direction.North || dir == Direction.East || dir == Direction.South || dir == Direction.West)
+                    {
+                        ramps[(entry.x, entry.z)] = new KnoxumRampData
+                        {
+                            upDirection = dir,
+                            riseSteps = Mathf.Clamp(entry.riseSteps, 1, 10),
+                            length = Mathf.Clamp(entry.length, 1, 10)
+                        };
+                    }
+                }
+            }
+        }
+
+        private static Direction IndexToDirection(int index)
+        {
+            switch (index)
+            {
+                case 0: return Direction.North;
+                case 1: return Direction.East;
+                case 2: return Direction.South;
+                case 3: return Direction.West;
+                default: return Direction.North;
+            }
+        }
+
+        #endregion
     }
 
     [HarmonyPatch(typeof(global::Cell), "LoadTile")]
