@@ -9,12 +9,12 @@
 - wall slot editing preferred over moving doors directly
 
 ## Ramps / raised geometry
-- ramp placement by drag, arbitrary length
+- ramp placement by drag, arbitrary length — partial (length field added, single-cell placement works)
 - ramp preview separate from committed data
-- ramp height adjustable by dedicated overlay
-- ramp mesh built from repeated 1x1 texture segments instead of stretched texture
-- side walls along ramp should follow slope profile
-- raised cells should create outward-facing walls on exposed edges only
+- ramp height adjustable by dedicated overlay — ✅ UI exists (KnoxumRampSelectionUI)
+- ramp mesh built from repeated 1x1 texture segments instead of stretched texture — ✅ done (stair-step)
+- side walls along ramp should follow slope profile — ✅ done (vertical walls at exposed edges)
+- raised cells should create outward-facing walls on exposed edges only — ✅ done
 
 ## Placement and anchors
 - object placement anchored to room tiles
