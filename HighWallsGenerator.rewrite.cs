@@ -40,6 +40,8 @@ namespace KnoxumPLSExtension.Features
         private static readonly Mesh[] cachedWallMeshes = new Mesh[4];
         private static MethodInfo editorGenerateTextureAtlasMethod;
 
+        private static readonly Dictionary<int, Dictionary<int, Texture>> roomLayerWallTextures = new Dictionary<int, Dictionary<int, Texture>>();
+
         private struct EditorAtlasCacheEntry
         {
             public int floorTexId;
@@ -58,6 +60,10 @@ namespace KnoxumPLSExtension.Features
             public ReflectionProbeUsage reflectionProbeUsage;
             public bool valid;
         }
+
+        // ====================================================================
+        // ENTRY POINT
+        // ====================================================================
 
         public static void ProcessCell3D(global::Cell cell, int roomId)
         {
@@ -87,9 +93,13 @@ namespace KnoxumPLSExtension.Features
                 RemoveTopTileFloor(sourceFilter);
 
             RebuildBottomFloor(tile.transform, materialState, targetHeight);
-            RebuildStackedWalls(cell, tile.transform, materialState, targetHeight, roomId);
+            RebuildStackedWalls(cell, tile.transform, materialState, targetHeight, roomId); // <-- THIS WAS MISSING
             FixLightsOnly(tile, targetHeight);
         }
+
+        // ====================================================================
+        // LIGHTS
+        // ====================================================================
 
         public static void FixLightsOnly(global::Cell cell, int roomId)
         {
@@ -232,6 +242,10 @@ namespace KnoxumPLSExtension.Features
             renderer.reflectionProbeUsage = ReflectionProbeUsage.Off;
         }
 
+        // ====================================================================
+        // TILE HELPERS
+        // ====================================================================
+
         private static MeshRenderer GetTileRenderer(Tile tile)
         {
             if (tile == null)
@@ -269,6 +283,10 @@ namespace KnoxumPLSExtension.Features
 
             return baseline.originalMesh != null ? baseline.originalMesh : currentMesh;
         }
+
+        // ====================================================================
+        // MATERIAL RESOLUTION
+        // ====================================================================
 
         private static SurfaceMaterialState ResolveSurfaceMaterialState(global::Cell cell, int roomId, MeshRenderer sourceRenderer)
         {
@@ -491,6 +509,10 @@ namespace KnoxumPLSExtension.Features
                 material.mainTexture = texture;
         }
 
+        // ====================================================================
+        // FLOOR REMOVAL (remove original tile floor for multi-height rooms)
+        // ====================================================================
+
         private static void RemoveTopTileFloor(MeshFilter meshFilter)
         {
             if (meshFilter == null || meshFilter.sharedMesh == null)
@@ -532,6 +554,10 @@ namespace KnoxumPLSExtension.Features
             meshFilter.sharedMesh = meshCopy;
         }
 
+        // ====================================================================
+        // BOTTOM FLOOR (generated floor at the bottom of the room)
+        // ====================================================================
+
         private static void RebuildBottomFloor(Transform tileTransform, SurfaceMaterialState materialState, int targetHeight)
         {
             Transform existingFloor = tileTransform.Find("Knoxum_Floor");
@@ -559,8 +585,13 @@ namespace KnoxumPLSExtension.Features
                 RemoveComponentIfExists<BoxCollider>(floorObject);
         }
 
+        // ====================================================================
+        // STACKED WALLS — THIS IS THE KEY METHOD THAT WAS MISSING
+        // ====================================================================
+
         private static void RebuildStackedWalls(global::Cell cell, Transform tileTransform, SurfaceMaterialState materialState, int targetHeight, int currentRoomId)
         {
+            // Clean up previously generated walls
             List<Transform> existingGenerated = new List<Transform>();
             for (int i = 0; i < tileTransform.childCount; i++)
             {
@@ -569,6 +600,7 @@ namespace KnoxumPLSExtension.Features
                     existingGenerated.Add(child);
             }
 
+            // No walls needed for single-height rooms
             if (targetHeight <= 1)
             {
                 for (int i = 0; i < existingGenerated.Count; i++)
@@ -576,6 +608,7 @@ namespace KnoxumPLSExtension.Features
                 return;
             }
 
+            // Determine which directions need walls
             bool[] hasWall = GetWallDirections(cell, currentRoomId);
             HashSet<string> requiredNames = new HashSet<string>();
 
@@ -589,6 +622,7 @@ namespace KnoxumPLSExtension.Features
                     string objectName = "Knoxum_Wall_L" + layer + "_D" + dir;
                     requiredNames.Add(objectName);
 
+                    // Create or reuse wall object
                     Transform existing = tileTransform.Find(objectName);
                     GameObject wallObject = existing != null ? existing.gameObject : CreateGeneratedObject(objectName, tileTransform);
                     wallObject.transform.localPosition = GetWallLocalCenter(dir, layer);
@@ -601,6 +635,17 @@ namespace KnoxumPLSExtension.Features
                     meshFilter.sharedMesh = GetOrCreateWallMesh(dir);
                     ApplySurfaceMaterial(meshRenderer, materialState, ShadowCastingMode.Off);
 
+                    // Per-layer texture override
+                    Texture layerTex = GetRoomLayerWallTexture(currentRoomId, layer);
+                    if (layerTex != null)
+                    {
+                        MaterialPropertyBlock layerBlock = new MaterialPropertyBlock();
+                        meshRenderer.GetPropertyBlock(layerBlock);
+                        layerBlock.SetTexture("_MainTex", layerTex);
+                        meshRenderer.SetPropertyBlock(layerBlock);
+                    }
+
+                    // Collider (only in runtime, not in editor)
                     if (ShouldGeneratePhysicalColliders())
                         EnsureWallCollider(wallObject, dir);
                     else
@@ -608,6 +653,7 @@ namespace KnoxumPLSExtension.Features
                 }
             }
 
+            // Destroy walls that are no longer needed
             for (int i = 0; i < existingGenerated.Count; i++)
             {
                 Transform child = existingGenerated[i];
@@ -615,6 +661,10 @@ namespace KnoxumPLSExtension.Features
                     SafeDestroy(child.gameObject);
             }
         }
+
+        // ====================================================================
+        // MATERIAL APPLICATION
+        // ====================================================================
 
         private static void ApplySurfaceMaterial(MeshRenderer targetRenderer, SurfaceMaterialState state, ShadowCastingMode overrideShadowMode)
         {
@@ -645,16 +695,20 @@ namespace KnoxumPLSExtension.Features
             targetRenderer.reflectionProbeUsage = state.reflectionProbeUsage;
         }
 
+        // ====================================================================
+        // WALL/ FLOOR MESH GENERATION
+        // ====================================================================
+
         private static Vector3 GetWallLocalCenter(int dir, int layer)
         {
             float localY = -((layer + 1) * LayerHeight) + HalfTile;
 
             switch (dir)
             {
-                case 0: return new Vector3(0f, localY, HalfTile - SurfaceInset);
-                case 1: return new Vector3(HalfTile - SurfaceInset, localY, 0f);
-                case 2: return new Vector3(0f, localY, -HalfTile + SurfaceInset);
-                case 3: return new Vector3(-HalfTile + SurfaceInset, localY, 0f);
+                case 0: return new Vector3(0f, localY, HalfTile - SurfaceInset);      // North edge
+                case 1: return new Vector3(HalfTile - SurfaceInset, localY, 0f);      // East edge
+                case 2: return new Vector3(0f, localY, -HalfTile + SurfaceInset);     // South edge
+                case 3: return new Vector3(-HalfTile + SurfaceInset, localY, 0f);     // West edge
                 default: return Vector3.zero;
             }
         }
@@ -712,10 +766,10 @@ namespace KnoxumPLSExtension.Features
             Vector3 inwardNormal;
             switch (dir)
             {
-                case 0: inwardNormal = Vector3.back; break;
-                case 1: inwardNormal = Vector3.left; break;
-                case 2: inwardNormal = Vector3.forward; break;
-                case 3: inwardNormal = Vector3.right; break;
+                case 0: inwardNormal = Vector3.back; break;     // north wall faces south (into room)
+                case 1: inwardNormal = Vector3.left; break;     // east wall faces west
+                case 2: inwardNormal = Vector3.forward; break;  // south wall faces north
+                case 3: inwardNormal = Vector3.right; break;    // west wall faces east
                 default: inwardNormal = Vector3.forward; break;
             }
 
@@ -726,10 +780,10 @@ namespace KnoxumPLSExtension.Features
             mesh.name = "Knoxum_WallMesh_D" + dir;
             mesh.vertices = new Vector3[]
             {
-                -right - up,
-                right - up,
-                -right + up,
-                right + up
+                -right - up,    // 0: bottom-left
+                right - up,     // 1: bottom-right
+                -right + up,    // 2: top-left
+                right + up      // 3: top-right
             };
             mesh.normals = new Vector3[]
             {
@@ -753,6 +807,10 @@ namespace KnoxumPLSExtension.Features
             cachedWallMeshes[dir] = mesh;
             return cachedWallMeshes[dir];
         }
+
+        // ====================================================================
+        // UTILITY
+        // ====================================================================
 
         private static GameObject CreateGeneratedObject(string name, Transform parent)
         {
@@ -820,6 +878,10 @@ namespace KnoxumPLSExtension.Features
             else
                 UnityEngine.Object.DestroyImmediate(obj);
         }
+
+        // ====================================================================
+        // WALL DIRECTION CALCULATION
+        // ====================================================================
 
         private static bool[] GetWallDirections(global::Cell cell, int currentRoomId)
         {
@@ -904,6 +966,10 @@ namespace KnoxumPLSExtension.Features
             return ec.cells[x, z];
         }
 
+        // ====================================================================
+        // EDITOR REFRESH
+        // ====================================================================
+
         public static void RefreshEditorRoomGeneratedVisuals(EditorRoom room)
         {
             if (room == null)
@@ -975,6 +1041,10 @@ namespace KnoxumPLSExtension.Features
             return workerField.GetValue(editor) as EnvironmentController;
         }
 
+        // ====================================================================
+        // ROOM ID RESOLUTION
+        // ====================================================================
+
         public static int GetRoomIdForCell(global::Cell cell)
         {
             if (cell == null)
@@ -1009,7 +1079,51 @@ namespace KnoxumPLSExtension.Features
 
             return -1;
         }
+
+        // ====================================================================
+        // PER-LAYER WALL TEXTURE API
+        // ====================================================================
+
+        public static void SetRoomLayerWallTexture(int roomId, int layer, Texture tex)
+        {
+            if (roomId <= 0)
+                return;
+
+            Dictionary<int, Texture> layerMap;
+            if (!roomLayerWallTextures.TryGetValue(roomId, out layerMap))
+            {
+                layerMap = new Dictionary<int, Texture>();
+                roomLayerWallTextures[roomId] = layerMap;
+            }
+
+            if (tex != null)
+                layerMap[layer] = tex;
+            else
+                layerMap.Remove(layer);
+        }
+
+        public static Texture GetRoomLayerWallTexture(int roomId, int layer)
+        {
+            if (roomId <= 0)
+                return null;
+
+            Dictionary<int, Texture> layerMap;
+            if (!roomLayerWallTextures.TryGetValue(roomId, out layerMap))
+                return null;
+
+            Texture tex;
+            return layerMap.TryGetValue(layer, out tex) ? tex : null;
+        }
+
+        public static void ClearRoomLayerWallTextures(int roomId)
+        {
+            roomLayerWallTextures.Remove(roomId);
+        }
     }
+
+    // ========================================================================
+    // HARMONY PATCHES
+    // ========================================================================
 
     [HarmonyPatch(typeof(global::Cell), "AssignLightController")]
     internal static class Cell_AssignLightController_KnoxumHighWallsPatch

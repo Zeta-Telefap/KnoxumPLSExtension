@@ -1,9 +1,16 @@
 # Known Issues and Next Steps
 
+## Recently completed
+- ✅ Removed ramp/raised cell system entirely (HighWallsObjects.cs, KnoxumRampSelectionUI.cs deleted)
+- ✅ Added per-layer wall texture support:
+  - `SetRoomLayerWallTexture(int roomId, int layer, Texture tex)` — set texture override per layer
+  - `GetRoomLayerWallTexture(int roomId, int layer)` — get texture override
+  - `ClearRoomLayerWallTextures(int roomId)` — clear all overrides for a room
+  - Applied via MaterialPropertyBlock in wall generation loop (both .fixed.cs and .rewrite.cs)
+
 ## Known issues in imported WIP
 - WIP high-wall files may not compile together without reconciliation.
 - Door/high-wall opening synchronization is unfinished.
-- Ramp generation and placement were under heavy iteration and may still contain regressions.
 - Some editor UI systems were in transition from inline controls to separate overlays.
 
 ## Recommended next steps
