@@ -1982,6 +1982,7 @@ namespace KnoxumsChaosMode
         public static ConfigEntry<bool> IsGooshoesEnabledConfig { get; private set; }
         public static ConfigEntry<bool> IsLbTestSchoolEnabledConfig { get; private set; }
         public static ConfigEntry<bool> IsItemMischiefEnabledConfig { get; private set; }
+        public static ConfigEntry<bool> DisableWarningConfig { get; private set; }
 
         private Harmony harmony;
         private GameObject chaosManagerObject;
@@ -2015,6 +2016,8 @@ namespace KnoxumsChaosMode
                 "Number of laps (2-5). Set to 0 for infinite laps. ");
             CloneSpawnPointConfig = Config.Bind("Settings", "CloneSpawnPoint", CloneSpawnPoint.CharPosition, "Clone spawn location. ");
             IncludeExitsConfig = Config.Bind("Settings", "IncludeExits", false, "Spawn on exit lock. ");
+            DisableWarningConfig = Config.Bind("Settings", "DisableWarning", false,
+                "Disable the Knoxum's Chaos Mode photosensitivity warning on startup. ");
             EggConfig = Config.Bind("Secret", "egg", false, "You know what to do. ");
             IsLightsOutEnabledConfig = Config.Bind("FunSettings", "IsLightsOutEnabled", false, "Lights Out. ");
             IsMirroredEnabledConfig = Config.Bind("FunSettings", "IsMirroredEnabled", false, "Mirrored camera. ");
@@ -2024,16 +2027,19 @@ namespace KnoxumsChaosMode
 
             BaldiRampageConfig.Init(Config);
 
-            try
+            if (!(DisableWarningConfig?.Value ?? false))
             {
-                MTM101BaldiDevAPI.AddWarningScreen(
-                    "<color=yellow>PHOTOSENSITIVITY / EPILEPSY WARNING</color>\n\n" +
-                    "<b>Knoxum's Chaos Mode</b> can show flashing lights, rapid color changes, " +
-                    "and bright white flashes.\n\n" +
-                    "If you have photosensitive epilepsy or are sensitive to flashing images, " +
-                    "stop playing if you feel unwell.", false);
+                try
+                {
+                    MTM101BaldiDevAPI.AddWarningScreen(
+                        "<color=yellow>PHOTOSENSITIVITY / EPILEPSY WARNING</color>\n\n" +
+                        "<b>Knoxum's Chaos Mode</b> can show flashing lights, rapid color changes, " +
+                        "and bright white flashes.\n\n" +
+                        "If you have photosensitive epilepsy or are sensitive to flashing images, " +
+                        "stop playing if you feel unwell.", false);
+                }
+                catch (Exception ex) { Log.LogError("AddWarningScreen: " + ex.Message); }
             }
-            catch (Exception ex) { Log.LogError("AddWarningScreen: " + ex.Message); }
 
             try
             {
@@ -2160,6 +2166,12 @@ namespace KnoxumsChaosMode
         private int spawnI;
         private MenuToggle inclT;
         private StandardMenuButton spawnLA, spawnRA;
+        private GameObject p5s1, p5s2;
+        private int p5page;
+        private const int P5PAGES = 2;
+        private TextMeshProUGUI p5pageT;
+        private StandardMenuButton p5LA, p5RA;
+        private MenuToggle disableWarningT;
         private GameObject cowardLapsCover;
         private bool lastLapsVisual;
         private MenuToggle lightsOutT, mirroredT, gooshoesT, lbTestT;
@@ -2253,13 +2265,38 @@ namespace KnoxumsChaosMode
             lbTestT = MkT(p4, "LB Test School", KnoxumsChaosModePlugin.IsLbTestSchoolEnabledConfig.Value, -90f);
 
             p5 = MkC("P5");
-            MkL(p5, "Spawn new clone at...", 0f);
-            spawnLA = MkB(p5, OnSL, -105f, -40f, true);
-            spawnT = MkTxt(p5, -40f);
-            spawnRA = MkB(p5, OnSR, 105f, -40f, false);
+
+            p5s1 = new GameObject("P5S1", typeof(RectTransform));
+            p5s1.transform.SetParent(p5.transform, false);
+            p5s1.transform.localPosition = Vector3.zero;
+            MkL(p5s1, "Spawn new clone at...", 0f);
+            spawnLA = MkB(p5s1, OnSL, -105f, -40f, true);
+            spawnT = MkTxt(p5s1, -40f);
+            spawnRA = MkB(p5s1, OnSR, 105f, -40f, false);
             spawnI = Mathf.Clamp((int)KnoxumsChaosModePlugin.CloneSpawnPointConfig.Value, 0, 1);
             UpdSpawn();
-            inclT = MkT(p5, "Include Exits", KnoxumsChaosModePlugin.IncludeExitsConfig.Value, -90f);
+            inclT = MkT(p5s1, "Include Exits", KnoxumsChaosModePlugin.IncludeExitsConfig.Value, -90f);
+
+            p5s2 = new GameObject("P5S2", typeof(RectTransform));
+            p5s2.transform.SetParent(p5.transform, false);
+            p5s2.transform.localPosition = Vector3.zero;
+            disableWarningT = MkT(p5s2, "Disable Warning",
+                KnoxumsChaosModePlugin.DisableWarningConfig.Value, 0f);
+
+            // Переключатели страниц Settings находятся у левого и правого
+            // края планшета, а не рядом с индикатором, как в Other Chaos.
+            p5LA = CreateButton(OnP5L, menuArrowLeft, menuArrowLeftHighlight,
+                "P5L", new Vector3(-180f, -55f, 0f));
+            p5LA.transform.SetParent(p5.transform, false);
+            p5RA = CreateButton(OnP5R, menuArrowRight, menuArrowRightHighlight,
+                "P5R", new Vector3(180f, -55f, 0f));
+            p5RA.transform.SetParent(p5.transform, false);
+            p5pageT = CreateText("P5PT", "", new Vector3(0f, -140f, 0f),
+                BaldiFonts.ComicSans24, TextAlignmentOptions.Center,
+                new Vector2(80f, 28f), Color.black, false);
+            p5pageT.transform.SetParent(p5.transform, false);
+            p5page = 0;
+            UpdP5();
 
             AddTooltip(chaosT, "Allows you to enable chaos mode from BBCR.");
             AddTooltip(modeLA, "Chaos: original BBCR chaos mode.\nChaos+1: triangular clone growth.\nDouble Chaos: characters double on notebook pickup.");
@@ -2284,6 +2321,10 @@ namespace KnoxumsChaosMode
             AddTooltip(spawnLA, "Choose the clone spawn location.");
             AddTooltip(spawnRA, "Choose the clone spawn location.");
             AddTooltip(inclT, "Characters' clones spawn on broken exit lock.");
+            AddTooltip(p5LA, "Previous Settings page.");
+            AddTooltip(p5RA, "Next Settings page.");
+            AddTooltip(disableWarningT,
+                "Do not show this mod's photosensitivity warning on future launches.");
             AddTooltip(lightsOutT, "Dark school with local lantern lighting.");
             AddTooltip(mirroredT, "Mirror the camera and look controls.");
             AddTooltip(gooshoesT, "USE THESE TO STICK TO THE CEILING!");
@@ -2465,6 +2506,16 @@ namespace KnoxumsChaosMode
             if (p3pageT == null) return;
             p3s1.SetActive(p3page == 0); p3s2.SetActive(p3page == 1); p3pageT.text = (p3page + 1) + "/" + P3PAGES;
         }
+        private void OnP5L() { p5page = (p5page - 1 + P5PAGES) % P5PAGES; UpdP5(); }
+        private void OnP5R() { p5page = (p5page + 1) % P5PAGES; UpdP5(); }
+        private void UpdP5()
+        {
+            if (p5s1 == null || p5s2 == null) return;
+            p5page = Mathf.Clamp(p5page, 0, P5PAGES - 1);
+            p5s1.SetActive(p5page == 0);
+            p5s2.SetActive(p5page == 1);
+            if (p5pageT != null) p5pageT.text = (p5page + 1) + "/" + P5PAGES;
+        }
         private void OnLapsL()
         {
             if (lapsCountI == 0) lapsCountI = 5;
@@ -2520,6 +2571,7 @@ namespace KnoxumsChaosMode
                     KnoxumsChaosModePlugin.IsMirroredEnabledConfig.Value = (bool)vf.GetValue(mirroredT);
                     KnoxumsChaosModePlugin.IsGooshoesEnabledConfig.Value = (bool)vf.GetValue(gooshoesT);
                     KnoxumsChaosModePlugin.IsLbTestSchoolEnabledConfig.Value = (bool)vf.GetValue(lbTestT);
+                    KnoxumsChaosModePlugin.DisableWarningConfig.Value = (bool)vf.GetValue(disableWarningT);
                 }
                 KnoxumsChaosModePlugin.PropShuffleTemperatureConfig.Value = Mathf.Clamp(tempB.GetRaw(), 1, 15);
                 KnoxumsChaosModePlugin.LapsCountConfig.Value =
