@@ -1397,10 +1397,11 @@ namespace KnoxumsChaosMode
                 }
 
                 // На промежуточном круге отменяем загрузку следующей сцены и
-                // перестраиваем текущий этаж на месте.
+                // перестраиваем текущий этаж на месте. Если мы уже дошли сюда,
+                // нативный FinishLevel мог заморозить игрока — разморозим один раз.
                 if (cm != null && cm.ShouldStartNewLap())
                 {
-                    cm.StartInstantNewLap(__instance);
+                    cm.StartInstantNewLap(__instance, true);
                     return false;
                 }
 
@@ -1428,7 +1429,7 @@ namespace KnoxumsChaosMode
                 if (cm != null && cm.IsLapTransitionInProgress) return false;
                 if (cm != null && cm.ShouldStartNewLap())
                 {
-                    cm.StartInstantNewLap(__instance);
+                    cm.StartInstantNewLap(__instance, true);
                     return false;
                 }
                 if (cm != null)
@@ -1455,7 +1456,7 @@ namespace KnoxumsChaosMode
                 if (cm != null && cm.IsLapTransitionInProgress) return false;
                 if (cm != null && cm.ShouldStartNewLap())
                 {
-                    cm.StartInstantNewLap(__instance);
+                    cm.StartInstantNewLap(__instance, true);
                     return false;
                 }
                 // Endless не уходит в обычный pitstop.
@@ -3256,7 +3257,6 @@ namespace KnoxumsChaosMode
         private GameObject betaWatermarkObj;
         private TMP_Text betaWatermarkText;
         private float watermarkRetryTimer;
-        private float unlockEnforceTimer;
         private Dictionary<int, ItemObject> originalPickupItems = new Dictionary<int, ItemObject>();
         private Dictionary<int, ItemObject> previousLapPickupItems = new Dictionary<int, ItemObject>();
 
@@ -3314,11 +3314,6 @@ namespace KnoxumsChaosMode
             if (IsPitstopActive() && !ElevatorUnlockService.PitstopExitArmed) TickPitstopElevators();
             else if (IsGameActive() && !generationBusy) TickClosedElevatorBarriers();
             EnforcePitstopYtp();
-            if (unlockEnforceTimer > 0f)
-            {
-                unlockEnforceTimer -= Time.unscaledDeltaTime;
-                UnlockPlayerMovement(Singleton<CoreGameManager>.Instance?.GetPlayer(0));
-            }
             if (IsLapsActive) SyncLapsHudWithNotebooks();
             if (IsLevelReady) SyncBetaWatermarkWithHud();
             // Chaos Mode больше не ограничивает скорость NPC каждый кадр.
@@ -4455,7 +4450,7 @@ namespace KnoxumsChaosMode
         // Круг начинается от настоящей кнопки лифта, но для промежуточного
         // круга нативный FinishLevel полностью отменяется. Текущий этаж
         // перестраивается на месте — LoadNextLevel для этого не нужен.
-        public void StartInstantNewLap(BaseGameManager bgm)
+        public void StartInstantNewLap(BaseGameManager bgm, bool nativeFinishStarted = false)
         {
             if (bgm == null || bgm.Ec == null) return;
             if (floorExitToPitstopCommitted)
@@ -4475,10 +4470,12 @@ namespace KnoxumsChaosMode
             lapTransitionInProgress = true;
             skipElevatorOnLap = true;
             try { bgm.StopAllCoroutines(); } catch { }
-            activeLapCoroutine = StartCoroutine(InstantLapTransitionCoroutine(bgm));
+            activeLapCoroutine = StartCoroutine(
+                InstantLapTransitionCoroutine(bgm, nativeFinishStarted));
         }
 
-        private IEnumerator InstantLapTransitionCoroutine(BaseGameManager bgm)
+        private IEnumerator InstantLapTransitionCoroutine(
+            BaseGameManager bgm, bool nativeFinishStarted)
         {
             if (bgm == null || bgm.Ec == null)
             {
@@ -4572,7 +4569,12 @@ namespace KnoxumsChaosMode
                     pm.Teleport(bgm.Ec.spawnPoint);
                     pm.transform.rotation = bgm.Ec.spawnRotation;
                     if (pm.plm != null) pm.plm.AddStamina(pm.plm.staminaMax, true);
-                    UnlockPlayerMovement(pm, null);
+
+                    // При прямом запуске круга ButtonPressed был отменён, поэтому
+                    // игрок не заморожен. Не трогаем ActivityModifier и счётчики
+                    // interactionDisables — ими владеют шкафчики и RoomFunction.
+                    if (nativeFinishStarted) UnlockPlayerMovement(pm, null);
+                    Physics.SyncTransforms();
                     BaldiRampagePatches.SnapCameraToPlayer(
                         Singleton<CoreGameManager>.Instance?.GetCamera(0), pm);
                 }
@@ -4582,22 +4584,8 @@ namespace KnoxumsChaosMode
                 KnoxumsChaosModePlugin.Log.LogError("Lap player teleport error: " + ex);
             }
 
-            try
-            {
-                Elevator spawnForTrigger = FindSpawnElevatorForLap(bgm.Ec, pm);
-                if (spawnForTrigger != null && spawnForTrigger.ColliderGroup != null)
-                {
-                    spawnForTrigger.ColliderGroup.Enable(false);
-                    Physics.SyncTransforms();
-                    spawnForTrigger.ColliderGroup.Enable(true);
-                }
-            }
-            catch (Exception ex)
-            {
-                KnoxumsChaosModePlugin.Log.LogError("Lap trigger reset error: " + ex);
-            }
-
-            unlockEnforceTimer = 5f;
+            // Не дёргаем ColliderGroup лифта false/true: принудительный
+            // OnTriggerExit/OnTriggerEnter сбивал триггер комнаты игрока.
             yield return null;
             StopAllTapes();
             yield return new WaitForFixedUpdate();
@@ -4615,8 +4603,6 @@ namespace KnoxumsChaosMode
             if (lapsFlashImage != null)
                 yield return StartCoroutine(LapsFadeOutRoutine(1f));
 
-            UnlockPlayerMovement(pm, null);
-            unlockEnforceTimer = 3f;
             activeLapCoroutine = null;
             lapTransitionInProgress = false;
             skipElevatorOnLap = false;
@@ -4933,6 +4919,9 @@ namespace KnoxumsChaosMode
             }
             try { bgm.Ec.Npcs.Clear(); R.Set(bgm, "exitedSpawn", false); R.Set(bgm, "spawned", false); R.Set(bgm, "npcsSpawned", false); } catch { }
         }
+        // Используется только как одноразовый откат нативного FinishLevel.
+        // Никогда не очищаем moveMods и игровые trigger-счётчики: ими управляют
+        // шкафчики, комнаты, detention и другие RoomFunction-компоненты.
         public void UnlockPlayerMovement(PlayerManager pm, CoreGameManager cm = null)
         {
             if (pm == null) pm = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
@@ -4941,54 +4930,28 @@ namespace KnoxumsChaosMode
             {
                 if (pm != null)
                 {
-                    try { if (pm.Am?.moveMods != null) pm.Am.moveMods.Clear(); } catch { }
                     if (pm.plm != null)
                     {
-                        // Некоторые версии держат второй ActivityModifier внутри
-                        // PlayerMovement. Очищаем его рефлексией тоже.
-                        try
-                        {
-                            object activityModifier = R.Get<object>(pm.plm, "am", null)
-                                ?? R.Get<object>(pm.plm, "Am", null);
-                            MethodInfo clear = activityModifier?.GetType().GetMethod(
-                                "ClearMoveMods",
-                                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                            if (clear != null) clear.Invoke(activityModifier, null);
-                            else
-                            {
-                                FieldInfo modsField = R.Field(activityModifier, "moveMods");
-                                object mods = modsField?.GetValue(activityModifier);
-                                mods?.GetType().GetMethod("Clear")?.Invoke(mods, null);
-                            }
-                        }
-                        catch { }
-
                         pm.plm.enabled = true;
                         if (pm.plm.Entity != null)
                         {
                             R.Set(pm.plm.Entity, "freezes", 0);
                             R.Set(pm.plm.Entity, "frozen", false);
-                            R.Set(pm.plm.Entity, "interactionDisables", 0);
                             pm.plm.Entity.SetActive(true);
                             pm.plm.Entity.Enable(true);
-                            try
-                            {
-                                pm.plm.Entity.SetFrozen(false);
-                                pm.plm.Entity.SetInteractionState(true);
-                                pm.plm.Entity.SetVisible(true);
-                            }
-                            catch { }
+                            try { pm.plm.Entity.SetFrozen(false); } catch { }
+                            try { pm.plm.Entity.SetInteractionState(true); } catch { }
+                            try { pm.plm.Entity.SetVisible(true); } catch { }
                         }
                     }
                     R.SetPossibleBoolFields(pm, false,
                         "lockInput", "inputLocked", "locked", "frozen",
-                        "interactionDisabled", "disableInput", "disableMovement",
-                        "movementLocked", "inElevator", "elevatored", "ruleBreak",
-                        "playerInElevator");
+                        "disableInput", "disableMovement", "movementLocked",
+                        "inElevator", "elevatored", "playerInElevator");
                     R.SetPossibleBoolFields(pm.plm, false,
                         "lockInput", "inputLocked", "locked", "frozen",
-                        "interactionDisabled", "disableInput", "disableMovement",
-                        "movementLocked", "inElevator", "elevatored", "playerInElevator");
+                        "disableInput", "disableMovement", "movementLocked",
+                        "inElevator", "elevatored", "playerInElevator");
                 }
 
                 R.SetPossibleBoolFields(cm, false,
