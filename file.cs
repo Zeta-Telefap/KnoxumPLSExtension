@@ -2305,8 +2305,6 @@ namespace KnoxumsChaosMode
             AddTooltip(spawnLA, "Choose the clone spawn location.");
             AddTooltip(spawnRA, "Choose the clone spawn location.");
             AddTooltip(inclT, "Characters' clones spawn on broken exit lock.");
-            AddTooltip(p5LA, "Previous Settings page.");
-            AddTooltip(p5RA, "Next Settings page.");
             AddTooltip(warningT,
                 "Show this mod's photosensitivity warning on startup.");
             AddTooltip(lightsOutT, "Dark school with local lantern lighting.");
