@@ -2169,9 +2169,8 @@ namespace KnoxumsChaosMode
         private GameObject p5s1, p5s2;
         private int p5page;
         private const int P5PAGES = 2;
-        private TextMeshProUGUI p5pageT;
         private StandardMenuButton p5LA, p5RA;
-        private MenuToggle disableWarningT;
+        private MenuToggle warningT;
         private GameObject cowardLapsCover;
         private bool lastLapsVisual;
         private MenuToggle lightsOutT, mirroredT, gooshoesT, lbTestT;
@@ -2280,21 +2279,18 @@ namespace KnoxumsChaosMode
             p5s2 = new GameObject("P5S2", typeof(RectTransform));
             p5s2.transform.SetParent(p5.transform, false);
             p5s2.transform.localPosition = Vector3.zero;
-            disableWarningT = MkT(p5s2, "Disable Warning",
-                KnoxumsChaosModePlugin.DisableWarningConfig.Value, 0f);
+            // В интерфейсе галочка называется Warning: включено = показывать.
+            // В конфиге сохраняем старый DisableWarning для совместимости.
+            warningT = MkT(p5s2, "Warning",
+                !KnoxumsChaosModePlugin.DisableWarningConfig.Value, 0f);
 
-            // Переключатели страниц Settings находятся у левого и правого
-            // края планшета, а не рядом с индикатором, как в Other Chaos.
+            // Стрелки находятся по бокам содержимого, но ближе к центру.
             p5LA = CreateButton(OnP5L, menuArrowLeft, menuArrowLeftHighlight,
-                "P5L", new Vector3(-180f, -55f, 0f));
+                "P5L", new Vector3(-150f, -55f, 0f));
             p5LA.transform.SetParent(p5.transform, false);
             p5RA = CreateButton(OnP5R, menuArrowRight, menuArrowRightHighlight,
-                "P5R", new Vector3(180f, -55f, 0f));
+                "P5R", new Vector3(150f, -55f, 0f));
             p5RA.transform.SetParent(p5.transform, false);
-            p5pageT = CreateText("P5PT", "", new Vector3(0f, -140f, 0f),
-                BaldiFonts.ComicSans24, TextAlignmentOptions.Center,
-                new Vector2(80f, 28f), Color.black, false);
-            p5pageT.transform.SetParent(p5.transform, false);
             p5page = 0;
             UpdP5();
 
@@ -2323,8 +2319,8 @@ namespace KnoxumsChaosMode
             AddTooltip(inclT, "Characters' clones spawn on broken exit lock.");
             AddTooltip(p5LA, "Previous Settings page.");
             AddTooltip(p5RA, "Next Settings page.");
-            AddTooltip(disableWarningT,
-                "Do not show this mod's photosensitivity warning on future launches.");
+            AddTooltip(warningT,
+                "Show this mod's photosensitivity warning on startup.");
             AddTooltip(lightsOutT, "Dark school with local lantern lighting.");
             AddTooltip(mirroredT, "Mirror the camera and look controls.");
             AddTooltip(gooshoesT, "USE THESE TO STICK TO THE CEILING!");
@@ -2514,7 +2510,6 @@ namespace KnoxumsChaosMode
             p5page = Mathf.Clamp(p5page, 0, P5PAGES - 1);
             p5s1.SetActive(p5page == 0);
             p5s2.SetActive(p5page == 1);
-            if (p5pageT != null) p5pageT.text = (p5page + 1) + "/" + P5PAGES;
         }
         private void OnLapsL()
         {
@@ -2571,7 +2566,7 @@ namespace KnoxumsChaosMode
                     KnoxumsChaosModePlugin.IsMirroredEnabledConfig.Value = (bool)vf.GetValue(mirroredT);
                     KnoxumsChaosModePlugin.IsGooshoesEnabledConfig.Value = (bool)vf.GetValue(gooshoesT);
                     KnoxumsChaosModePlugin.IsLbTestSchoolEnabledConfig.Value = (bool)vf.GetValue(lbTestT);
-                    KnoxumsChaosModePlugin.DisableWarningConfig.Value = (bool)vf.GetValue(disableWarningT);
+                    KnoxumsChaosModePlugin.DisableWarningConfig.Value = !(bool)vf.GetValue(warningT);
                 }
                 KnoxumsChaosModePlugin.PropShuffleTemperatureConfig.Value = Mathf.Clamp(tempB.GetRaw(), 1, 15);
                 KnoxumsChaosModePlugin.LapsCountConfig.Value =
