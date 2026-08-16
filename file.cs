@@ -2158,10 +2158,7 @@ namespace KnoxumsChaosMode
         private const int P3PAGES = 2;
         private TextMeshProUGUI p3pageT;
         private StandardMenuButton p3LA, p3RA;
-        private MenuToggle iplT, cplT, beT, deT, discoT, baldiCowardT, lapsT;
-        private TextMeshProUGUI lapsCountT;
-        private int lapsCountI;
-        private StandardMenuButton lapsLA, lapsRA;
+        private MenuToggle iplT, cplT, beT, deT, discoT, baldiCowardT;
         private TextMeshProUGUI spawnT;
         private int spawnI;
         private MenuToggle inclT;
@@ -2221,7 +2218,6 @@ namespace KnoxumsChaosMode
             p3s2.transform.localPosition = Vector3.zero;
             discoT = MkT(p3s2, "Disco Shuffle", KnoxumsChaosModePlugin.IsDiscoShuffleEnabledConfig.Value, 0f);
             baldiCowardT = MkT(p3s2, "Baldi-coward", KnoxumsChaosModePlugin.IsBaldiCowardEnabledConfig.Value, -30f);
-            lapsT = MkT(p3s2, "Laps", KnoxumsChaosModePlugin.IsLapsEnabledConfig.Value, -60f);
             try
             {
                 cowardLapsCover = MkCover(baldiCowardT.transform, -65f);
@@ -2229,23 +2225,17 @@ namespace KnoxumsChaosMode
                 {
                     StandardMenuButton coverBtn = cowardLapsCover.ConvertToButton<StandardMenuButton>(true);
                     coverBtn.audConfirmOverride = silence;
-                    AddTooltip(coverBtn, "Incompatible with Laps. Disable Laps to use Baldi-coward.");
+                    AddTooltip(coverBtn,
+                        "Incompatible with the hidden Laps feature. Disable Laps in the config file to use Baldi-coward.");
                     Image cim = cowardLapsCover.GetComponent<Image>();
                     if (cim != null) cim.enabled = true;
                 }
-                if (ToggleVal(lapsT)) SetToggle(baldiCowardT, false);
-                lastLapsVisual = ToggleVal(lapsT);
+                bool savedLapsActive = KnoxumsChaosModePlugin.IsLapsEnabledConfig.Value;
+                if (savedLapsActive) SetToggle(baldiCowardT, false);
+                lastLapsVisual = savedLapsActive;
                 RefreshCowardLapsCover();
             }
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("Coward/Laps cover: " + ex.Message); }
-
-            // Чуть раздвигаем стрелки, чтобы надпись Endless помещалась между ними.
-            lapsLA = MkB(p3s2, OnLapsL, -82f, -90f, true);
-            lapsCountT = MkTxt(p3s2, -90f);
-            lapsRA = MkB(p3s2, OnLapsR, 82f, -90f, false);
-            int savedLaps = KnoxumsChaosModePlugin.LapsCountConfig.Value;
-            lapsCountI = savedLaps <= 0 ? 0 : Mathf.Clamp(savedLaps, 2, 5);
-            UpdLaps();
 
             p3LA = CreateButton(OnP3L, menuArrowLeft, menuArrowLeftHighlight, "P3L", new Vector3(-50f, -140f, 0f));
             p3LA.transform.SetParent(p3.transform, false);
@@ -2311,9 +2301,6 @@ namespace KnoxumsChaosMode
             AddTooltip(deT, "Two events can be triggered together.");
             AddTooltip(discoT, "All lights randomly change colors every second.");
             AddTooltip(baldiCowardT, "Baldi runs from you and slows on notebook pickup. You must be caught to leave.");
-            AddTooltip(lapsT, "After all notebooks, teleport back for another lap.");
-            AddTooltip(lapsLA, "Set laps: 2-5 or Endless.");
-            AddTooltip(lapsRA, "Set laps: 2-5 or Endless.");
             AddTooltip(spawnLA, "Choose the clone spawn location.");
             AddTooltip(spawnRA, "Choose the clone spawn location.");
             AddTooltip(inclT, "Characters' clones spawn on broken exit lock.");
@@ -2457,8 +2444,8 @@ namespace KnoxumsChaosMode
 
         private void RefreshCowardLapsCover()
         {
-            // Используем текущее состояние toggle, а не старое сохранённое значение конфига.
-            bool lapsOn = ToggleVal(lapsT);
+            // Laps скрыт из меню, но всё ещё может быть включён вручную в config.
+            bool lapsOn = KnoxumsChaosModePlugin.IsLapsEnabledConfig?.Value ?? false;
             if (lapsOn) SetToggle(baldiCowardT, false);
             if (cowardLapsCover != null)
             {
@@ -2472,7 +2459,7 @@ namespace KnoxumsChaosMode
 
         private void LateUpdate()
         {
-            bool lapsVisual = ToggleVal(lapsT);
+            bool lapsVisual = KnoxumsChaosModePlugin.IsLapsEnabledConfig?.Value ?? false;
             if (lapsVisual && !lastLapsVisual) SetToggle(baldiCowardT, false);
             lastLapsVisual = lapsVisual;
             RefreshCowardLapsCover();
@@ -2511,28 +2498,6 @@ namespace KnoxumsChaosMode
             p5s1.SetActive(p5page == 0);
             p5s2.SetActive(p5page == 1);
         }
-        private void OnLapsL()
-        {
-            if (lapsCountI == 0) lapsCountI = 5;
-            else if (lapsCountI <= 2) lapsCountI = 0;
-            else lapsCountI--;
-            UpdLaps();
-        }
-
-        private void OnLapsR()
-        {
-            if (lapsCountI == 0) lapsCountI = 2;
-            else if (lapsCountI >= 5) lapsCountI = 0;
-            else lapsCountI++;
-            UpdLaps();
-        }
-
-        private void UpdLaps()
-        {
-            if (lapsCountT != null)
-                lapsCountT.text = lapsCountI == 0 ? "Endless" : lapsCountI.ToString();
-        }
-
         private void OnApply()
         {
             try
@@ -2557,10 +2522,9 @@ namespace KnoxumsChaosMode
                     KnoxumsChaosModePlugin.IsBuildersErrorEnabledConfig.Value = (bool)vf.GetValue(beT);
                     KnoxumsChaosModePlugin.IsDoubleEventsEnabledConfig.Value = (bool)vf.GetValue(deT);
                     KnoxumsChaosModePlugin.IsDiscoShuffleEnabledConfig.Value = (bool)vf.GetValue(discoT);
-                    bool lapsOn = (bool)vf.GetValue(lapsT);
-                    KnoxumsChaosModePlugin.IsLapsEnabledConfig.Value = lapsOn;
-                    KnoxumsChaosModePlugin.IsBaldiCowardEnabledConfig.Value = lapsOn ? false : (bool)vf.GetValue(baldiCowardT);
-                    if (!lapsOn) ChaosManager.Instance?.ResetLapsToDefault();
+                    bool hiddenLapsOn = KnoxumsChaosModePlugin.IsLapsEnabledConfig.Value;
+                    KnoxumsChaosModePlugin.IsBaldiCowardEnabledConfig.Value = hiddenLapsOn
+                        ? false : (bool)vf.GetValue(baldiCowardT);
                     KnoxumsChaosModePlugin.IncludeExitsConfig.Value = (bool)vf.GetValue(inclT);
                     KnoxumsChaosModePlugin.IsLightsOutEnabledConfig.Value = (bool)vf.GetValue(lightsOutT);
                     KnoxumsChaosModePlugin.IsMirroredEnabledConfig.Value = (bool)vf.GetValue(mirroredT);
@@ -2569,8 +2533,6 @@ namespace KnoxumsChaosMode
                     KnoxumsChaosModePlugin.DisableWarningConfig.Value = !(bool)vf.GetValue(warningT);
                 }
                 KnoxumsChaosModePlugin.PropShuffleTemperatureConfig.Value = Mathf.Clamp(tempB.GetRaw(), 1, 15);
-                KnoxumsChaosModePlugin.LapsCountConfig.Value =
-                    lapsCountI <= 0 ? 0 : Mathf.Clamp(lapsCountI, 2, 5);
                 KnoxumsChaosModePlugin.CloneSpawnPointConfig.Value = (CloneSpawnPoint)Mathf.Clamp(spawnI, 0, 1);
                 KnoxumsChaosModePlugin.Instance.Config.Save();
             }
