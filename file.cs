@@ -4452,9 +4452,9 @@ namespace KnoxumsChaosMode
             }
         }
 
-        // Круг начинается от настоящей кнопки лифта. Нативный FinishLevel
-        // доходит до LoadNextLevel, а Harmony отменяет загрузку сцены только для
-        // промежуточного круга и вызывает этот переход на текущем этаже.
+        // Круг начинается от настоящей кнопки лифта, но для промежуточного
+        // круга нативный FinishLevel полностью отменяется. Текущий этаж
+        // перестраивается на месте — LoadNextLevel для этого не нужен.
         public void StartInstantNewLap(BaseGameManager bgm)
         {
             if (bgm == null || bgm.Ec == null) return;
@@ -5917,12 +5917,15 @@ namespace KnoxumsChaosMode
 
             if (cm.ShouldStartNewLap())
             {
-                // Не отменяем нативную кнопку: она размораживает/закрывает лифт
-                // обычным путём. Переход перехватит Prefix_LoadNextLevel.
+                // Это именно переход на новый КРУГ текущего этажа. Нативный
+                // ButtonPressed/FinishLevel не запускаем, иначе игра начнёт
+                // загружать следующий этаж до того, как Harmony успеет собрать
+                // текущий этаж заново.
                 KnoxumsChaosModePlugin.Log.LogInfo(
-                    "Laps: elevator button -> new lap " + (cm.CurrentLap + 1) + ".");
-                cm.StartCoroutine(ConfirmLapButtonTransition(b, cm.CurrentLap, 1.5f));
-                return true;
+                    "Laps: elevator button -> current floor lap "
+                    + (cm.CurrentLap + 1) + ".");
+                cm.StartInstantNewLap(b);
+                return false;
             }
 
             // Последний круг должен пройти в настоящий следующий этаж/pitstop.
@@ -5934,30 +5937,6 @@ namespace KnoxumsChaosMode
                 // открытое состояние. Нативный FinishLevel закроет её сам.
             }
             return true;
-        }
-
-        private static IEnumerator ConfirmLapButtonTransition(
-            BaseGameManager manager, int expectedLap, float wait)
-        {
-            while (wait > 0f)
-            {
-                ChaosManager chaos = ChaosManager.Instance;
-                if (manager == null || chaos == null || chaos.CurrentLap != expectedLap
-                    || chaos.IsLapTransitionInProgress) yield break;
-                wait -= Time.unscaledDeltaTime;
-                yield return null;
-            }
-
-            ChaosManager current = ChaosManager.Instance;
-            if (manager == null || current == null || current.CurrentLap != expectedLap
-                || !current.ShouldStartNewLap()) yield break;
-            KnoxumsChaosModePlugin.Log.LogWarning(
-                "Laps: native ButtonPressed did not call LoadNextLevel; using fallback.");
-            try { manager.LoadNextLevel(); }
-            catch (Exception ex)
-            {
-                KnoxumsChaosModePlugin.Log.LogError("Laps button fallback: " + ex);
-            }
         }
 
         private static void RepairManagerElevatorList(Elevator source, EnvironmentController ec)
