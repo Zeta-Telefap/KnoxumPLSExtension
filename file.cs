@@ -546,12 +546,10 @@ namespace KnoxumsChaosMode
         [HarmonyPrefix]
         static bool Pre_AllNotebooks(BaseGameManager __instance)
         {
+            // В Laps последняя тетрадь должна только открыть лифты. Переход
+            // круга запускается настоящей кнопкой лифта через LoadNextLevel.
             ChaosManager cm = ChaosManager.Instance;
-            if (cm != null && cm.ShouldStartNewLap())
-            {
-                cm.StartNewLap(__instance);
-                return false;
-            }
+            if (cm != null && cm.IsLapsActive) return true;
             return !On;
         }
 
@@ -570,11 +568,7 @@ namespace KnoxumsChaosMode
         static bool Pre_MainAllNotebooks(MainGameManager __instance)
         {
             ChaosManager cm = ChaosManager.Instance;
-            if (cm != null && cm.ShouldStartNewLap())
-            {
-                cm.StartNewLap(__instance);
-                return false;
-            }
+            if (cm != null && cm.IsLapsActive) return true;
             return !On;
         }
 
@@ -935,16 +929,8 @@ namespace KnoxumsChaosMode
                     int total = __instance.NotebookTotal;
                     if (total > 0 && found >= total && !ElevatorUnlockService.ElevatorsUnlockedThisFloor && !On)
                     {
-                        ChaosManager cm = ChaosManager.Instance;
-                        if (cm != null && cm.IsLapsActive &&
-                            (cm.IsLapTransitionInProgress || ChaosManager.skipElevatorOnLap))
-                        {
-                            // Промежуточный круг уже запущен из AllNotebooks.
-                        }
-                        else if (cm != null && cm.ShouldStartNewLap())
-                            cm.StartNewLap(__instance);
-                        else
-                            ElevatorUnlockService.OnAllNotebooks(__instance, "CollectNotebooks fallback");
+                        // Круг начинается только после нажатия кнопки лифта.
+                        ElevatorUnlockService.OnAllNotebooks(__instance, "CollectNotebooks fallback");
                     }
                 }
                 catch { }
@@ -1195,6 +1181,7 @@ namespace KnoxumsChaosMode
                         Singleton<MusicManager>.Instance.StopFile();
                     }
                     __instance.BeginSpoopMode();
+                    try { __instance.Ec?.StartEventTimers(); } catch { }
                 }
                 if (ChaosManager.Instance != null)
                 {
@@ -1234,34 +1221,22 @@ namespace KnoxumsChaosMode
                     if (total > 0 && found >= total && !ElevatorUnlockService.ElevatorsUnlockedThisFloor
                         && !BaldiRampageConfig.IsActive)
                     {
-                        ChaosManager cm = ChaosManager.Instance;
-                        if (cm != null && cm.IsLapsActive &&
-                            (cm.IsLapTransitionInProgress || ChaosManager.skipElevatorOnLap))
-                        {
-                            // AllNotebooks уже запустил следующий круг.
-                        }
-                        else if (cm != null && cm.ShouldStartNewLap())
-                            cm.StartNewLap(__instance);
-                        else
-                            ElevatorUnlockService.OnAllNotebooks(__instance, "ChaosPatches CollectNotebooks");
+                        // Только открываем лифты; новый круг начнётся от кнопки.
+                        ElevatorUnlockService.OnAllNotebooks(__instance, "ChaosPatches CollectNotebooks");
                     }
                 }
             }
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("CollectNotebooks: " + ex.Message); }
         }
 
-        // Круги из рабочей версии: после последнего блокнота сразу запускаем
-        // перезапуск текущего этажа. Лифт между промежуточными кругами не нужен.
+        // AllNotebooks всегда оставляем игре: он открывает лифты. Сам переход
+        // круга перехватывается в LoadNextLevel после нажатия зелёной кнопки.
         [HarmonyPatch(typeof(BaseGameManager), "AllNotebooks")]
         [HarmonyPrefix]
         [HarmonyPriority(Priority.First)]
         public static bool Prefix_LapsAllNotebooks(BaseGameManager __instance)
         {
-            ChaosManager cm = ChaosManager.Instance;
-            if (cm == null || !cm.IsLapsActive) return true;
-            if (!cm.ShouldStartNewLap()) return true;
-            cm.StartNewLap(__instance);
-            return false;
+            return true;
         }
 
         [HarmonyPatch(typeof(MainGameManager), "AllNotebooks")]
@@ -1269,11 +1244,7 @@ namespace KnoxumsChaosMode
         [HarmonyPriority(Priority.First)]
         public static bool Prefix_LapsMainAllNotebooks(MainGameManager __instance)
         {
-            ChaosManager cm = ChaosManager.Instance;
-            if (cm == null || !cm.IsLapsActive) return true;
-            if (!cm.ShouldStartNewLap()) return true;
-            cm.StartNewLap(__instance);
-            return false;
+            return true;
         }
 
         [HarmonyPatch(typeof(MainGameManager), "CreateHappyBaldi")]
@@ -1407,26 +1378,43 @@ namespace KnoxumsChaosMode
         {
             try
             {
-                bool isPitstop = ElevatorUnlockService.IsPitstopManager(__instance);
-                if (isPitstop)
+                ChaosManager cm = ChaosManager.Instance;
+
+                // FinishLevel/ButtonPressed может вызвать LoadNextLevel повторно,
+                // пока уже выполняется ручной переход круга.
+                if (cm != null && cm.IsLapTransitionInProgress) return false;
+
+                if (ElevatorUnlockService.IsPitstopManager(__instance))
                 {
-                    if (ChaosManager.Instance != null)
+                    if (cm != null)
                     {
-                        ChaosManager.Instance.ResetLapsToDefault();
-                        ChaosManager.Instance.ClearFloorExitCommit();
-                        ChaosManager.Instance.IsLevelReady = false;
-                        ChaosManager.Instance.ResetSchoolShuffle();
+                        cm.ResetLapsToDefault();
+                        cm.ClearFloorExitCommit();
+                        cm.IsLevelReady = false;
+                        cm.ResetSchoolShuffle();
                     }
                     return true;
                 }
-                if (ChaosManager.Instance != null)
+
+                // На промежуточном круге отменяем загрузку следующей сцены и
+                // перестраиваем текущий этаж на месте.
+                if (cm != null && cm.ShouldStartNewLap())
                 {
-                    ChaosManager.Instance.CommitFloorExitToPitstop();
-                    ChaosManager.Instance.IsLevelReady = false;
+                    cm.StartInstantNewLap(__instance);
+                    return false;
+                }
+
+                if (cm != null)
+                {
+                    cm.CommitFloorExitToPitstop();
+                    cm.IsLevelReady = false;
                 }
                 ElevatorUnlockService.MarkLoadNextStarted();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("Base LoadNextLevel lap hook: " + ex);
+            }
             return true;
         }
 
@@ -1436,14 +1424,24 @@ namespace KnoxumsChaosMode
         {
             try
             {
-                if (ChaosManager.Instance != null)
+                ChaosManager cm = ChaosManager.Instance;
+                if (cm != null && cm.IsLapTransitionInProgress) return false;
+                if (cm != null && cm.ShouldStartNewLap())
                 {
-                    ChaosManager.Instance.CommitFloorExitToPitstop();
-                    ChaosManager.Instance.IsLevelReady = false;
+                    cm.StartInstantNewLap(__instance);
+                    return false;
+                }
+                if (cm != null)
+                {
+                    cm.CommitFloorExitToPitstop();
+                    cm.IsLevelReady = false;
                 }
                 ElevatorUnlockService.MarkLoadNextStarted();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("Main LoadNextLevel lap hook: " + ex);
+            }
             return true;
         }
 
@@ -1453,11 +1451,21 @@ namespace KnoxumsChaosMode
         {
             try
             {
-                // Endless не уходит в обычный pitstop, поэтому не коммитим pitstop-состояние.
-                if (ChaosManager.Instance != null) ChaosManager.Instance.IsLevelReady = false;
+                ChaosManager cm = ChaosManager.Instance;
+                if (cm != null && cm.IsLapTransitionInProgress) return false;
+                if (cm != null && cm.ShouldStartNewLap())
+                {
+                    cm.StartInstantNewLap(__instance);
+                    return false;
+                }
+                // Endless не уходит в обычный pitstop.
+                if (cm != null) cm.IsLevelReady = false;
                 ElevatorUnlockService.MarkLoadNextStarted();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("Endless LoadNextLevel lap hook: " + ex);
+            }
             return true;
         }
 
@@ -4391,6 +4399,28 @@ namespace KnoxumsChaosMode
             if (lapsHudObj != null) Destroy(lapsHudObj); if (lapsFlashObj != null) Destroy(lapsFlashObj); if (lapsBlackObj != null) Destroy(lapsBlackObj);
             lapsHudObj = null; lapsHudIcon = null; lapsHudText = null; lapsFlashObj = null; lapsFlashImage = null; lapsBlackObj = null; lapsBlackImage = null;
         }
+        public void TriggerLapsFadeOut(float duration)
+        {
+            if (lapsFlashImage != null) StartCoroutine(LapsFadeOutRoutine(duration));
+        }
+        private IEnumerator LapsFadeOutRoutine(float duration)
+        {
+            duration = Mathf.Max(.01f, duration);
+            Color color = Color.white;
+            color.a = 1f;
+            if (lapsFlashImage != null) lapsFlashImage.color = color;
+            if (lapsFlashObj != null) lapsFlashObj.transform.SetAsLastSibling();
+            float remaining = duration;
+            while (remaining > 0f)
+            {
+                remaining -= Time.unscaledDeltaTime;
+                color.a = Mathf.Clamp01(remaining / duration);
+                if (lapsFlashImage != null) lapsFlashImage.color = color;
+                yield return null;
+            }
+            color.a = 0f;
+            if (lapsFlashImage != null) lapsFlashImage.color = color;
+        }
 
         private void CaptureBasePlayerSpeed()
         {
@@ -4422,83 +4452,269 @@ namespace KnoxumsChaosMode
             }
         }
 
-        // Реализация кругов перенесена из присланной рабочей версии:
-        // следующий круг запускается непосредственно из AllNotebooks, без лифта.
-        public void StartNewLap(BaseGameManager bgm)
+        // Круг начинается от настоящей кнопки лифта. Нативный FinishLevel
+        // доходит до LoadNextLevel, а Harmony отменяет загрузку сцены только для
+        // промежуточного круга и вызывает этот переход на текущем этаже.
+        public void StartInstantNewLap(BaseGameManager bgm)
         {
             if (bgm == null || bgm.Ec == null) return;
-            if (lapTransitionInProgress || !ShouldStartNewLap()) return;
+            if (floorExitToPitstopCommitted)
+            {
+                KnoxumsChaosModePlugin.Log.LogWarning(
+                    "StartInstantNewLap blocked: floor already committed to pitstop.");
+                return;
+            }
+            if (!ShouldStartNewLap())
+            {
+                KnoxumsChaosModePlugin.Log.LogWarning(
+                    "StartInstantNewLap blocked: lap " + CurrentLap + "/" + LapsCount + ".");
+                return;
+            }
+            if (lapTransitionInProgress) return;
 
-            StopLapCoroutine();
-
-            int oldLap = CurrentLap;
-            int newLap = CurrentLap + 1;
-            CurrentLap = newLap;
             lapTransitionInProgress = true;
-            pendingLap = newLap;
-            lapRestartPending = true;
-            lapFadeOutPending = true;
             skipElevatorOnLap = true;
-            MarkLapsUsedThisFloor();
-
-            KnoxumsChaosModePlugin.Log.LogInfo(
-                "Laps: " + oldLap + " -> " + newLap
-                + (InfiniteLaps ? " (Endless)" : "/" + LapsCount));
-
-            activeLapCoroutine = StartCoroutine(LapTransitionSequence(bgm, oldLap, newLap));
+            try { bgm.StopAllCoroutines(); } catch { }
+            activeLapCoroutine = StartCoroutine(InstantLapTransitionCoroutine(bgm));
         }
 
-        private IEnumerator LapTransitionSequence(BaseGameManager bgm, int oldLap, int newLap)
+        private IEnumerator InstantLapTransitionCoroutine(BaseGameManager bgm)
         {
-            EnsureWhiteFlashOverlay();
+            if (bgm == null || bgm.Ec == null)
+            {
+                activeLapCoroutine = null;
+                lapTransitionInProgress = false;
+                skipElevatorOnLap = false;
+                yield break;
+            }
 
+            EnsureWhiteFlashOverlay();
+            if (lapsFlashObj != null) lapsFlashObj.transform.SetAsLastSibling();
             if (lapsFlashImage != null)
             {
                 float fade = 0f;
                 while (fade < 1f)
                 {
-                    fade += Time.unscaledDeltaTime * 2f;
+                    fade += Time.unscaledDeltaTime;
                     lapsFlashImage.color = new Color(1f, 1f, 1f, Mathf.Clamp01(fade));
                     yield return null;
                 }
                 lapsFlashImage.color = Color.white;
             }
 
+            CurrentLap++;
+            pendingLap = CurrentLap;
+            MarkLapsUsedThisFloor();
+            KnoxumsChaosModePlugin.Log.LogInfo(
+                "Instant Lap Start: " + CurrentLap
+                + (InfiniteLaps ? " (Endless)" : "/" + LapsCount));
+
             NotebooksCollectedCount = 0;
             chaosInitialSpawnDone = false;
             floorExitToPitstopCommitted = false;
             UpdateLapsHud();
+            ApplyCurrentLapSpeedBoost();
 
-            activeLapCoroutine = null;
             try
             {
-                // Штатный перезапуск заново создаёт блокноты, NPC, предметы,
-                // события и лифты. LoadSceneObject больше не блокируется патчем.
-                bgm.RestartLevel();
+                R.Set(bgm, "foundNotebooks", 0);
+                R.Set(bgm, "allNotebooksFound", false);
+                HudManager hud = Singleton<CoreGameManager>.Instance?.GetHud(0);
+                if (hud != null)
+                    hud.UpdateNotebookText(0, "0/" + bgm.Ec.notebookTotal, false);
+            }
+            catch { }
+
+            foreach (Notebook notebook in UnityEngine.Object.FindObjectsOfType<Notebook>(true))
+            {
+                if (notebook == null) continue;
+                try { notebook.gameObject.SetActive(true); } catch { }
+                try { notebook.Hide(false); } catch { }
+                try { if (notebook.activity != null) notebook.activity.InstantReset(); } catch { }
+                R.Set(notebook, "collected", false);
+                R.Set(notebook, "hidden", false);
+            }
+
+            try
+            {
+                RegisterOriginalPickups();
+                RespawnAllItemsOnFloor(bgm.Ec);
+                UpdateMiniMapIcons(bgm.Ec);
             }
             catch (Exception ex)
             {
-                lapRestartPending = false;
-                lapFadeOutPending = false;
-                skipElevatorOnLap = false;
-                CurrentLap = oldLap;
-                pendingLap = oldLap;
-                lapTransitionInProgress = false;
-                KnoxumsChaosModePlugin.Log.LogError("Laps RestartLevel: " + ex);
+                KnoxumsChaosModePlugin.Log.LogError("Lap item reset error: " + ex);
             }
+
+            // TapePlayer переживает переход на месте, поэтому одного
+            // StopAllCoroutines недостаточно: очищаем и его AudioManager.
+            StopAllTapes();
+            try
+            {
+                StopAllActiveEvents(bgm.Ec);
+                ClearTransientLapObjects();
+                ClearAllCharactersFromFloor(bgm);
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("Lap cleanup error: " + ex);
+            }
+            StopAllTapes();
+
+            ResetElevatorsToFloorStart(bgm);
+
+            PlayerManager pm = null;
+            try
+            {
+                pm = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
+                if (pm != null)
+                {
+                    pm.Teleport(bgm.Ec.spawnPoint);
+                    pm.transform.rotation = bgm.Ec.spawnRotation;
+                    if (pm.plm != null) pm.plm.AddStamina(pm.plm.staminaMax, true);
+                    UnlockPlayerMovement(pm, null);
+                    BaldiRampagePatches.SnapCameraToPlayer(
+                        Singleton<CoreGameManager>.Instance?.GetCamera(0), pm);
+                }
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("Lap player teleport error: " + ex);
+            }
+
+            try
+            {
+                Elevator spawnForTrigger = FindSpawnElevatorForLap(bgm.Ec, pm);
+                if (spawnForTrigger != null && spawnForTrigger.ColliderGroup != null)
+                {
+                    spawnForTrigger.ColliderGroup.Enable(false);
+                    Physics.SyncTransforms();
+                    spawnForTrigger.ColliderGroup.Enable(true);
+                }
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("Lap trigger reset error: " + ex);
+            }
+
+            unlockEnforceTimer = 5f;
+            yield return null;
+            StopAllTapes();
+            yield return new WaitForFixedUpdate();
+
+            Elevator spawnElevator = FindSpawnElevatorForLap(bgm.Ec, pm);
+            if (spawnElevator != null)
+                RestartNativeWaitToExitSpawn(bgm, spawnElevator);
+            else
+                KnoxumsChaosModePlugin.Log.LogWarning(
+                    "Lap start: spawn elevator not found for WaitToExitSpawn.");
+
+            // Happy Baldi и школьная музыка начинают новый нативный интро-цикл.
+            StartFloorIntro(bgm);
+
+            if (lapsFlashImage != null)
+                yield return StartCoroutine(LapsFadeOutRoutine(1f));
+
+            UnlockPlayerMovement(pm, null);
+            unlockEnforceTimer = 3f;
+            activeLapCoroutine = null;
+            lapTransitionInProgress = false;
+            skipElevatorOnLap = false;
         }
         public void StartCowardCaughtRestart(BaseGameManager bgm)
         { if (bgm == null || floorExitToPitstopCommitted) return; CommitFloorExitToPitstop(); BaldiRampagePatches.ResetCowardRoundFlags(); bgm.LoadNextLevel(); }
 
         private void ResetElevatorsToFloorStart(BaseGameManager bgm)
         {
-            ElevatorUnlockService.ResetForNewFloorOrLap(); if (bgm?.Ec == null) return;
-            R.Set(bgm, "foundNotebooks", 0); R.Set(bgm, "allNotebooksFound", false); R.Set(bgm, "elevatorsToClose", 0); R.Set(bgm, "elevatorsClosed", 0);
-            List<Elevator> list = ElevatorUnlockService.GetElevators(bgm.Ec); Elevator spawn = FindSpawnElevatorForLap(bgm.Ec);
-            foreach (Elevator e in list)
+            ElevatorUnlockService.ResetForNewFloorOrLap();
+            if (bgm == null || bgm.Ec == null) return;
+
+            R.Set(bgm, "foundNotebooks", 0);
+            R.Set(bgm, "allNotebooksFound", false);
+            R.Set(bgm, "elevatorsToClose", 0);
+            R.Set(bgm, "elevatorsClosed", 0);
+            R.Set(bgm, "waitToExitSpawn", null);
+
+            // FinishLevel очищает ElevatorManager.elevators. Сначала делаем
+            // отдельный снимок объектов сцены, затем восстанавливаем списки —
+            // нельзя очищать список и одновременно читать из того же экземпляра.
+            List<Elevator> elevators = ElevatorUnlockService.GetElevators(bgm.Ec);
+            if (elevators.Count == 0)
             {
-                if (e == null) continue; bool open = e == spawn; SetElevatorIsSpawnSafe(e, open); R.Set(e, "open", false); R.Set(e, "doorIsOpen", open);
-                try { e.OpenDoor(open); if (e.ColliderGroup != null) e.ColliderGroup.Enable(open); } catch { }
+                KnoxumsChaosModePlugin.Log.LogWarning("Lap reset: no elevators found.");
+                return;
+            }
+            RepairElevatorLists(bgm.Ec, elevators);
+
+            Elevator spawn = FindSpawnElevatorForLap(bgm.Ec);
+            foreach (Elevator elevator in elevators)
+            {
+                if (elevator == null) continue;
+                bool isSpawn = elevator == spawn;
+                SetElevatorIsSpawnSafe(elevator, isSpawn);
+                R.Set(elevator, "open", false);
+                R.Set(elevator, "doorIsOpen", isSpawn);
+                try { elevator.OpenDoor(isSpawn); } catch { }
+                try
+                {
+                    MeshCollider gate = R.Get<MeshCollider>(elevator, "gateCollider", null);
+                    if (gate != null) gate.enabled = !isSpawn;
+                }
+                catch { }
+                try
+                {
+                    if (elevator.ColliderGroup != null)
+                        elevator.ColliderGroup.Enable(isSpawn);
+                }
+                catch { }
+                try
+                {
+                    ColliderGroup inside = ElevatorUnlockService.GetInsideCollider(elevator);
+                    if (inside != null) inside.Enable(isSpawn);
+                }
+                catch { }
+                if (isSpawn) ElevatorUnlockService.UnlockSpawnElevatorButton(elevator);
+            }
+            try { Physics.SyncTransforms(); } catch { }
+        }
+
+        private void RepairElevatorLists(EnvironmentController ec, List<Elevator> snapshot)
+        {
+            if (ec == null || snapshot == null || snapshot.Count == 0) return;
+            try
+            {
+                List<Elevator> ecList = ec.Elevators;
+                if (ecList != null)
+                {
+                    ecList.Clear();
+                    for (int i = 0; i < snapshot.Count; i++)
+                        if (snapshot[i] != null) ecList.Add(snapshot[i]);
+                }
+            }
+            catch { }
+
+            HashSet<object> repairedManagers = new HashSet<object>();
+            for (int i = 0; i < snapshot.Count; i++)
+            {
+                Elevator elevator = snapshot[i];
+                if (elevator == null) continue;
+                object manager = R.Get<object>(elevator, "manager", null);
+                if (manager == null || !repairedManagers.Add(manager)) continue;
+                try
+                {
+                    FieldInfo field = R.Field(manager, "elevators");
+                    System.Collections.IList managerList =
+                        field != null ? field.GetValue(manager) as System.Collections.IList : null;
+                    if (managerList == null) continue;
+                    managerList.Clear();
+                    for (int j = 0; j < snapshot.Count; j++)
+                        if (snapshot[j] != null) managerList.Add(snapshot[j]);
+                }
+                catch (Exception ex)
+                {
+                    KnoxumsChaosModePlugin.Log.LogWarning(
+                        "Lap reset: elevator manager list repair failed: " + ex.Message);
+                }
             }
         }
         public void RegisterOriginalPickups()
@@ -4534,26 +4750,178 @@ namespace KnoxumsChaosMode
             previousLapPickupItems = next;
         }
         private void RestartNativeWaitToExitSpawn(BaseGameManager bgm, Elevator spawn)
-        { if (bgm != null) bgm.StartCoroutine(WaitForPlayerExitThenExitedSpawn(bgm, spawn)); }
+        {
+            if (bgm == null) return;
+            try
+            {
+                IEnumerator wait = WaitForPlayerExitThenExitedSpawn(bgm, spawn);
+                R.Set(bgm, "waitToExitSpawn", wait);
+                bgm.StartCoroutine(wait);
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError(
+                    "Lap reset: failed to start WaitToExitSpawn watcher: " + ex);
+            }
+        }
         private IEnumerator WaitForPlayerExitThenExitedSpawn(BaseGameManager bgm, Elevator spawn)
         {
-            yield return new WaitForSecondsRealtime(.8f); Vector3 origin = bgm.Ec.spawnPoint; origin.y = 0;
+            yield return new WaitForSecondsRealtime(.8f);
+            if (bgm == null || bgm.Ec == null) yield break;
+
+            Vector3 origin = bgm.Ec.spawnPoint;
+            origin.y = 0f;
             float timeout = 25f;
             while (timeout > 0f)
             {
-                PlayerManager p = Singleton<CoreGameManager>.Instance?.GetPlayer(0); Vector3 pp = p != null ? p.transform.position : origin; pp.y = 0;
-                if ((pp - origin).magnitude > 12f) break; timeout -= Time.unscaledDeltaTime; yield return null;
+                PlayerManager player = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
+                Vector3 position = player != null ? player.transform.position : origin;
+                position.y = 0f;
+                if ((position - origin).magnitude > 12f) break;
+                timeout -= Time.unscaledDeltaTime;
+                yield return null;
             }
-            if (spawn != null) try { spawn.OpenDoor(false); } catch { }
-            MethodInfo mi = typeof(BaseGameManager).GetMethod("ExitedSpawn", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-            try { mi?.Invoke(bgm, null); } catch { }
+
+            CloseElevatorProperly(spawn);
+            InvokeExitedSpawnDirect(bgm);
         }
+        private void InvokeExitedSpawnDirect(BaseGameManager bgm)
+        {
+            if (bgm == null) return;
+            try
+            {
+                MethodInfo exitedSpawn = typeof(BaseGameManager).GetMethod("ExitedSpawn",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, Type.EmptyTypes, null);
+                if (exitedSpawn != null) exitedSpawn.Invoke(bgm, null);
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError(
+                    "Lap reset: ExitedSpawn invoke failed: " + ex);
+            }
+        }
+        private void CloseElevatorProperly(Elevator elevator)
+        {
+            if (elevator == null) return;
+            try { elevator.OpenDoor(false); } catch { }
+            try
+            {
+                MethodInfo close = elevator.GetType().GetMethod("Close",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, Type.EmptyTypes, null);
+                if (close != null) close.Invoke(elevator, null);
+            }
+            catch { }
+            R.Set(elevator, "open", false);
+            R.Set(elevator, "doorIsOpen", false);
+            try
+            {
+                MeshCollider gate = R.Get<MeshCollider>(elevator, "gateCollider", null);
+                if (gate != null) gate.enabled = true;
+            }
+            catch { }
+        }
+        private static void StopTapeAudioManager(AudioManager audioManager)
+        {
+            if (audioManager == null) return;
+            try { audioManager.FlushQueue(true); } catch { }
+            try
+            {
+                MethodInfo setLoop = audioManager.GetType().GetMethod("SetLoop",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, new[] { typeof(bool) }, null);
+                if (setLoop != null) setLoop.Invoke(audioManager, new object[] { false });
+            }
+            catch { }
+            try
+            {
+                AudioSource device = R.Get<AudioSource>(audioManager, "audioDevice", null);
+                if (device != null)
+                {
+                    device.Stop();
+                    device.loop = false;
+                }
+            }
+            catch { }
+        }
+
+        private void StopAllTapes()
+        {
+            try
+            {
+                foreach (TapePlayer tape in UnityEngine.Object.FindObjectsOfType<TapePlayer>(true))
+                {
+                    if (tape == null) continue;
+
+                    // Сначала даём TapePlayer штатно снять свой эффект, если в
+                    // этой версии игры у него есть End/Stop/Reset без аргументов.
+                    string[] endNames = { "End", "Stop", "Reset", "ReInit" };
+                    MethodInfo[] methods = tape.GetType().GetMethods(
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    for (int n = 0; n < endNames.Length; n++)
+                    {
+                        for (int m = 0; m < methods.Length; m++)
+                        {
+                            MethodInfo method = methods[m];
+                            if (method == null || method.Name != endNames[n]
+                                || method.GetParameters().Length != 0) continue;
+                            try { method.Invoke(tape, null); } catch { }
+                            break;
+                        }
+                    }
+
+                    try { tape.StopAllCoroutines(); } catch { }
+                    R.SetPossibleBoolFields(tape, false,
+                        "active", "playing", "isPlaying", "on", "inserted", "looping");
+
+                    HashSet<AudioManager> managers = new HashSet<AudioManager>();
+                    try
+                    {
+                        AudioManager fieldManager = R.Get<AudioManager>(tape, "audMan", null);
+                        if (fieldManager != null) managers.Add(fieldManager);
+                        foreach (AudioManager manager in tape.GetComponentsInChildren<AudioManager>(true))
+                            if (manager != null) managers.Add(manager);
+                    }
+                    catch { }
+                    foreach (AudioManager manager in managers) StopTapeAudioManager(manager);
+
+                    try
+                    {
+                        foreach (AudioSource source in tape.GetComponentsInChildren<AudioSource>(true))
+                        {
+                            if (source == null) continue;
+                            source.Stop();
+                            source.loop = false;
+                        }
+                    }
+                    catch { }
+                }
+
+                foreach (Baldi baldi in UnityEngine.Object.FindObjectsOfType<Baldi>(true))
+                {
+                    BaldiRampageController controller =
+                        baldi != null ? baldi.GetComponent<BaldiRampageController>() : null;
+                    if (controller != null) controller.SetTapePlaying(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("StopAllTapes: " + ex);
+            }
+        }
+
         private void ClearTransientLapObjects()
         {
             foreach (MonoBehaviour mb in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>(true))
             {
                 if (mb == null) continue; string n = mb.GetType().Name;
-                if (n == "Gum" || n == "ITM_BSODA" || n == "ITM_GrapplingHook" || n == "BaldiGrappleRuntime" || n == "BaldiAppleProjectile") Destroy(mb.gameObject);
+                if (n == "Gum" || n == "ITM_BSODA" || n == "ITM_GrapplingHook" || n == "BaldiGrappleRuntime" || n == "BaldiAppleProjectile")
+                {
+                    try { mb.StopAllCoroutines(); } catch { }
+                    try { mb.gameObject.SetActive(false); } catch { }
+                    Destroy(mb.gameObject);
+                }
             }
         }
         public void ClearAllCharactersFromFloor(BaseGameManager bgm)
@@ -4567,25 +4935,138 @@ namespace KnoxumsChaosMode
         }
         public void UnlockPlayerMovement(PlayerManager pm, CoreGameManager cm = null)
         {
-            if (pm == null) pm = Singleton<CoreGameManager>.Instance?.GetPlayer(0); if (cm == null) cm = Singleton<CoreGameManager>.Instance;
+            if (pm == null) pm = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
+            if (cm == null) cm = Singleton<CoreGameManager>.Instance;
             try
             {
                 if (pm != null)
                 {
-                    if (pm.Am?.moveMods != null) pm.Am.moveMods.Clear();
-                    if (pm.plm != null) { pm.plm.enabled = true; if (pm.plm.Entity != null) { R.Set(pm.plm.Entity, "freezes", 0); R.Set(pm.plm.Entity, "frozen", false); pm.plm.Entity.SetActive(true); pm.plm.Entity.Enable(true); } }
-                    R.SetPossibleBoolFields(pm, false, "lockInput", "inputLocked", "locked", "frozen", "interactionDisabled", "disableMovement", "inElevator");
+                    try { if (pm.Am?.moveMods != null) pm.Am.moveMods.Clear(); } catch { }
+                    if (pm.plm != null)
+                    {
+                        // Некоторые версии держат второй ActivityModifier внутри
+                        // PlayerMovement. Очищаем его рефлексией тоже.
+                        try
+                        {
+                            object activityModifier = R.Get<object>(pm.plm, "am", null)
+                                ?? R.Get<object>(pm.plm, "Am", null);
+                            MethodInfo clear = activityModifier?.GetType().GetMethod(
+                                "ClearMoveMods",
+                                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                            if (clear != null) clear.Invoke(activityModifier, null);
+                            else
+                            {
+                                FieldInfo modsField = R.Field(activityModifier, "moveMods");
+                                object mods = modsField?.GetValue(activityModifier);
+                                mods?.GetType().GetMethod("Clear")?.Invoke(mods, null);
+                            }
+                        }
+                        catch { }
+
+                        pm.plm.enabled = true;
+                        if (pm.plm.Entity != null)
+                        {
+                            R.Set(pm.plm.Entity, "freezes", 0);
+                            R.Set(pm.plm.Entity, "frozen", false);
+                            R.Set(pm.plm.Entity, "interactionDisables", 0);
+                            pm.plm.Entity.SetActive(true);
+                            pm.plm.Entity.Enable(true);
+                            try
+                            {
+                                pm.plm.Entity.SetFrozen(false);
+                                pm.plm.Entity.SetInteractionState(true);
+                                pm.plm.Entity.SetVisible(true);
+                            }
+                            catch { }
+                        }
+                    }
+                    R.SetPossibleBoolFields(pm, false,
+                        "lockInput", "inputLocked", "locked", "frozen",
+                        "interactionDisabled", "disableInput", "disableMovement",
+                        "movementLocked", "inElevator", "elevatored", "ruleBreak",
+                        "playerInElevator");
+                    R.SetPossibleBoolFields(pm.plm, false,
+                        "lockInput", "inputLocked", "locked", "frozen",
+                        "interactionDisabled", "disableInput", "disableMovement",
+                        "movementLocked", "inElevator", "elevatored", "playerInElevator");
                 }
-                R.SetPossibleBoolFields(cm, false, "lockInput", "inputLocked", "locked", "gameOver", "ending", "disablePause");
-                InputManager im = FindObjectOfType<InputManager>(); if (im != null) im.ActivateActionSet("InGame"); Time.timeScale = 1f; AudioListener.pause = false;
+
+                R.SetPossibleBoolFields(cm, false,
+                    "lockInput", "inputLocked", "locked", "gameOver", "ending",
+                    "disablePause", "disableInput");
+                BaseGameManager bgm = Singleton<BaseGameManager>.Instance;
+                R.SetPossibleBoolFields(bgm, false,
+                    "lockInput", "inputLocked", "locked", "gameOver", "ending",
+                    "disableInput", "playerInElevator");
+
+                InputManager inputManager = FindObjectOfType<InputManager>();
+                if (inputManager != null)
+                {
+                    R.SetPossibleBoolFields(inputManager, false,
+                        "lockInput", "inputLocked", "locked", "disableInput");
+                    inputManager.ActivateActionSet("InGame");
+                }
+                Time.timeScale = 1f;
+                AudioListener.pause = false;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("UnlockPlayerMovement: " + ex.Message);
+            }
         }
         public void StopAllActiveEvents(EnvironmentController ec)
         {
-            foreach (RandomEvent e in UnityEngine.Object.FindObjectsOfType<RandomEvent>(true))
-            { if (e == null) continue; try { e.StopAllCoroutines(); if (e.Active) e.End(); R.Set(e, "active", false); } catch { } }
-            try { (R.Field(ec, "currentEvents")?.GetValue(ec) as System.Collections.IList)?.Clear(); (R.Field(ec, "currentEventTypes")?.GetValue(ec) as System.Collections.IList)?.Clear(); R.Set(ec, "eventsStarted", false); } catch { }
+            try
+            {
+                if (ec != null)
+                {
+                    try
+                    {
+                        MethodInfo stopEvents = ec.GetType().GetMethod("StopEvents",
+                            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                            null, Type.EmptyTypes, null);
+                        if (stopEvents != null) stopEvents.Invoke(ec, null);
+                    }
+                    catch { }
+                    R.Set(ec, "eventsStarted", false);
+                    R.Set(ec, "surpassedGameTime", 0f);
+                    R.Set(ec, "surpassedRealTime", 0f);
+                    R.Set(ec, "lastTimeWarning", 0);
+                }
+
+                foreach (RandomEvent randomEvent in
+                    UnityEngine.Object.FindObjectsOfType<RandomEvent>(true))
+                {
+                    if (randomEvent == null) continue;
+                    try { randomEvent.StopAllCoroutines(); } catch { }
+                    try { if (randomEvent.Active) randomEvent.End(); } catch { }
+                    R.Set(randomEvent, "active", false);
+                }
+
+                if (ec != null)
+                {
+                    try
+                    {
+                        (R.Field(ec, "currentEvents")?.GetValue(ec)
+                            as System.Collections.IList)?.Clear();
+                        (R.Field(ec, "currentEventTypes")?.GetValue(ec)
+                            as System.Collections.IList)?.Clear();
+                    }
+                    catch { }
+                    try
+                    {
+                        MethodInfo resetEvents = ec.GetType().GetMethod("ResetEvents",
+                            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                            null, Type.EmptyTypes, null);
+                        if (resetEvents != null) resetEvents.Invoke(ec, null);
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("StopAllActiveEvents: " + ex);
+            }
         }
         public void UpdateMiniMapIcons(EnvironmentController ec) { try { ec?.map?.UpdateIcons(); } catch { } }
         public void RestoreLapAfterRestart()
@@ -5395,6 +5876,7 @@ namespace KnoxumsChaosMode
                 try { e.OpenDoor(true); } catch { }
                 DisableGate(e);
                 UnlockElevatorButton(e);
+                try { e.SetState(ElevatorState.OpenForExit); } catch { }
 
                 // Старый fallback следил за нахождением игрока в кабине и мог
                 // отправить его дальше без нажатия настоящей кнопки.
@@ -5407,17 +5889,22 @@ namespace KnoxumsChaosMode
         { foreach (MonoBehaviour m in e.GetComponentsInChildren<MonoBehaviour>(true)) if (m != null && (m.GetType().Name.Contains("Button") || m.name.ToLowerInvariant().Contains("button"))) { m.enabled = true; m.gameObject.SetActive(true); R.SetPossibleBoolFields(m, false, "locked", "disabled", "inactive"); R.SetPossibleBoolFields(m, true, "unlocked", "interactable", "clickable"); } }
         public static void UnlockSpawnElevatorButton(Elevator e) { if (e != null) UnlockElevatorButton(e); }
 
-        // Кнопка больше не запускает промежуточный круг: это делает AllNotebooks.
-        // Здесь сохранён только добровольный выход со второго круга.
+        // В BB+ 0.14 это надёжная точка входа: зелёная кнопка вызывает
+        // Elevator.ButtonPressed, затем нативный FinishLevel вызывает LoadNextLevel.
         public static bool OnElevatorButtonPressed(Elevator e)
         {
             BaseGameManager b = Singleton<BaseGameManager>.Instance;
             ChaosManager cm = ChaosManager.Instance;
             if (e == null || b == null || cm == null || !cm.IsLapsActive) return true;
             if (IsPitstopManager(b)) return true;
+            if (cm.IsLapTransitionInProgress) return false;
+
+            // FinishLevel очищает manager.elevators. Восстанавливаем его из
+            // отдельного снимка — прежний код делал list.Clear(), а затем читал
+            // b.Ec.Elevators, который иногда был тем же самым списком.
+            RepairManagerElevatorList(e, b.Ec);
 
             bool notebooksDone = AllNotebooksReallyDone(b);
-
             if (cm.CurrentLap > 1 && !cm.FloorExitToPitstopCommitted && !notebooksDone)
             {
                 KnoxumsChaosModePlugin.Log.LogInfo(
@@ -5427,12 +5914,74 @@ namespace KnoxumsChaosMode
             }
 
             if (!notebooksDone) return true;
-            if (cm.IsLapTransitionInProgress) return false;
 
-            // На последнем конечном круге ничего не подменяем: ванильная кнопка
-            // закрывает лифт и вызывает обычный маршрут на питстоп/следующий этаж.
-            if (cm.IsLastLap()) cm.CommitFloorExitToPitstop();
+            if (cm.ShouldStartNewLap())
+            {
+                // Не отменяем нативную кнопку: она размораживает/закрывает лифт
+                // обычным путём. Переход перехватит Prefix_LoadNextLevel.
+                KnoxumsChaosModePlugin.Log.LogInfo(
+                    "Laps: elevator button -> new lap " + (cm.CurrentLap + 1) + ".");
+                cm.StartCoroutine(ConfirmLapButtonTransition(b, cm.CurrentLap, 1.5f));
+                return true;
+            }
+
+            // Последний круг должен пройти в настоящий следующий этаж/pitstop.
+            if (cm.IsLastLap())
+            {
+                cm.CommitFloorExitToPitstop();
+                cm.StartCoroutine(ConfirmExit(b, 1.5f));
+                // Не закрываем дверь в Prefix: ButtonPressed проверяет своё
+                // открытое состояние. Нативный FinishLevel закроет её сам.
+            }
             return true;
+        }
+
+        private static IEnumerator ConfirmLapButtonTransition(
+            BaseGameManager manager, int expectedLap, float wait)
+        {
+            while (wait > 0f)
+            {
+                ChaosManager chaos = ChaosManager.Instance;
+                if (manager == null || chaos == null || chaos.CurrentLap != expectedLap
+                    || chaos.IsLapTransitionInProgress) yield break;
+                wait -= Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            ChaosManager current = ChaosManager.Instance;
+            if (manager == null || current == null || current.CurrentLap != expectedLap
+                || !current.ShouldStartNewLap()) yield break;
+            KnoxumsChaosModePlugin.Log.LogWarning(
+                "Laps: native ButtonPressed did not call LoadNextLevel; using fallback.");
+            try { manager.LoadNextLevel(); }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("Laps button fallback: " + ex);
+            }
+        }
+
+        private static void RepairManagerElevatorList(Elevator source, EnvironmentController ec)
+        {
+            if (source == null) return;
+            try
+            {
+                // GetElevators всегда возвращает новый List, поэтому snapshot не
+                // исчезнет, даже если manager и EnvironmentController делят список.
+                List<Elevator> snapshot = GetElevators(ec);
+                object manager = R.Get<object>(source, "manager", null);
+                FieldInfo field = R.Field(manager, "elevators");
+                System.Collections.IList managerList =
+                    field != null ? field.GetValue(manager) as System.Collections.IList : null;
+                if (managerList == null) return;
+                managerList.Clear();
+                for (int i = 0; i < snapshot.Count; i++)
+                    if (snapshot[i] != null) managerList.Add(snapshot[i]);
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogWarning(
+                    "Elevator.ButtonPressed manager repair: " + ex.Message);
+            }
         }
 
         public static void BeginPitstopDeparture(BaseGameManager b, Elevator e) { if (b == null || pitstopExitArmed || loadNextStarted) return; pitstopExitArmed = true; CloseElevatorDoors(e); ChaosManager.Instance?.StartCoroutine(ConfirmExit(b, 1.15f)); }
