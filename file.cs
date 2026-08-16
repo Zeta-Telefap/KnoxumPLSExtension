@@ -5939,6 +5939,11 @@ namespace KnoxumsChaosMode
                 KnoxumsChaosModePlugin.Log.LogInfo(
                     "Laps: elevator button -> current floor lap "
                     + (cm.CurrentLap + 1) + ".");
+
+                // Нативный ButtonPressed отменён, поэтому закрываем дверь сами
+                // до белой вспышки. ResetElevatorsToFloorStart затем откроет
+                // только стартовый лифт нового круга.
+                CloseElevatorDoors(e);
                 cm.StartInstantNewLap(b);
                 return false;
             }
