@@ -1790,7 +1790,8 @@ namespace KnoxumsChaosMode
             {
                 if (ChaosManager.Instance == null || !ChaosManager.Instance.IsLevelReady) return;
                 if (ChaosManager.Instance.IsLapsActive) ChaosManager.Instance.InjectLapsIntoHud(__instance);
-                ChaosManager.Instance.InjectBetaWatermarkIntoHud(__instance);
+                // PUBLIC BETA watermark временно отключён до следующего использования.
+                // ChaosManager.Instance.InjectBetaWatermarkIntoHud(__instance);
             }
             catch { }
         }
@@ -3324,7 +3325,8 @@ namespace KnoxumsChaosMode
             else if (IsGameActive() && !generationBusy) TickClosedElevatorBarriers();
             EnforcePitstopYtp();
             if (IsLapsActive) SyncLapsHudWithNotebooks();
-            if (IsLevelReady) SyncBetaWatermarkWithHud();
+            // PUBLIC BETA watermark временно отключён.
+            // if (IsLevelReady) SyncBetaWatermarkWithHud();
             // Chaos Mode больше не ограничивает скорость NPC каждый кадр.
             // Это ломало естественное ускорение Балди и других персонажей.
         }
@@ -3800,7 +3802,10 @@ namespace KnoxumsChaosMode
             if (!PlayerAndCameraReady()) { StartFunAfterGeneration(); return; }
             IsLevelReady = true;
             try { ElevatorUnlockService.ClearClosedElevatorFrontBarriers(bgm ?? Singleton<BaseGameManager>.Instance); } catch { }
-            AllowFunSettings(); CreateLapsHud(); CreateBetaWatermarkHud(); RefreshSchoolItemPool();
+            AllowFunSettings();
+            CreateLapsHud();
+            // CreateBetaWatermarkHud(); // Сохранено для будущего использования.
+            RefreshSchoolItemPool();
         }
 
         public ItemObject PickSchoolItem(ItemObject exclude)
@@ -3931,7 +3936,9 @@ namespace KnoxumsChaosMode
             if (IsPitstopActive()) { StopFunSettings(); funWaitRoutine = null; yield break; }
             IsLevelReady = true;
             ElevatorUnlockService.ClearClosedElevatorFrontBarriers(Singleton<BaseGameManager>.Instance);
-            AllowFunSettings(); CreateLapsHud(); CreateBetaWatermarkHud();
+            AllowFunSettings();
+            CreateLapsHud();
+            // CreateBetaWatermarkHud(); // Сохранено для будущего использования.
             yield return new WaitForSecondsRealtime(.4f);
             ElevatorUnlockService.ClearClosedElevatorFrontBarriers(Singleton<BaseGameManager>.Instance);
             funWaitRoutine = null;
@@ -4068,7 +4075,8 @@ namespace KnoxumsChaosMode
         public void ActivateSchoolShuffle()
         {
             PopCharSpr(); PopItmSpr(); PopAud(); AttachShufflers(); FSwapNpc(); FSwapItm();
-            FShufTMP(); ShuffleControls(); CreateLapsHud(); CreateBetaWatermarkHud();
+            FShufTMP(); ShuffleControls(); CreateLapsHud();
+            // CreateBetaWatermarkHud(); // Сохранено для будущего использования.
             ApplyCurrentLapSpeedBoost(); UpdateLapsHud();
             if (lapFadeOutPending) lapFadeOutPending = false;
         }
