@@ -1340,7 +1340,17 @@ namespace KnoxumsChaosMode
                     ChaosManager.Instance.RestoreLapAfterRestart();
 
                     if (ElevatorUnlockService.IsPitstopManager(__instance))
+                    {
                         ChaosManager.Instance.ClearFloorExitCommit();
+                        ChaosManager.Instance.EndFloorIntro();
+                    }
+                    else
+                    {
+                        // Sound Shuffle не должен подменять реплики отсчёта:
+                        // AudioManager ждёт длину клипа, и длинная случайная речь
+                        // растягивала countdown на десятки секунд.
+                        ChaosManager.Instance.BeginFloorIntroAudioProtection();
+                    }
                     ChaosManager.Instance.ApplyFunAfterPostGen(__instance);
                 }
                 if (ChaosManager.Instance != null && ChaosManager.Instance.IsChaosModeActive)
@@ -1359,6 +1369,10 @@ namespace KnoxumsChaosMode
             try
             {
                 if (ChaosManager.Instance == null) return;
+                if (ElevatorUnlockService.IsPitstopManager(__instance))
+                    ChaosManager.Instance.EndFloorIntro();
+                else
+                    ChaosManager.Instance.BeginFloorIntroAudioProtection();
                 ChaosManager.Instance.CaptureFloorYtpStart();
                 ChaosManager.Instance.ActivateSchoolShuffle();
                 if (ChaosManager.Instance.IsBuildersErrorActive) ChaosManager.Instance.ClearMapDiscovery(__instance);
@@ -1673,9 +1687,18 @@ namespace KnoxumsChaosMode
 
         private static bool SkipAudio(AudioClip c)
         {
-            if (ChaosManager.Instance == null || !ChaosManager.Instance.IsLevelReady
-                || !ChaosManager.Instance.IsSoundsShuffleActive || c == null || !ChaosManager.Instance.IsInGame()) return true;
+            ChaosManager chaos = ChaosManager.Instance;
+            if (chaos == null || !chaos.IsLevelReady || !chaos.IsSoundsShuffleActive
+                || c == null || !chaos.IsInGame()) return true;
+
+            // Countdown/intro должен сохранять оригинальную длину клипов.
+            // Иначе AudioManager ждёт окончание случайного длинного звука и
+            // задерживает весь отсчёт Балди.
+            if (chaos.FloorIntroActive) return true;
+
             string l = c.name.ToLowerInvariant();
+            if (l.Contains("countdown") || (l.Contains("bal") && l.Contains("count"))
+                || (l.Contains("bal") && l.Contains("intro"))) return true;
             return l.Contains("elv_buzz") || l.Contains("pause") || l.Contains("menu") || l.Contains("click")
                 || l.Contains("hover") || l.Contains("select") || l.Contains("cursor");
         }
@@ -3563,6 +3586,7 @@ namespace KnoxumsChaosMode
             if (pitstopYtpEnforce <= 0f) pitstopYtpCorrect = int.MinValue;
         }
 
+        public void BeginFloorIntroAudioProtection() { floorIntroActive = true; }
         public void EndFloorIntro() { floorIntroActive = false; }
         public void StartFloorIntro(BaseGameManager bgm)
         {
@@ -4149,7 +4173,10 @@ namespace KnoxumsChaosMode
             if (original == null) return null;
             string n = original.name.ToLowerInvariant();
             if (n.Contains("elv_buzz") || n.Contains("pause") || n.Contains("menu") || n.Contains("click")
-                || n.Contains("hover") || n.Contains("select") || n.Contains("cursor") || !IsLevelReady || IsPaused())
+                || n.Contains("hover") || n.Contains("select") || n.Contains("cursor")
+                || n.Contains("countdown") || (n.Contains("bal") && n.Contains("count"))
+                || (n.Contains("bal") && n.Contains("intro"))
+                || FloorIntroActive || !IsLevelReady || IsPaused())
                 return original;
             if (audM.TryGetValue(original, out AudioClip mapped) && mapped != null) return mapped;
             if (!audP.Contains(original)) audP.Add(original);
@@ -5828,7 +5855,30 @@ namespace KnoxumsChaosMode
         { if (b == null) return false; try { return b.GetType().Name.ToLowerInvariant().Contains("pitstop") || b.name.ToLowerInvariant().Contains("pitstop") || UnityEngine.SceneManagement.SceneManager.GetActiveScene().name.ToLowerInvariant().Contains("pitstop"); } catch { return false; } }
         public static void KeepPitstopElevatorsOpen(BaseGameManager b)
         {
-            if (b == null) return; foreach (Elevator e in GetElevators(b.Ec)) { if (e == null) continue; bool open = R.Get<bool>(e, "doorIsOpen", false); R.Set(e, "open", true); R.Set(e, "doorIsOpen", true); if (!open) try { e.OpenDoor(true); } catch { } DisableGate(e); }
+            if (b == null || pitstopExitArmed) return;
+            foreach (Elevator e in GetElevators(b.Ec))
+            {
+                if (e == null) continue;
+                bool open = R.Get<bool>(e, "doorIsOpen", false);
+                R.Set(e, "open", true);
+                R.Set(e, "doorIsOpen", true);
+                if (!open) try { e.OpenDoor(true); } catch { }
+                DisableGate(e);
+                ClearPocketOnly(e);
+
+                // Открытой двери недостаточно: после перехода Baldi-coward
+                // ColliderGroup/InsideCollider иногда остаются выключенными, и
+                // игрок физически не может войти в лифт Pitstop.
+                try { if (e.ColliderGroup != null) e.ColliderGroup.Enable(true); } catch { }
+                try
+                {
+                    ColliderGroup inside = GetInsideCollider(e);
+                    if (inside != null) inside.Enable(true);
+                }
+                catch { }
+                UnlockElevatorButton(e);
+            }
+            try { Physics.SyncTransforms(); } catch { }
         }
         public static void ClearClosedElevatorFrontBarriers(BaseGameManager b)
         { if (b == null) return; foreach (Elevator e in GetElevators(b.Ec)) if (e != null) ClearPocketOnly(e); }
@@ -5872,9 +5922,18 @@ namespace KnoxumsChaosMode
         public static bool OnElevatorButtonPressed(Elevator e)
         {
             BaseGameManager b = Singleton<BaseGameManager>.Instance;
+            if (e == null || b == null) return true;
+
+            // Pitstop обрабатывается независимо от Laps/Baldi-coward. Сначала
+            // разрешаем двери закрыть, затем оставляем нативный ButtonPressed.
+            if (IsPitstopManager(b))
+            {
+                BeginPitstopDeparture(b, e);
+                return true;
+            }
+
             ChaosManager cm = ChaosManager.Instance;
-            if (e == null || b == null || cm == null || !cm.IsLapsActive) return true;
-            if (IsPitstopManager(b)) return true;
+            if (cm == null || !cm.IsLapsActive) return true;
             if (cm.IsLapTransitionInProgress) return false;
 
             // FinishLevel очищает manager.elevators. Восстанавливаем его из
@@ -5946,7 +6005,14 @@ namespace KnoxumsChaosMode
             }
         }
 
-        public static void BeginPitstopDeparture(BaseGameManager b, Elevator e) { if (b == null || pitstopExitArmed || loadNextStarted) return; pitstopExitArmed = true; CloseElevatorDoors(e); ChaosManager.Instance?.StartCoroutine(ConfirmExit(b, 1.15f)); }
+        public static void BeginPitstopDeparture(BaseGameManager b, Elevator e)
+        {
+            if (b == null || pitstopExitArmed || loadNextStarted) return;
+            pitstopExitArmed = true;
+            // Не закрываем дверь до оригинального ButtonPressed: он проверяет её
+            // открытое состояние. После armed патч больше не блокирует нативный Close.
+            ChaosManager.Instance?.StartCoroutine(ConfirmExit(b, 1.15f));
+        }
         public static void HandleElevatorExitButton(BaseGameManager b, Elevator e) { if (b == null) return; CloseElevatorDoors(e); if (ChaosManager.Instance?.IsLapsActive == true && ChaosManager.Instance.IsLastLap()) ChaosManager.Instance.CommitFloorExitToPitstop(); ChaosManager.Instance?.StartCoroutine(ConfirmExit(b, .6f)); }
         private static IEnumerator ConfirmExit(BaseGameManager b, float wait) { while (wait > 0 && !loadNextStarted) { wait -= Time.unscaledDeltaTime; yield return null; } if (!loadNextStarted) ForceLoadNext(b); }
         public static void CloseElevatorDoors(Elevator e) { if (e == null) return; try { e.OpenDoor(false); } catch { } R.Set(e, "open", false); R.Set(e, "doorIsOpen", false); Collider c = R.Get<Collider>(e, "gateCollider", null); if (c != null) c.enabled = true; }
