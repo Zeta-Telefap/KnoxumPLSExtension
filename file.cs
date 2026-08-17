@@ -1345,9 +1345,6 @@ namespace KnoxumsChaosMode
                         ChaosManager.Instance.EndFloorIntro();
                     }
                     ChaosManager.Instance.ApplyFunAfterPostGen(__instance);
-                    // Визуальный ролл запускается сразу после Post Gen; корутина
-                    // сама дождётся появления игрового HUD.
-                    GameplayModifierManager.Instance?.OnFloorBeginPlay(__instance);
                 }
                 if (ChaosManager.Instance != null && ChaosManager.Instance.IsChaosModeActive)
                 {
@@ -1376,6 +1373,12 @@ namespace KnoxumsChaosMode
                     ChaosManager.Instance.StopFunSettings();
                     ElevatorUnlockService.KeepPitstopElevatorsOpen(__instance);
                     ChaosManager.Instance.ShowPitstopChaosReminder();
+                }
+                else
+                {
+                    // Планшет запускается только после появления стартового
+                    // экрана лифта; внутри корутины дополнительно ждём закрытия дверей.
+                    GameplayModifierManager.Instance?.OnFloorBeginPlay(__instance);
                 }
             }
             catch { }
@@ -3826,6 +3829,29 @@ namespace KnoxumsChaosMode
             }
             if (canvas == null) { revealRoutine = null; yield break; }
 
+            // Сначала на экране должен появиться стартовый лифт, затем его двери
+            // должны перейти в закрытое состояние. Только после этого поднимаем планшет.
+            Elevator spawn = null;
+            bool doorsClosed = false;
+            float elevatorWait = 12f;
+            while (elevatorWait > 0f)
+            {
+                spawn = FindSpawnElevator(bgm);
+                if (spawn != null && !DoorOpen(spawn))
+                {
+                    doorsClosed = true;
+                    break;
+                }
+                elevatorWait -= Time.unscaledDeltaTime;
+                yield return null;
+            }
+            if (doorsClosed)
+            {
+                float settle = .2f;
+                while (settle > 0f)
+                { settle -= Time.unscaledDeltaTime; yield return null; }
+            }
+
             revealObject = BuildClipboardDisplay(canvas.transform, true);
             if (revealObject == null) { revealRoutine = null; yield break; }
             RectTransform rect = revealObject.GetComponent<RectTransform>();
@@ -3842,12 +3868,17 @@ namespace KnoxumsChaosMode
             }
             if (rect != null) rect.anchoredPosition = shown;
 
-            Elevator spawn = FindSpawnElevator(bgm);
+            if (spawn == null) spawn = FindSpawnElevator(bgm);
             float safety = 90f;
             float noElevatorHold = 4f;
+            // Если конкретная версия игры не дала увидеть закрытое состояние,
+            // всё равно держим тестовый визуал хотя бы две секунды.
+            float minimumVisible = doorsClosed ? 0f : 2f;
             while (safety > 0f && revealObject != null)
             {
-                if (spawn == null)
+                if (minimumVisible > 0f)
+                    minimumVisible -= Time.unscaledDeltaTime;
+                else if (spawn == null)
                 {
                     noElevatorHold -= Time.unscaledDeltaTime;
                     if (noElevatorHold <= 0f) break;
