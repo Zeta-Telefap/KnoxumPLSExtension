@@ -3907,12 +3907,16 @@ namespace KnoxumsChaosMode
             }
 
             TMP_FontAsset font = FindComicFont();
-            TextMeshProUGUI title = CreateRuntimeText(root.transform, "ModifiersTitle",
+            // Comic Sans title uses the game's usual hard shadow: a second
+            // black copy shifted slightly down and right, not TMP outline.
+            CreateRuntimeText(root.transform, "ModifiersTitleShadow",
+                "Modifiers:", font, 24f, Color.black,
+                TextAlignmentOptions.Center, new Vector2(2f, 186f),
+                new Vector2(220f, 34f));
+            CreateRuntimeText(root.transform, "ModifiersTitle",
                 "Modifiers:", font, 24f, Color.white,
                 TextAlignmentOptions.Center, new Vector2(0f, 188f),
                 new Vector2(220f, 34f));
-            title.outlineColor = Color.black;
-            title.outlineWidth = .18f;
 
             List<KeyValuePair<GameplayModifierId, int>> grouped = GroupForDisplay();
             for (int i = 0; i < grouped.Count && i < 5; i++)
@@ -5332,18 +5336,30 @@ namespace KnoxumsChaosMode
             rect.anchorMax = new Vector2(.94f, .96f);
             rect.offsetMin = rect.offsetMax = Vector2.zero;
 
-            TextMeshProUGUI text = pitstopReminderObject.AddComponent<TextMeshProUGUI>();
             TMP_FontAsset font = GetComicSansFont();
-            if (font != null) text.font = font;
-            text.text = "<b>JUST A REMINDER!</b> All applied chaos features are intended to disable in the pitstop, they are only working in the school!";
-            text.fontSize = 24f;
-            text.color = Color.yellow;
-            text.alignment = TextAlignmentOptions.Center;
-            text.enableWordWrapping = true;
-            text.overflowMode = TextOverflowModes.Overflow;
-            text.raycastTarget = false;
-            text.outlineColor = Color.black;
-            text.outlineWidth = .16f;
+            string reminder = "<b>JUST A REMINDER!</b> All applied chaos features are intended to disable in the pitstop, they are only working in the school!";
+            Color[] layerColors = { Color.black, Color.yellow };
+            Vector2[] layerOffsets = { new Vector2(2f, -2f), Vector2.zero };
+            string[] layerNames = { "ReminderShadow", "ReminderText" };
+            for (int i = 0; i < layerColors.Length; i++)
+            {
+                GameObject layer = new GameObject(layerNames[i], typeof(RectTransform));
+                layer.transform.SetParent(pitstopReminderObject.transform, false);
+                RectTransform layerRect = layer.GetComponent<RectTransform>();
+                layerRect.anchorMin = Vector2.zero;
+                layerRect.anchorMax = Vector2.one;
+                layerRect.offsetMin = layerOffsets[i];
+                layerRect.offsetMax = layerOffsets[i];
+                TextMeshProUGUI text = layer.AddComponent<TextMeshProUGUI>();
+                if (font != null) text.font = font;
+                text.text = reminder;
+                text.fontSize = 24f;
+                text.color = layerColors[i];
+                text.alignment = TextAlignmentOptions.Center;
+                text.enableWordWrapping = true;
+                text.overflowMode = TextOverflowModes.Overflow;
+                text.raycastTarget = false;
+            }
             CanvasGroup group = pitstopReminderObject.GetComponent<CanvasGroup>();
             group.interactable = false;
             group.blocksRaycasts = false;
