@@ -1344,13 +1344,6 @@ namespace KnoxumsChaosMode
                         ChaosManager.Instance.ClearFloorExitCommit();
                         ChaosManager.Instance.EndFloorIntro();
                     }
-                    else
-                    {
-                        // Sound Shuffle не должен подменять реплики отсчёта:
-                        // AudioManager ждёт длину клипа, и длинная случайная речь
-                        // растягивала countdown на десятки секунд.
-                        ChaosManager.Instance.BeginFloorIntroAudioProtection();
-                    }
                     ChaosManager.Instance.ApplyFunAfterPostGen(__instance);
                 }
                 if (ChaosManager.Instance != null && ChaosManager.Instance.IsChaosModeActive)
@@ -1371,8 +1364,6 @@ namespace KnoxumsChaosMode
                 if (ChaosManager.Instance == null) return;
                 if (ElevatorUnlockService.IsPitstopManager(__instance))
                     ChaosManager.Instance.EndFloorIntro();
-                else
-                    ChaosManager.Instance.BeginFloorIntroAudioProtection();
                 ChaosManager.Instance.CaptureFloorYtpStart();
                 ChaosManager.Instance.ActivateSchoolShuffle();
                 if (ChaosManager.Instance.IsBuildersErrorActive) ChaosManager.Instance.ClearMapDiscovery(__instance);
@@ -1687,18 +1678,9 @@ namespace KnoxumsChaosMode
 
         private static bool SkipAudio(AudioClip c)
         {
-            ChaosManager chaos = ChaosManager.Instance;
-            if (chaos == null || !chaos.IsLevelReady || !chaos.IsSoundsShuffleActive
-                || c == null || !chaos.IsInGame()) return true;
-
-            // Countdown/intro должен сохранять оригинальную длину клипов.
-            // Иначе AudioManager ждёт окончание случайного длинного звука и
-            // задерживает весь отсчёт Балди.
-            if (chaos.FloorIntroActive) return true;
-
+            if (ChaosManager.Instance == null || !ChaosManager.Instance.IsLevelReady
+                || !ChaosManager.Instance.IsSoundsShuffleActive || c == null || !ChaosManager.Instance.IsInGame()) return true;
             string l = c.name.ToLowerInvariant();
-            if (l.Contains("countdown") || (l.Contains("bal") && l.Contains("count"))
-                || (l.Contains("bal") && l.Contains("intro"))) return true;
             return l.Contains("elv_buzz") || l.Contains("pause") || l.Contains("menu") || l.Contains("click")
                 || l.Contains("hover") || l.Contains("select") || l.Contains("cursor");
         }
@@ -1817,6 +1799,92 @@ namespace KnoxumsChaosMode
                 // ChaosManager.Instance.InjectBetaWatermarkIntoHud(__instance);
             }
             catch { }
+        }
+    }
+
+    // В Sound Shuffle игровые корутины не должны ждать окончания случайно
+    // выбранного клипа. Сам звук продолжает играть, но свойства ожидания
+    // AudioManager сообщают, что очередь уже не блокирует игровой сценарий.
+    [HarmonyPatch]
+    public static class SoundShuffleNoAudioWaitPatch
+    {
+        private static readonly List<MethodBase> waitGetters = FindWaitGetters();
+
+        static bool Prepare()
+        {
+            try
+            {
+                KnoxumsChaosModePlugin.Log.LogInfo(
+                    "Sound Shuffle no-wait: hooked " + waitGetters.Count
+                    + " AudioManager playing getters.");
+            }
+            catch { }
+            return waitGetters.Count > 0;
+        }
+
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            for (int i = 0; i < waitGetters.Count; i++)
+                yield return waitGetters[i];
+        }
+
+        private static List<MethodBase> FindWaitGetters()
+        {
+            List<MethodBase> result = new List<MethodBase>();
+            HashSet<MethodBase> seen = new HashSet<MethodBase>();
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public
+                | BindingFlags.NonPublic;
+
+            try
+            {
+                PropertyInfo[] properties = typeof(AudioManager).GetProperties(flags);
+                for (int i = 0; i < properties.Length; i++)
+                {
+                    PropertyInfo property = properties[i];
+                    if (property == null || property.PropertyType != typeof(bool)) continue;
+                    string name = property.Name.ToLowerInvariant();
+                    if (!name.Contains("playing")
+                        || (!name.Contains("audio") && !name.Contains("queue")
+                            && !name.Contains("sound"))) continue;
+                    MethodInfo getter = property.GetGetMethod(true);
+                    if (getter != null && seen.Add(getter)) result.Add(getter);
+                }
+
+                MethodInfo[] methods = typeof(AudioManager).GetMethods(flags);
+                for (int i = 0; i < methods.Length; i++)
+                {
+                    MethodInfo method = methods[i];
+                    if (method == null || method.IsSpecialName
+                        || method.ReturnType != typeof(bool)
+                        || method.GetParameters().Length != 0) continue;
+                    string name = method.Name.ToLowerInvariant();
+                    if (!name.Contains("playing")
+                        || (!name.Contains("audio") && !name.Contains("queue")
+                            && !name.Contains("sound"))) continue;
+                    if (seen.Add(method)) result.Add(method);
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        internal static bool Active
+        {
+            get
+            {
+                try
+                {
+                    ChaosManager chaos = ChaosManager.Instance;
+                    return chaos != null && chaos.IsSoundsShuffleActive
+                        && chaos.IsLevelReady && !chaos.IsPaused();
+                }
+                catch { return false; }
+            }
+        }
+
+        static void Postfix(ref bool __result)
+        {
+            if (Active) __result = false;
         }
     }
 
@@ -3586,7 +3654,6 @@ namespace KnoxumsChaosMode
             if (pitstopYtpEnforce <= 0f) pitstopYtpCorrect = int.MinValue;
         }
 
-        public void BeginFloorIntroAudioProtection() { floorIntroActive = true; }
         public void EndFloorIntro() { floorIntroActive = false; }
         public void StartFloorIntro(BaseGameManager bgm)
         {
@@ -4173,10 +4240,7 @@ namespace KnoxumsChaosMode
             if (original == null) return null;
             string n = original.name.ToLowerInvariant();
             if (n.Contains("elv_buzz") || n.Contains("pause") || n.Contains("menu") || n.Contains("click")
-                || n.Contains("hover") || n.Contains("select") || n.Contains("cursor")
-                || n.Contains("countdown") || (n.Contains("bal") && n.Contains("count"))
-                || (n.Contains("bal") && n.Contains("intro"))
-                || FloorIntroActive || !IsLevelReady || IsPaused())
+                || n.Contains("hover") || n.Contains("select") || n.Contains("cursor") || !IsLevelReady || IsPaused())
                 return original;
             if (audM.TryGetValue(original, out AudioClip mapped) && mapped != null) return mapped;
             if (!audP.Contains(original)) audP.Add(original);
@@ -5692,7 +5756,14 @@ namespace KnoxumsChaosMode
         private void OnCollision(RaycastHit hit)
         { if (locked || hit.collider == null || (layerMask != null && !layerMask.Contains(hit.collider.gameObject.layer))) return; locked = true; force = initialForce; initialDistance = Vector3.Distance(transform.position, baldi.transform.position); navAnchor = NavMesh.SamplePosition(hit.point, out NavMeshHit h, 3f, NavMesh.AllAreas) ? h.position : hit.point; entity?.SetFrozen(true); if (audClang != null) audMan?.PlaySingle(audClang); motorAudio?.Play(); if (cracks != null) cracks.gameObject.SetActive(true); }
         private IEnumerator EndDelay() { yield return new WaitForSeconds(.25f); EndNow(); }
-        private IEnumerator WaitAudio() { float timeout = 4f; while (timeout > 0f && audMan?.audioDevice != null && audMan.audioDevice.isPlaying) { timeout -= Time.unscaledDeltaTime; yield return null; } EndNow(); }
+        private IEnumerator WaitAudio()
+        {
+            if (SoundShuffleNoAudioWaitPatch.Active) { EndNow(); yield break; }
+            float timeout = 4f;
+            while (timeout > 0f && audMan?.audioDevice != null && audMan.audioDevice.isPlaying)
+            { timeout -= Time.unscaledDeltaTime; yield return null; }
+            EndNow();
+        }
         private void EndNow() { if (ended) return; ended = true; try { if (entity != null) entity.OnEntityMoveInitialCollision -= OnCollision; } catch { } controller?.SetHookPullActive(false); Destroy(gameObject); }
         private void OnDestroy() { try { if (entity != null) entity.OnEntityMoveInitialCollision -= OnCollision; } catch { } controller?.SetHookPullActive(false); }
     }
