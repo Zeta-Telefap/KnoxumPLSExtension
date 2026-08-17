@@ -1713,8 +1713,10 @@ namespace KnoxumsChaosMode
             }
             try
             {
+                AudioClip original = value;
                 value = ChaosManager.Instance.GetShuffledAudioClip(value);
-                SoundShuffleDetachedPlaybackPatch.Mark(__instance, value);
+                SoundShuffleDetachedPlaybackPatch.Mark(
+                    __instance, value, original != null ? original.length : 0f);
             }
             catch { SoundShuffleDetachedPlaybackPatch.Unmark(__instance); }
         }
@@ -1815,9 +1817,9 @@ namespace KnoxumsChaosMode
         }
     }
 
-    // В Sound Shuffle игровые корутины не должны ждать окончания случайно
-    // выбранного клипа. Сам звук продолжает играть, но свойства ожидания
-    // AudioManager сообщают, что очередь уже не блокирует игровой сценарий.
+    // В Sound Shuffle игровые корутины не ждут фактической длины случайного
+    // клипа. Для gameplay сохраняется виртуальное время исходного звука, поэтому
+    // отсчёт не задерживается, но штатные кулдауны также не исчезают.
     [HarmonyPatch]
     public static class SoundShuffleNoAudioWaitPatch
     {
@@ -1895,9 +1897,16 @@ namespace KnoxumsChaosMode
             }
         }
 
-        static void Postfix(ref bool __result)
+        static void Postfix(AudioManager __instance, ref bool __result)
         {
-            if (Active) __result = false;
+            if (!Active) return;
+            if (SoundShuffleDetachedPlaybackPatch.TryGetVirtualPlaying(
+                __instance, out bool virtualPlaying))
+            {
+                // Сохраняем ожидание очереди и исходный gameplay-cooldown, но
+                // не ждём фактическую длину случайного клипа.
+                __result = __result || virtualPlaying;
+            }
         }
     }
 
@@ -1912,6 +1921,8 @@ namespace KnoxumsChaosMode
         {
             public AudioSource source;
             public AudioClip clip;
+            public float originalDuration;
+            public float virtualWaitUntil;
         }
 
         private static readonly Dictionary<int, MarkedSource> marked =
@@ -1944,14 +1955,18 @@ namespace KnoxumsChaosMode
             return !TryPlayDetached(__instance);
         }
 
-        internal static void Mark(AudioSource source, AudioClip clip)
+        internal static void Mark(AudioSource source, AudioClip clip, float originalDuration)
         {
             if (source == null || clip == null) return;
-            marked[source.GetInstanceID()] = new MarkedSource
+            int id = source.GetInstanceID();
+            if (!marked.TryGetValue(id, out MarkedSource entry)
+                || entry == null || entry.source != source)
             {
-                source = source,
-                clip = clip
-            };
+                entry = new MarkedSource { source = source };
+                marked[id] = entry;
+            }
+            entry.clip = clip;
+            entry.originalDuration = Mathf.Max(0f, originalDuration);
         }
 
         internal static void Unmark(AudioSource source)
@@ -1963,6 +1978,22 @@ namespace KnoxumsChaosMode
         {
             marked.Clear();
             bypassRemap = false;
+        }
+
+        internal static bool TryGetVirtualPlaying(AudioManager manager, out bool playing)
+        {
+            playing = false;
+            if (manager == null || manager.audioDevice == null) return false;
+            AudioSource source = manager.audioDevice;
+            int id = source.GetInstanceID();
+            if (!marked.TryGetValue(id, out MarkedSource entry)
+                || entry == null || entry.source != source)
+            {
+                marked.Remove(id);
+                return false;
+            }
+            playing = Time.unscaledTime < entry.virtualWaitUntil;
+            return true;
         }
 
         private static bool TryPlayDetached(AudioSource source)
@@ -2010,6 +2041,8 @@ namespace KnoxumsChaosMode
                 bypassRemap = false;
 
                 float pitch = Mathf.Max(.01f, Mathf.Abs(detached.pitch));
+                float virtualStart = Mathf.Max(Time.unscaledTime, entry.virtualWaitUntil);
+                entry.virtualWaitUntil = virtualStart + entry.originalDuration / pitch;
                 UnityEngine.Object.Destroy(holder,
                     Mathf.Max(.1f, detached.clip.length / pitch + .25f));
                 return true;
@@ -2017,6 +2050,7 @@ namespace KnoxumsChaosMode
             catch (Exception ex)
             {
                 bypassRemap = false;
+                Unmark(source);
                 if (holder != null) UnityEngine.Object.Destroy(holder);
                 try
                 {
@@ -5900,10 +5934,18 @@ namespace KnoxumsChaosMode
         private IEnumerator EndDelay() { yield return new WaitForSeconds(.25f); EndNow(); }
         private IEnumerator WaitAudio()
         {
-            if (SoundShuffleNoAudioWaitPatch.Active) { EndNow(); yield break; }
             float timeout = 4f;
-            while (timeout > 0f && audMan?.audioDevice != null && audMan.audioDevice.isPlaying)
-            { timeout -= Time.unscaledDeltaTime; yield return null; }
+            while (timeout > 0f)
+            {
+                bool playing = audMan?.audioDevice != null && audMan.audioDevice.isPlaying;
+                if (SoundShuffleNoAudioWaitPatch.Active
+                    && SoundShuffleDetachedPlaybackPatch.TryGetVirtualPlaying(
+                        audMan, out bool virtualPlaying))
+                    playing = virtualPlaying;
+                if (!playing) break;
+                timeout -= Time.unscaledDeltaTime;
+                yield return null;
+            }
             EndNow();
         }
         private void EndNow() { if (ended) return; ended = true; try { if (entity != null) entity.OnEntityMoveInitialCollision -= OnCollision; } catch { } controller?.SetHookPullActive(false); Destroy(gameObject); }
