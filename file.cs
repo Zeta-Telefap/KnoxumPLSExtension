@@ -1345,6 +1345,9 @@ namespace KnoxumsChaosMode
                         ChaosManager.Instance.EndFloorIntro();
                     }
                     ChaosManager.Instance.ApplyFunAfterPostGen(__instance);
+                    // Post Gen заканчивается, пока между этажами ещё показан
+                    // отдельный Elevator Screen. Планшет рисуется именно поверх него.
+                    GameplayModifierManager.Instance?.OnFloorPostGeneration(__instance);
                 }
                 if (ChaosManager.Instance != null && ChaosManager.Instance.IsChaosModeActive)
                 {
@@ -1376,9 +1379,9 @@ namespace KnoxumsChaosMode
                 }
                 else
                 {
-                    // Планшет запускается только после появления стартового
-                    // экрана лифта; внутри корутины дополнительно ждём закрытия дверей.
-                    GameplayModifierManager.Instance?.OnFloorBeginPlay(__instance);
+                    // BeginPlay означает, что Elevator Screen заканчивает работу
+                    // и открывает путь в школу. Это сигнал планшету уехать вниз.
+                    GameplayModifierManager.Instance?.NotifyBeginPlay(__instance);
                 }
             }
             catch { }
@@ -3624,6 +3627,7 @@ namespace KnoxumsChaosMode
         private bool runSetCreated;
         private string selectedFloorKey = "";
         private bool revealPending;
+        private bool beginPlayReached;
         private GameplayModifierMode selectedMode;
         private int selectedRollCount;
         private Coroutine revealRoutine;
@@ -3694,6 +3698,7 @@ namespace KnoxumsChaosMode
             runSetCreated = false;
             selectedFloorKey = "";
             revealPending = false;
+            beginPlayReached = false;
             StopReveal();
             DestroyPauseDisplay();
         }
@@ -3794,7 +3799,7 @@ namespace KnoxumsChaosMode
             catch { return false; }
         }
 
-        public void OnFloorBeginPlay(BaseGameManager bgm)
+        public void OnFloorPostGeneration(BaseGameManager bgm)
         {
             if (!Enabled || bgm == null || ElevatorUnlockService.IsPitstopManager(bgm))
                 return;
@@ -3804,55 +3809,58 @@ namespace KnoxumsChaosMode
             EnsureSetForCurrentFloor();
             if (activeRolls.Count == 0) return;
             revealPending = false;
+            beginPlayReached = false;
             StopReveal();
             try
             {
                 KnoxumsChaosModePlugin.Log.LogInfo(
-                    "Gameplay Modifiers visual reveal started with "
+                    "Gameplay Modifiers Elevator Screen reveal started with "
                     + activeRolls.Count + " rolls.");
             }
             catch { }
             revealRoutine = StartCoroutine(RevealRoutine(bgm));
         }
 
+        public void NotifyBeginPlay(BaseGameManager bgm)
+        {
+            if (bgm != null && !ElevatorUnlockService.IsPitstopManager(bgm))
+                beginPlayReached = true;
+        }
+
         private IEnumerator RevealRoutine(BaseGameManager bgm)
         {
-            Canvas canvas = null;
-            float findTime = 10f;
-            while (findTime > 0f && canvas == null)
+            // Это не выход из стартового лифта внутри школы. Ищем отдельный
+            // Elevator Screen, который показывается между Pitstop и новым этажом.
+            Transform elevatorScreenMarker = null;
+            Transform displayParent = null;
+            float findTime = 12f;
+            while (findTime > 0f && displayParent == null)
             {
-                try { canvas = Singleton<CoreGameManager>.Instance?.GetHud(0)?.Canvas(); }
-                catch { }
-                if (canvas != null) break;
+                displayParent = FindElevatorScreenParent(out elevatorScreenMarker);
+                if (displayParent != null) break;
                 findTime -= Time.unscaledDeltaTime;
                 yield return null;
             }
-            if (canvas == null) { revealRoutine = null; yield break; }
 
-            // Сначала на экране должен появиться стартовый лифт, затем его двери
-            // должны перейти в закрытое состояние. Только после этого поднимаем планшет.
-            Elevator spawn = null;
-            bool doorsClosed = false;
-            float elevatorWait = 12f;
-            while (elevatorWait > 0f)
+            // Fallback нужен только для теста на версиях с другим именем объекта.
+            if (displayParent == null)
             {
-                spawn = FindSpawnElevator(bgm);
-                if (spawn != null && !DoorOpen(spawn))
+                try
                 {
-                    doorsClosed = true;
-                    break;
+                    displayParent = Singleton<CoreGameManager>.Instance?
+                        .GetHud(0)?.Canvas()?.transform;
                 }
-                elevatorWait -= Time.unscaledDeltaTime;
-                yield return null;
+                catch { }
             }
-            if (doorsClosed)
-            {
-                float settle = .2f;
-                while (settle > 0f)
-                { settle -= Time.unscaledDeltaTime; yield return null; }
-            }
+            if (displayParent == null) { revealRoutine = null; yield break; }
 
-            revealObject = BuildClipboardDisplay(canvas.transform, true);
+            // Post Gen вызывается после появления Elevator Screen и закрытия его
+            // дверей; небольшой settle не даёт планшету наложиться на последний кадр.
+            float settle = .2f;
+            while (settle > 0f)
+            { settle -= Time.unscaledDeltaTime; yield return null; }
+
+            revealObject = BuildClipboardDisplay(displayParent, true);
             if (revealObject == null) { revealRoutine = null; yield break; }
             RectTransform rect = revealObject.GetComponent<RectTransform>();
             Vector2 shown = new Vector2(10f, -8f);
@@ -3868,22 +3876,16 @@ namespace KnoxumsChaosMode
             }
             if (rect != null) rect.anchoredPosition = shown;
 
-            if (spawn == null) spawn = FindSpawnElevator(bgm);
             float safety = 90f;
-            float noElevatorHold = 4f;
-            // Если конкретная версия игры не дала увидеть закрытое состояние,
-            // всё равно держим тестовый визуал хотя бы две секунды.
-            float minimumVisible = doorsClosed ? 0f : 2f;
+            float minimumVisible = 1f;
             while (safety > 0f && revealObject != null)
             {
                 if (minimumVisible > 0f)
                     minimumVisible -= Time.unscaledDeltaTime;
-                else if (spawn == null)
-                {
-                    noElevatorHold -= Time.unscaledDeltaTime;
-                    if (noElevatorHold <= 0f) break;
-                }
-                else if (DoorOpen(spawn)) break;
+                else if (beginPlayReached
+                    || (elevatorScreenMarker != null
+                        && !elevatorScreenMarker.gameObject.activeInHierarchy))
+                    break;
                 safety -= Time.unscaledDeltaTime;
                 yield return null;
             }
@@ -3901,33 +3903,54 @@ namespace KnoxumsChaosMode
             revealRoutine = null;
         }
 
-        private static bool DoorOpen(Elevator elevator)
+        private static Transform FindElevatorScreenParent(out Transform marker)
         {
-            if (elevator == null) return false;
-            return R.Get<bool>(elevator, "doorIsOpen",
-                R.Get<bool>(elevator, "open", false));
-        }
-
-        private static Elevator FindSpawnElevator(BaseGameManager bgm)
-        {
-            if (bgm == null || bgm.Ec == null) return null;
-            List<Elevator> elevators = ElevatorUnlockService.GetElevators(bgm.Ec);
-            for (int i = 0; i < elevators.Count; i++)
+            marker = null;
+            try
             {
-                Elevator elevator = elevators[i];
-                if (elevator == null) continue;
-                try
+                RectTransform[] rects = Resources.FindObjectsOfTypeAll<RectTransform>();
+                for (int i = 0; i < rects.Length; i++)
                 {
-                    PropertyInfo property = elevator.GetType().GetProperty("IsSpawn",
-                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    if (property != null && property.PropertyType == typeof(bool)
-                        && (bool)property.GetValue(elevator, null)) return elevator;
+                    RectTransform rect = rects[i];
+                    if (rect == null || !rect.gameObject.activeInHierarchy) continue;
+                    bool elevator = false;
+                    bool screen = false;
+                    Transform cursor = rect.transform;
+                    Transform bestMarker = null;
+                    for (int depth = 0; depth < 8 && cursor != null; depth++)
+                    {
+                        string name = cursor.name.ToLowerInvariant();
+                        if (name.Contains("elevator")) elevator = true;
+                        if (name.Contains("screen")) screen = true;
+                        if (name.Contains("elevatorscreen")
+                            || name.Contains("elevator_screen")) bestMarker = cursor;
+                        cursor = cursor.parent;
+                    }
+                    if (!(elevator && screen))
+                    {
+                        MonoBehaviour[] behaviours = rect.GetComponents<MonoBehaviour>();
+                        for (int b = 0; b < behaviours.Length; b++)
+                        {
+                            MonoBehaviour behaviour = behaviours[b];
+                            if (behaviour == null) continue;
+                            string typeName = behaviour.GetType().Name.ToLowerInvariant();
+                            if (typeName.Contains("elevator")
+                                && typeName.Contains("screen"))
+                            {
+                                elevator = screen = true;
+                                bestMarker = rect.transform;
+                                break;
+                            }
+                        }
+                    }
+                    if (!elevator || !screen) continue;
+                    marker = bestMarker ?? rect.transform;
+                    Canvas canvas = rect.GetComponentInParent<Canvas>();
+                    return canvas != null ? canvas.transform : marker;
                 }
-                catch { }
-                if (R.Get<bool>(elevator, "isSpawn", false)) return elevator;
             }
-            return elevators.Where(x => x != null).OrderBy(x =>
-                (x.transform.position - bgm.Ec.spawnPoint).sqrMagnitude).FirstOrDefault();
+            catch { }
+            return null;
         }
 
         private GameObject BuildClipboardDisplay(Transform parent, bool animated)
