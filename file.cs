@@ -6042,8 +6042,8 @@ namespace KnoxumsChaosMode
         static void Postfix(Elevator __instance, bool __state)
         {
             if (!__state || __instance == null) return;
-            // Prefix только вооружает выход, чтобы нативная кнопка увидела
-            // открытую дверь. После её логики гарантированно закрываем лифт.
+            // Pitstop-выход выполняется нашим Prefix; Postfix повторно закрепляет
+            // закрытое состояние двери, даже когда оригинал был пропущен.
             ElevatorUnlockService.CloseElevatorDoors(__instance);
             try { Physics.SyncTransforms(); } catch { }
         }
@@ -6149,12 +6149,13 @@ namespace KnoxumsChaosMode
             BaseGameManager b = Singleton<BaseGameManager>.Instance;
             if (e == null || b == null) return true;
 
-            // Pitstop обрабатывается независимо от Laps/Baldi-coward. Сначала
-            // разрешаем двери закрыть, затем оставляем нативный ButtonPressed.
+            // Pitstop обрабатывается независимо от Laps/Baldi-coward. Нативная
+            // кнопка в некоторых состояниях только переводила лифт в ready и
+            // требовала второго клика, поэтому весь выход подтверждаем сами.
             if (IsPitstopManager(b))
             {
                 BeginPitstopDeparture(b, e);
-                return true;
+                return false;
             }
 
             ChaosManager cm = ChaosManager.Instance;
@@ -6234,9 +6235,13 @@ namespace KnoxumsChaosMode
         {
             if (b == null || pitstopExitArmed || loadNextStarted) return;
             pitstopExitArmed = true;
-            // Не закрываем дверь до оригинального ButtonPressed: он проверяет её
-            // открытое состояние. После armed патч больше не блокирует нативный Close.
-            ChaosManager.Instance?.StartCoroutine(ConfirmExit(b, 1.15f));
+            CloseElevatorDoors(e);
+            // Одного клика достаточно: после короткой анимации двери гарантированно
+            // вызываем LoadNextLevel, даже если нативный ButtonPressed отменён.
+            if (ChaosManager.Instance != null)
+                ChaosManager.Instance.StartCoroutine(ConfirmExit(b, .6f));
+            else
+                b.StartCoroutine(ConfirmExit(b, .6f));
         }
         public static void HandleElevatorExitButton(BaseGameManager b, Elevator e) { if (b == null) return; CloseElevatorDoors(e); if (ChaosManager.Instance?.IsLapsActive == true && ChaosManager.Instance.IsLastLap()) ChaosManager.Instance.CommitFloorExitToPitstop(); ChaosManager.Instance?.StartCoroutine(ConfirmExit(b, .6f)); }
         private static IEnumerator ConfirmExit(BaseGameManager b, float wait) { while (wait > 0 && !loadNextStarted) { wait -= Time.unscaledDeltaTime; yield return null; } if (!loadNextStarted) ForceLoadNext(b); }
