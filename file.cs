@@ -1372,6 +1372,7 @@ namespace KnoxumsChaosMode
                 {
                     ChaosManager.Instance.StopFunSettings();
                     ElevatorUnlockService.KeepPitstopElevatorsOpen(__instance);
+                    ChaosManager.Instance.ShowPitstopChaosReminder();
                 }
                 GameplayModifierManager.Instance?.OnFloorBeginPlay(__instance);
             }
@@ -4245,6 +4246,8 @@ namespace KnoxumsChaosMode
         private GameObject betaWatermarkObj;
         private TMP_Text betaWatermarkText;
         private float watermarkRetryTimer;
+        private GameObject pitstopReminderObject;
+        private Coroutine pitstopReminderRoutine;
         private Dictionary<int, ItemObject> originalPickupItems = new Dictionary<int, ItemObject>();
         private Dictionary<int, ItemObject> previousLapPickupItems = new Dictionary<int, ItemObject>();
 
@@ -4270,6 +4273,7 @@ namespace KnoxumsChaosMode
             UnityEngine.SceneManagement.SceneManager.activeSceneChanged -= OnSc;
             UnityEngine.SceneManagement.SceneManager.sceneUnloaded -= OnUn;
             StopFunSettings();
+            StopPitstopChaosReminder();
         }
         private void OnSc(UnityEngine.SceneManagement.Scene a, UnityEngine.SceneManagement.Scene b)
         { IsLevelReady = false; ResetSchoolShuffle(); }
@@ -4399,7 +4403,7 @@ namespace KnoxumsChaosMode
             ResetCtrlShuffle(); ClearEggLog(); BuildersErrorRetries = 0; discoT2 = 0f;
             chaosInitialSpawnDone = false;
             if (!lapRestartPending) CurrentLap = 1;
-            DestroyLapsHud(); DestroyBetaWatermarkHud();
+            DestroyLapsHud(); DestroyBetaWatermarkHud(); StopPitstopChaosReminder();
             playerBaseSpeedCaptured = false; playerBaseWalkSpeed = playerBaseRunSpeed = 0f;
             ResetGameManagerCache(); funCanRun = false; generationBusy = false;
             StopFunWait(); StopFunSettings();
@@ -5293,6 +5297,83 @@ namespace KnoxumsChaosMode
             EnsureWhiteFlashOverlay();
             if (lapsBlackImage != null) lapsBlackImage.color = Color.black;
             if (lapsFlashImage != null) lapsFlashImage.color = new Color(1, 1, 1, 0);
+        }
+
+        public void ShowPitstopChaosReminder()
+        {
+            if (!IsAnyChaosOptionActive()) return;
+            if (pitstopReminderRoutine != null)
+            {
+                try { StopCoroutine(pitstopReminderRoutine); } catch { }
+            }
+            if (pitstopReminderObject != null) Destroy(pitstopReminderObject);
+            pitstopReminderRoutine = StartCoroutine(PitstopChaosReminderRoutine());
+        }
+
+        private IEnumerator PitstopChaosReminderRoutine()
+        {
+            Canvas canvas = null;
+            float findTime = 3f;
+            while (findTime > 0f && canvas == null)
+            {
+                try { canvas = Singleton<CoreGameManager>.Instance?.GetHud(0)?.Canvas(); }
+                catch { }
+                if (canvas != null) break;
+                findTime -= Time.unscaledDeltaTime;
+                yield return null;
+            }
+            if (canvas == null) { pitstopReminderRoutine = null; yield break; }
+
+            pitstopReminderObject = new GameObject("PitstopChaosReminder",
+                typeof(RectTransform), typeof(CanvasGroup));
+            pitstopReminderObject.transform.SetParent(canvas.transform, false);
+            RectTransform rect = pitstopReminderObject.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(.06f, .72f);
+            rect.anchorMax = new Vector2(.94f, .96f);
+            rect.offsetMin = rect.offsetMax = Vector2.zero;
+
+            TextMeshProUGUI text = pitstopReminderObject.AddComponent<TextMeshProUGUI>();
+            TMP_FontAsset font = GetComicSansFont();
+            if (font != null) text.font = font;
+            text.text = "<b>JUST A REMINDER!</b> All applied chaos features are intended to disable in the pitstop, they are only working in the school!";
+            text.fontSize = 24f;
+            text.color = Color.yellow;
+            text.alignment = TextAlignmentOptions.Center;
+            text.enableWordWrapping = true;
+            text.overflowMode = TextOverflowModes.Overflow;
+            text.raycastTarget = false;
+            text.outlineColor = Color.black;
+            text.outlineWidth = .16f;
+            CanvasGroup group = pitstopReminderObject.GetComponent<CanvasGroup>();
+            group.interactable = false;
+            group.blocksRaycasts = false;
+            pitstopReminderObject.transform.SetAsLastSibling();
+
+            float hold = 3f;
+            while (hold > 0f && pitstopReminderObject != null)
+            { hold -= Time.unscaledDeltaTime; yield return null; }
+
+            float fade = 2f;
+            while (fade > 0f && pitstopReminderObject != null)
+            {
+                fade -= Time.unscaledDeltaTime;
+                group.alpha = Mathf.Clamp01(fade / 2f);
+                yield return null;
+            }
+            if (pitstopReminderObject != null) Destroy(pitstopReminderObject);
+            pitstopReminderObject = null;
+            pitstopReminderRoutine = null;
+        }
+
+        private void StopPitstopChaosReminder()
+        {
+            if (pitstopReminderRoutine != null)
+            {
+                try { StopCoroutine(pitstopReminderRoutine); } catch { }
+                pitstopReminderRoutine = null;
+            }
+            if (pitstopReminderObject != null) Destroy(pitstopReminderObject);
+            pitstopReminderObject = null;
         }
 
         public void CreateLapsHud()
@@ -6319,9 +6400,9 @@ namespace KnoxumsChaosMode
             CloseDistance = c.Bind("BaldiRampage", "CloseDistance", 8f, "Close distance.");
             MidDistance = c.Bind("BaldiRampage", "MidDistance", 25f, "Mid distance.");
             MaxViewDistance = c.Bind("BaldiRampage", "MaxViewDistance", 40f, "Maximum sight distance.");
-            NotebookSlowPer = c.Bind("BaldiRampage", "NotebookSlowPer", .10f, "Speed multiplier loss per notebook.");
-            MinSpeedMult = c.Bind("BaldiRampage", "MinSpeedMult", .20f, "Minimum flee speed multiplier.");
-            BaseFleeSpeed = c.Bind("BaldiRampage", "BaseFleeSpeed", 36f, "Flee speed at zero notebooks.");
+            NotebookSlowPer = c.Bind("BaldiRampage", "NotebookSlowPer", .08f, "Speed multiplier loss per notebook (prime mode caps this at 0.08). ");
+            MinSpeedMult = c.Bind("BaldiRampage", "MinSpeedMult", .35f, "Minimum flee speed multiplier (prime mode keeps at least 0.35). ");
+            BaseFleeSpeed = c.Bind("BaldiRampage", "BaseFleeSpeed", 50f, "Flee speed at zero notebooks (prime mode keeps at least 50). ");
             AppleStunMin = c.Bind("BaldiRampage", "AppleStunMin", 3f, "Minimum apple stun.");
             AppleStunMax = c.Bind("BaldiRampage", "AppleStunMax", 5f, "Maximum apple stun.");
             GrappleRange = c.Bind("BaldiRampage", "GrappleRange", 60f, "Maximum grapple flight range.");
@@ -6329,13 +6410,19 @@ namespace KnoxumsChaosMode
             MaxAnger = c.Bind("BaldiRampage", "MaxAnger", 100f, "Anger used at full flee speed.");
         }
 
+        public static float EffectiveBaseFleeSpeed =>
+            Mathf.Max(50f, BaseFleeSpeed?.Value ?? 50f);
+
         public static float SpeedMultiplier(int count)
         {
-            float loss = Mathf.Clamp01(NotebookSlowPer?.Value ?? .1f) * Mathf.Max(0, count);
-            return Mathf.Clamp(1f - loss, Mathf.Clamp01(MinSpeedMult?.Value ?? .2f), 1f);
+            float slowPerNotebook = Mathf.Clamp(NotebookSlowPer?.Value ?? .08f, 0f, .08f);
+            float minimum = Mathf.Clamp(Mathf.Max(.35f,
+                MinSpeedMult?.Value ?? .35f), .35f, 1f);
+            float loss = slowPerNotebook * Mathf.Max(0, count);
+            return Mathf.Clamp(1f - loss, minimum, 1f);
         }
         public static float NotebookSpeed(int count)
-        { return Mathf.Max(0.1f, (BaseFleeSpeed?.Value ?? 36f) * SpeedMultiplier(count)); }
+        { return EffectiveBaseFleeSpeed * SpeedMultiplier(count); }
     }
 
     public class BaldiRampageController : MonoBehaviour
@@ -6431,13 +6518,17 @@ namespace KnoxumsChaosMode
         }
         private float CurrentSpeed()
         {
-            float slow = BaldiRampageConfig.SpeedMultiplier(notebooks) * (tapePlaying ? .35f : 1f);
-            return Mathf.Max(4f, (BaldiRampageConfig.BaseFleeSpeed?.Value ?? 36f) * slow);
+            // Prime Baldi-coward остаётся быстрым даже после нескольких тетрадей;
+            // кассета всё ещё помогает игроку, но больше не режет скорость втрое.
+            float slow = BaldiRampageConfig.SpeedMultiplier(notebooks)
+                * (tapePlaying ? .60f : 1f);
+            return Mathf.Max(8f, BaldiRampageConfig.EffectiveBaseFleeSpeed * slow);
         }
         public void EnforceSpeedAfterSlap()
         {
             if (!BaldiRampageConfig.IsActive || baldi == null) return;
-            CaptureOriginal(); float speed = CurrentSpeed(); float slow = speed / Mathf.Max(.1f, BaldiRampageConfig.BaseFleeSpeed.Value);
+            CaptureOriginal(); float speed = CurrentSpeed(); float slow = speed /
+                Mathf.Max(.1f, BaldiRampageConfig.EffectiveBaseFleeSpeed);
             float anger = Mathf.Max(origAnger, BaldiRampageConfig.MaxAnger.Value * slow);
             baldi.baseSpeed = speed; ApplySpeed(speed);
             if (float.IsNaN(lastAppliedAnger) || Mathf.Abs(lastAppliedAnger - anger) > .01f)
@@ -6642,7 +6733,7 @@ namespace KnoxumsChaosMode
             force += forceIncrease * Time.deltaTime;
             if (dist - (initialDistance - force) > maxPressure && !snapped) { snapped = true; motorAudio?.Stop(); if (lineRenderer != null) lineRenderer.enabled = false; if (audSnap != null) audMan?.PlaySingle(audSnap); StartCoroutine(WaitAudio()); }
         }
-        private void PullBaldi() { float s = Mathf.Max(BaldiRampageConfig.BaseFleeSpeed.Value, force * 1.5f); try { baldiNav?.SetSpeed(s); R.Set(baldiNav, "speed", s); R.Set(baldiNav, "maxSpeed", s); if (baldiAgent != null && baldiAgent.isOnNavMesh) { baldiAgent.isStopped = false; baldiAgent.speed = s; baldiAgent.SetDestination(navAnchor); } } catch { } }
+        private void PullBaldi() { float s = Mathf.Max(BaldiRampageConfig.EffectiveBaseFleeSpeed, force * 1.5f); try { baldiNav?.SetSpeed(s); R.Set(baldiNav, "speed", s); R.Set(baldiNav, "maxSpeed", s); if (baldiAgent != null && baldiAgent.isOnNavMesh) { baldiAgent.isStopped = false; baldiAgent.speed = s; baldiAgent.SetDestination(navAnchor); } } catch { } }
         private void OnCollision(RaycastHit hit)
         { if (locked || hit.collider == null || (layerMask != null && !layerMask.Contains(hit.collider.gameObject.layer))) return; locked = true; force = initialForce; initialDistance = Vector3.Distance(transform.position, baldi.transform.position); navAnchor = NavMesh.SamplePosition(hit.point, out NavMeshHit h, 3f, NavMesh.AllAreas) ? h.position : hit.point; entity?.SetFrozen(true); if (audClang != null) audMan?.PlaySingle(audClang); motorAudio?.Play(); if (cracks != null) cracks.gameObject.SetActive(true); }
         private IEnumerator EndDelay() { yield return new WaitForSeconds(.25f); EndNow(); }
