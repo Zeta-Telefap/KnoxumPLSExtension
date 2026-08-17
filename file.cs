@@ -2906,10 +2906,9 @@ namespace KnoxumsChaosMode
     {
         private MenuToggle enableToggle;
         private TextMeshProUGUI modeText;
-        private TextMeshProUGUI rollsText;
-        private StandardMenuButton modeLeft, modeRight, rollsLeft, rollsRight;
+        private StandardMenuButton modeLeft, modeRight;
+        private AdjustmentBars rollsBars;
         private int modeIndex;
-        private int rolls;
 
         public override void Build()
         {
@@ -2934,29 +2933,21 @@ namespace KnoxumsChaosMode
                 new Vector3(0f, -105f, 0f), BaldiFonts.ComicSans24,
                 TextAlignmentOptions.Center, new Vector2(240f, 30f),
                 Color.black, false);
-            rollsLeft = CreateButton(OnRollsLeft, menuArrowLeft, menuArrowLeftHighlight,
-                "GameplayModifiersRollsLeft", new Vector3(-70f, -140f, 0f));
-            rollsText = CreateText("GameplayModifiersRolls", "",
-                new Vector3(0f, -140f, 0f), BaldiFonts.ComicSans24,
-                TextAlignmentOptions.Center, new Vector2(80f, 30f),
-                Color.black, false);
-            rollsRight = CreateButton(OnRollsRight, menuArrowRight, menuArrowRightHighlight,
-                "GameplayModifiersRollsRight", new Vector3(70f, -140f, 0f));
+            // Нативная шкала Options API выглядит как <|||||> и хранит 1–5.
+            rollsBars = CreateBars(delegate { }, "GameplayModifiersRollsBars",
+                new Vector3(-80f, -140f, 0f), 5);
+            rollsBars.Adjust(Mathf.Clamp(
+                KnoxumsChaosModePlugin.GameplayModifierRollsConfig.Value, 1, 5));
 
             modeIndex = Mathf.Clamp(
                 (int)KnoxumsChaosModePlugin.GameplayModifierModeConfig.Value, 0, 1);
-            rolls = Mathf.Clamp(
-                KnoxumsChaosModePlugin.GameplayModifierRollsConfig.Value, 1, 5);
             UpdateMode();
-            UpdateRolls();
 
             AddTooltip(enableToggle, "Enable random gameplay modifiers.");
             AddTooltip(modeLeft,
-                "Whole Run keeps one set for the run. Every Floor rerolls before each school floor.");
+                "Whole Run keeps one set for the run. Floor rerolls before each school floor.");
             AddTooltip(modeRight,
-                "Whole Run keeps one set for the run. Every Floor rerolls before each school floor.");
-            AddTooltip(rollsLeft, "Set the number of rolls from 1 to 5.");
-            AddTooltip(rollsRight, "Set the number of rolls from 1 to 5.");
+                "Whole Run keeps one set for the run. Floor rerolls before each school floor.");
 
             StandardMenuButton apply = CreateApplyButton(OnApply);
             if (Singleton<CoreGameManager>.Instance != null)
@@ -2981,19 +2972,11 @@ namespace KnoxumsChaosMode
 
         private void OnModeLeft() { modeIndex = (modeIndex + 1) % 2; UpdateMode(); }
         private void OnModeRight() { modeIndex = (modeIndex + 1) % 2; UpdateMode(); }
-        private void OnRollsLeft() { rolls = rolls <= 1 ? 5 : rolls - 1; UpdateRolls(); }
-        private void OnRollsRight() { rolls = rolls >= 5 ? 1 : rolls + 1; UpdateRolls(); }
 
         private void UpdateMode()
         {
             if (modeText != null)
-                modeText.text = modeIndex == 0 ? "Whole Run" : "Every Floor";
-        }
-
-        private void UpdateRolls()
-        {
-            rolls = Mathf.Clamp(rolls, 1, 5);
-            if (rollsText != null) rollsText.text = rolls.ToString();
+                modeText.text = modeIndex == 0 ? "Whole Run" : "Floor";
         }
 
         private void OnApply()
@@ -3005,7 +2988,7 @@ namespace KnoxumsChaosMode
                 KnoxumsChaosModePlugin.GameplayModifierModeConfig.Value =
                     (GameplayModifierMode)Mathf.Clamp(modeIndex, 0, 1);
                 KnoxumsChaosModePlugin.GameplayModifierRollsConfig.Value =
-                    Mathf.Clamp(rolls, 1, 5);
+                    Mathf.Clamp(rollsBars.GetRaw(), 1, 5);
                 KnoxumsChaosModePlugin.Instance.Config.Save();
                 GameplayModifierManager.Instance?.OnSettingsChanged();
             }
