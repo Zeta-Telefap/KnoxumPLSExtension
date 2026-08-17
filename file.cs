@@ -1373,6 +1373,7 @@ namespace KnoxumsChaosMode
                     ChaosManager.Instance.StopFunSettings();
                     ElevatorUnlockService.KeepPitstopElevatorsOpen(__instance);
                 }
+                GameplayModifierManager.Instance?.OnFloorBeginPlay(__instance);
             }
             catch { }
         }
@@ -1509,6 +1510,7 @@ namespace KnoxumsChaosMode
         {
             try
             {
+                GameplayModifierManager.Instance?.PrepareForGeneration(__instance);
                 if (ChaosManager.Instance != null)
                 {
                     ChaosManager.Instance.MarkGenerationStarted();
@@ -2210,6 +2212,80 @@ namespace KnoxumsChaosMode
     public enum ChaosModeType { Chaos, ChaosPlus1, DoubleChaos }
     public enum CloneSpawnPoint { CharPosition, CharSpawnPoint }
 
+    public enum GameplayModifierMode
+    {
+        WholeRun,
+        EveryFloor
+    }
+
+    public enum GameplayModifierId
+    {
+        DoubleTrouble,
+        IceFloor,
+        LethalTouchers,
+        GottaSteal,
+        McSpeeders,
+        Overtime,
+        NoItems,
+        Placeholder,
+        BrokenEars,
+        ItemRoulette,
+        Exhaustion,
+        PermaEvent,
+        NoCooldown,
+        PartyStyle,
+        Steamgen,
+        ClumsyExplorer,
+        NegativeStickers,
+        Hyperwatchers,
+        Overlearned,
+        CloudyLenses,
+        SneakyTricky,
+        Posterizator,
+        SqueeshNot
+    }
+
+    public static class GameplayModifierCatalog
+    {
+        private static readonly GameplayModifierId[] all =
+            (GameplayModifierId[])Enum.GetValues(typeof(GameplayModifierId));
+
+        private static readonly Dictionary<GameplayModifierId, string> names =
+            new Dictionary<GameplayModifierId, string>
+            {
+                { GameplayModifierId.DoubleTrouble, "Double Trouble" },
+                { GameplayModifierId.IceFloor, "Ice Floor" },
+                { GameplayModifierId.LethalTouchers, "Lethal Touchers" },
+                { GameplayModifierId.GottaSteal, "Gotta Steal, Steal, Steal!" },
+                { GameplayModifierId.McSpeeders, "McSpeeders!" },
+                { GameplayModifierId.Overtime, "Overtime" },
+                { GameplayModifierId.NoItems, "No Items?" },
+                { GameplayModifierId.Placeholder, "Placeholder!" },
+                { GameplayModifierId.BrokenEars, "Broken Ears" },
+                { GameplayModifierId.ItemRoulette, "Item Roulette" },
+                { GameplayModifierId.Exhaustion, "Exhaustion" },
+                { GameplayModifierId.PermaEvent, "Perma-event" },
+                { GameplayModifierId.NoCooldown, "No Cooldown!" },
+                { GameplayModifierId.PartyStyle, "Party Style!" },
+                { GameplayModifierId.Steamgen, "Steamgen" },
+                { GameplayModifierId.ClumsyExplorer, "Clumsy Explorer" },
+                { GameplayModifierId.NegativeStickers, "Negative Stickers" },
+                { GameplayModifierId.Hyperwatchers, "Hyperwatchers" },
+                { GameplayModifierId.Overlearned, "Overlearned" },
+                { GameplayModifierId.CloudyLenses, "Cloudy Lenses" },
+                { GameplayModifierId.SneakyTricky, "Sneaky-Tricky!" },
+                { GameplayModifierId.Posterizator, "Posterizator" },
+                { GameplayModifierId.SqueeshNot, "Squeesh-not!" }
+            };
+
+        public static GameplayModifierId[] All => all;
+
+        public static string Name(GameplayModifierId id)
+        {
+            return names.TryGetValue(id, out string name) ? name : id.ToString();
+        }
+    }
+
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
     [BepInDependency("mtm101.rulerp.bbplus.baldidevapi", BepInDependency.DependencyFlags.HardDependency)]
     public class KnoxumsChaosModePlugin : BaseUnityPlugin
@@ -2250,6 +2326,9 @@ namespace KnoxumsChaosMode
         public static ConfigEntry<bool> IsLbTestSchoolEnabledConfig { get; private set; }
         public static ConfigEntry<bool> IsItemMischiefEnabledConfig { get; private set; }
         public static ConfigEntry<bool> DisableWarningConfig { get; private set; }
+        public static ConfigEntry<bool> GameplayModifiersEnabledConfig { get; private set; }
+        public static ConfigEntry<GameplayModifierMode> GameplayModifierModeConfig { get; private set; }
+        public static ConfigEntry<int> GameplayModifierRollsConfig { get; private set; }
 
         private Harmony harmony;
         private GameObject chaosManagerObject;
@@ -2291,6 +2370,13 @@ namespace KnoxumsChaosMode
             IsGooshoesEnabledConfig = Config.Bind("FunSettings", "IsGooshoesEnabled", false, "53045009 / ceiling flip. ");
             IsLbTestSchoolEnabledConfig = Config.Bind("FunSettings", "IsLbTestSchoolEnabled", false, "LB Test School lights. ");
             IsItemMischiefEnabledConfig = Config.Bind("SchoolShuffle", "IsItemMischiefEnabled", false, "Use a random school item instead. ");
+            GameplayModifiersEnabledConfig = Config.Bind("GameplayModifiers", "Enabled", false,
+                "Enable random gameplay modifiers. ");
+            GameplayModifierModeConfig = Config.Bind("GameplayModifiers", "Mode",
+                GameplayModifierMode.WholeRun,
+                "Keep one set for the whole run or reroll before every school floor. ");
+            GameplayModifierRollsConfig = Config.Bind("GameplayModifiers", "Rolls", 3,
+                "Number of modifier rolls (1-5). Duplicate rolls stack up to 3. ");
 
             BaldiRampageConfig.Init(Config);
 
@@ -2318,6 +2404,7 @@ namespace KnoxumsChaosMode
 
             chaosManagerObject = new GameObject("KnoxumsChaosManager");
             chaosManagerObject.AddComponent<ChaosManager>();
+            chaosManagerObject.AddComponent<GameplayModifierManager>();
             DontDestroyOnLoad(chaosManagerObject);
         }
 
@@ -2337,6 +2424,7 @@ namespace KnoxumsChaosMode
         public void RegisterChaosCategories(CustomOptionsHandler h)
         {
             h.AddCategory<ChaosOptionsCategory>("Knoxum's\nChaos Mode");
+            h.AddCategory<GameplayModifiersOptionsCategory>("Gameplay\nModifiers");
         }
     }
 
@@ -2802,6 +2890,121 @@ namespace KnoxumsChaosMode
                 KnoxumsChaosModePlugin.Instance.Config.Save();
             }
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("Apply: " + ex.Message); }
+        }
+    }
+
+    public class GameplayModifiersOptionsCategory : CustomOptionsCategory
+    {
+        private MenuToggle enableToggle;
+        private TextMeshProUGUI modeText;
+        private TextMeshProUGUI rollsText;
+        private StandardMenuButton modeLeft, modeRight, rollsLeft, rollsRight;
+        private int modeIndex;
+        private int rolls;
+
+        public override void Build()
+        {
+            enableToggle = CreateToggle("GameplayModifiersEnable", "Enable",
+                KnoxumsChaosModePlugin.GameplayModifiersEnabledConfig.Value,
+                new Vector3(0f, 15f, 0f), 220f);
+
+            CreateText("GameplayModifiersModeLabel", "Mode:",
+                new Vector3(0f, -30f, 0f), BaldiFonts.ComicSans24,
+                TextAlignmentOptions.Center, new Vector2(240f, 30f),
+                Color.black, false);
+            modeLeft = CreateButton(OnModeLeft, menuArrowLeft, menuArrowLeftHighlight,
+                "GameplayModifiersModeLeft", new Vector3(-115f, -65f, 0f));
+            modeText = CreateText("GameplayModifiersMode", "",
+                new Vector3(0f, -65f, 0f), BaldiFonts.ComicSans24,
+                TextAlignmentOptions.Center, new Vector2(190f, 30f),
+                Color.black, false);
+            modeRight = CreateButton(OnModeRight, menuArrowRight, menuArrowRightHighlight,
+                "GameplayModifiersModeRight", new Vector3(115f, -65f, 0f));
+
+            CreateText("GameplayModifiersRollsLabel", "Rolls:",
+                new Vector3(0f, -105f, 0f), BaldiFonts.ComicSans24,
+                TextAlignmentOptions.Center, new Vector2(240f, 30f),
+                Color.black, false);
+            rollsLeft = CreateButton(OnRollsLeft, menuArrowLeft, menuArrowLeftHighlight,
+                "GameplayModifiersRollsLeft", new Vector3(-70f, -140f, 0f));
+            rollsText = CreateText("GameplayModifiersRolls", "",
+                new Vector3(0f, -140f, 0f), BaldiFonts.ComicSans24,
+                TextAlignmentOptions.Center, new Vector2(80f, 30f),
+                Color.black, false);
+            rollsRight = CreateButton(OnRollsRight, menuArrowRight, menuArrowRightHighlight,
+                "GameplayModifiersRollsRight", new Vector3(70f, -140f, 0f));
+
+            modeIndex = Mathf.Clamp(
+                (int)KnoxumsChaosModePlugin.GameplayModifierModeConfig.Value, 0, 1);
+            rolls = Mathf.Clamp(
+                KnoxumsChaosModePlugin.GameplayModifierRollsConfig.Value, 1, 5);
+            UpdateMode();
+            UpdateRolls();
+
+            AddTooltip(enableToggle, "Enable random gameplay modifiers.");
+            AddTooltip(modeLeft,
+                "Whole Run keeps one set for the run. Every Floor rerolls before each school floor.");
+            AddTooltip(modeRight,
+                "Whole Run keeps one set for the run. Every Floor rerolls before each school floor.");
+            AddTooltip(rollsLeft, "Set the number of rolls from 1 to 5.");
+            AddTooltip(rollsRight, "Set the number of rolls from 1 to 5.");
+
+            StandardMenuButton apply = CreateApplyButton(OnApply);
+            if (Singleton<CoreGameManager>.Instance != null)
+            {
+                Selectable selectable = apply.GetComponent<Selectable>();
+                if (selectable != null) selectable.interactable = false;
+                apply.enabled = false;
+            }
+        }
+
+        private static bool ToggleValue(MenuToggle toggle)
+        {
+            if (toggle == null) return false;
+            try
+            {
+                FieldInfo field = typeof(MenuToggle).GetField("val",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                return field != null && (bool)field.GetValue(toggle);
+            }
+            catch { return false; }
+        }
+
+        private void OnModeLeft() { modeIndex = (modeIndex + 1) % 2; UpdateMode(); }
+        private void OnModeRight() { modeIndex = (modeIndex + 1) % 2; UpdateMode(); }
+        private void OnRollsLeft() { rolls = rolls <= 1 ? 5 : rolls - 1; UpdateRolls(); }
+        private void OnRollsRight() { rolls = rolls >= 5 ? 1 : rolls + 1; UpdateRolls(); }
+
+        private void UpdateMode()
+        {
+            if (modeText != null)
+                modeText.text = modeIndex == 0 ? "Whole Run" : "Every Floor";
+        }
+
+        private void UpdateRolls()
+        {
+            rolls = Mathf.Clamp(rolls, 1, 5);
+            if (rollsText != null) rollsText.text = rolls.ToString();
+        }
+
+        private void OnApply()
+        {
+            try
+            {
+                KnoxumsChaosModePlugin.GameplayModifiersEnabledConfig.Value =
+                    ToggleValue(enableToggle);
+                KnoxumsChaosModePlugin.GameplayModifierModeConfig.Value =
+                    (GameplayModifierMode)Mathf.Clamp(modeIndex, 0, 1);
+                KnoxumsChaosModePlugin.GameplayModifierRollsConfig.Value =
+                    Mathf.Clamp(rolls, 1, 5);
+                KnoxumsChaosModePlugin.Instance.Config.Save();
+                GameplayModifierManager.Instance?.OnSettingsChanged();
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError(
+                    "Gameplay Modifiers options apply: " + ex.Message);
+            }
         }
     }
 
@@ -3402,6 +3605,517 @@ namespace KnoxumsChaosMode
     //  ЧАСТЬ 3 / 5: CHAOS MANAGER (С КЛОНАМИ, КРУГАМИ И ВАТЕРМАРКОЙ BETA)
     // ============================================================================
 
+
+    public class GameplayModifierManager : MonoBehaviour
+    {
+        public static GameplayModifierManager Instance { get; private set; }
+
+        private readonly List<GameplayModifierId> activeRolls =
+            new List<GameplayModifierId>();
+        private readonly Dictionary<GameplayModifierId, int> stacks =
+            new Dictionary<GameplayModifierId, int>();
+        private System.Random random;
+        private bool runSetCreated;
+        private string selectedFloorKey = "";
+        private bool revealPending;
+        private GameplayModifierMode selectedMode;
+        private int selectedRollCount;
+        private Coroutine revealRoutine;
+        private GameObject revealObject;
+        private GameObject pauseObject;
+        private Transform pauseParent;
+        private float pauseRefresh;
+
+        public IReadOnlyList<GameplayModifierId> ActiveRolls => activeRolls;
+        public bool Enabled =>
+            KnoxumsChaosModePlugin.GameplayModifiersEnabledConfig?.Value ?? false;
+
+        private void Awake()
+        {
+            Instance = this;
+            random = new System.Random(Environment.TickCount ^ GetInstanceID());
+            selectedMode = KnoxumsChaosModePlugin.GameplayModifierModeConfig?.Value
+                ?? GameplayModifierMode.WholeRun;
+            selectedRollCount = Mathf.Clamp(
+                KnoxumsChaosModePlugin.GameplayModifierRollsConfig?.Value ?? 3, 1, 5);
+        }
+
+        private void OnEnable()
+        {
+            UnityEngine.SceneManagement.SceneManager.activeSceneChanged += OnSceneChanged;
+        }
+
+        private void OnDisable()
+        {
+            UnityEngine.SceneManagement.SceneManager.activeSceneChanged -= OnSceneChanged;
+            StopReveal();
+            DestroyPauseDisplay();
+        }
+
+        private void OnSceneChanged(UnityEngine.SceneManagement.Scene oldScene,
+            UnityEngine.SceneManagement.Scene newScene)
+        {
+            StopReveal();
+            DestroyPauseDisplay();
+            if (LooksLikeMenuScene(newScene.name)) ResetRun();
+        }
+
+        private static bool LooksLikeMenuScene(string sceneName)
+        {
+            if (string.IsNullOrEmpty(sceneName)) return false;
+            string name = sceneName.ToLowerInvariant();
+            return name.Contains("mainmenu") || name == "menu"
+                || name.Contains("title") || name.Contains("warning");
+        }
+
+        public void OnSettingsChanged()
+        {
+            GameplayModifierMode mode =
+                KnoxumsChaosModePlugin.GameplayModifierModeConfig?.Value
+                ?? GameplayModifierMode.WholeRun;
+            int rolls = Mathf.Clamp(
+                KnoxumsChaosModePlugin.GameplayModifierRollsConfig?.Value ?? 3, 1, 5);
+            if (!Enabled || mode != selectedMode || rolls != selectedRollCount)
+                ResetRun();
+            selectedMode = mode;
+            selectedRollCount = rolls;
+        }
+
+        public void ResetRun()
+        {
+            activeRolls.Clear();
+            stacks.Clear();
+            runSetCreated = false;
+            selectedFloorKey = "";
+            revealPending = false;
+            StopReveal();
+            DestroyPauseDisplay();
+        }
+
+        public int GetStacks(GameplayModifierId id)
+        {
+            return stacks.TryGetValue(id, out int count) ? count : 0;
+        }
+
+        public bool Has(GameplayModifierId id) { return GetStacks(id) > 0; }
+
+        public void PrepareForGeneration(LevelBuilder builder)
+        {
+            if (!Enabled)
+            {
+                if (activeRolls.Count > 0) ResetRun();
+                return;
+            }
+            if (IsPitstopScene()) return;
+
+            selectedMode = KnoxumsChaosModePlugin.GameplayModifierModeConfig?.Value
+                ?? GameplayModifierMode.WholeRun;
+            selectedRollCount = Mathf.Clamp(
+                KnoxumsChaosModePlugin.GameplayModifierRollsConfig?.Value ?? 3, 1, 5);
+            string floorKey = BuildFloorKey();
+            bool needRoll = selectedMode == GameplayModifierMode.WholeRun
+                ? !runSetCreated
+                : !string.Equals(selectedFloorKey, floorKey,
+                    StringComparison.Ordinal);
+
+            if (needRoll)
+            {
+                RollSet(selectedRollCount);
+                runSetCreated = true;
+                selectedFloorKey = floorKey;
+            }
+            revealPending = activeRolls.Count > 0;
+        }
+
+        private void RollSet(int count)
+        {
+            activeRolls.Clear();
+            stacks.Clear();
+            GameplayModifierId[] all = GameplayModifierCatalog.All;
+            for (int slot = 0; slot < count && all.Length > 0; slot++)
+            {
+                GameplayModifierId pick = all[0];
+                for (int attempt = 0; attempt < 128; attempt++)
+                {
+                    pick = all[random.Next(0, all.Length)];
+                    if (GetStacks(pick) < 3) break;
+                }
+                if (GetStacks(pick) >= 3) continue;
+                activeRolls.Add(pick);
+                stacks[pick] = GetStacks(pick) + 1;
+            }
+
+            try
+            {
+                KnoxumsChaosModePlugin.Log.LogInfo(
+                    "Gameplay Modifiers rolled: " + string.Join(", ",
+                        activeRolls.Select(x => GameplayModifierCatalog.Name(x)).ToArray()));
+            }
+            catch { }
+        }
+
+        private string BuildFloorKey()
+        {
+            string scene = UnityEngine.SceneManagement.SceneManager
+                .GetActiveScene().name ?? "";
+            int level = -1;
+            try
+            {
+                BaseGameManager bgm = Singleton<BaseGameManager>.Instance;
+                if (bgm != null) level = bgm.CurrentLevel;
+            }
+            catch { }
+            // Seed намеренно не входит в ключ: при смерти генератор может
+            // получить новый внутренний seed, но набор этого же этажа обязан
+            // сохраниться. Новый школьный этаж определяется CurrentLevel.
+            return scene + "|" + level;
+        }
+
+        private static bool IsPitstopScene()
+        {
+            try
+            {
+                BaseGameManager bgm = Singleton<BaseGameManager>.Instance;
+                if (ElevatorUnlockService.IsPitstopManager(bgm)) return true;
+                string scene = UnityEngine.SceneManagement.SceneManager
+                    .GetActiveScene().name.ToLowerInvariant();
+                return scene.Contains("pitstop") || scene.Contains("pit_stop");
+            }
+            catch { return false; }
+        }
+
+        public void OnFloorBeginPlay(BaseGameManager bgm)
+        {
+            if (!Enabled || activeRolls.Count == 0 || !revealPending
+                || bgm == null || ElevatorUnlockService.IsPitstopManager(bgm)) return;
+            revealPending = false;
+            StopReveal();
+            revealRoutine = StartCoroutine(RevealRoutine(bgm));
+        }
+
+        private IEnumerator RevealRoutine(BaseGameManager bgm)
+        {
+            Canvas canvas = null;
+            float findTime = 10f;
+            while (findTime > 0f && canvas == null)
+            {
+                try { canvas = Singleton<CoreGameManager>.Instance?.GetHud(0)?.Canvas(); }
+                catch { }
+                if (canvas != null) break;
+                findTime -= Time.unscaledDeltaTime;
+                yield return null;
+            }
+            if (canvas == null) { revealRoutine = null; yield break; }
+
+            revealObject = BuildClipboardDisplay(canvas.transform, true);
+            if (revealObject == null) { revealRoutine = null; yield break; }
+            RectTransform rect = revealObject.GetComponent<RectTransform>();
+            Vector2 shown = new Vector2(10f, -8f);
+            Vector2 hidden = new Vector2(10f, -260f);
+            rect.anchoredPosition = hidden;
+            float slide = 0f;
+            while (slide < 1f && revealObject != null)
+            {
+                slide += Time.unscaledDeltaTime;
+                float eased = 1f - Mathf.Pow(1f - Mathf.Clamp01(slide), 3f);
+                rect.anchoredPosition = Vector2.Lerp(hidden, shown, eased);
+                yield return null;
+            }
+            if (rect != null) rect.anchoredPosition = shown;
+
+            Elevator spawn = FindSpawnElevator(bgm);
+            float safety = 90f;
+            float noElevatorHold = 4f;
+            while (safety > 0f && revealObject != null)
+            {
+                if (spawn == null)
+                {
+                    noElevatorHold -= Time.unscaledDeltaTime;
+                    if (noElevatorHold <= 0f) break;
+                }
+                else if (DoorOpen(spawn)) break;
+                safety -= Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            float down = 0f;
+            while (down < 1f && revealObject != null)
+            {
+                down += Time.unscaledDeltaTime;
+                float eased = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(down));
+                rect.anchoredPosition = Vector2.Lerp(shown, hidden, eased);
+                yield return null;
+            }
+            if (revealObject != null) Destroy(revealObject);
+            revealObject = null;
+            revealRoutine = null;
+        }
+
+        private static bool DoorOpen(Elevator elevator)
+        {
+            if (elevator == null) return false;
+            return R.Get<bool>(elevator, "doorIsOpen",
+                R.Get<bool>(elevator, "open", false));
+        }
+
+        private static Elevator FindSpawnElevator(BaseGameManager bgm)
+        {
+            if (bgm == null || bgm.Ec == null) return null;
+            List<Elevator> elevators = ElevatorUnlockService.GetElevators(bgm.Ec);
+            for (int i = 0; i < elevators.Count; i++)
+            {
+                Elevator elevator = elevators[i];
+                if (elevator == null) continue;
+                try
+                {
+                    PropertyInfo property = elevator.GetType().GetProperty("IsSpawn",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (property != null && property.PropertyType == typeof(bool)
+                        && (bool)property.GetValue(elevator, null)) return elevator;
+                }
+                catch { }
+                if (R.Get<bool>(elevator, "isSpawn", false)) return elevator;
+            }
+            return elevators.Where(x => x != null).OrderBy(x =>
+                (x.transform.position - bgm.Ec.spawnPoint).sqrMagnitude).FirstOrDefault();
+        }
+
+        private GameObject BuildClipboardDisplay(Transform parent, bool animated)
+        {
+            if (parent == null) return null;
+            GameObject root = new GameObject(animated
+                ? "GameplayModifiersReveal" : "GameplayModifiersPause",
+                typeof(RectTransform));
+            root.transform.SetParent(parent, false);
+            RectTransform rootRect = root.GetComponent<RectTransform>();
+            rootRect.anchorMin = rootRect.anchorMax = new Vector2(0f, 0f);
+            rootRect.pivot = new Vector2(0f, 0f);
+            rootRect.sizeDelta = new Vector2(230f, 230f);
+            rootRect.anchoredPosition = new Vector2(10f, -8f);
+
+            GameObject clipboard = CloneOptionsClipboard(root.transform);
+            if (clipboard == null) clipboard = BuildFallbackClipboard(root.transform);
+            RectTransform clipboardRect = clipboard.GetComponent<RectTransform>();
+            if (clipboardRect != null)
+            {
+                clipboardRect.anchorMin = clipboardRect.anchorMax = new Vector2(0f, 0f);
+                clipboardRect.pivot = new Vector2(0f, 0f);
+                clipboardRect.anchoredPosition = Vector2.zero;
+                clipboardRect.sizeDelta = new Vector2(220f, 185f);
+                clipboardRect.localScale = Vector3.one;
+            }
+
+            TMP_FontAsset font = FindComicFont();
+            TextMeshProUGUI title = CreateRuntimeText(root.transform, "ModifiersTitle",
+                "Modifiers:", font, 24f, Color.white,
+                TextAlignmentOptions.Center, new Vector2(0f, 188f),
+                new Vector2(220f, 34f));
+            title.outlineColor = Color.black;
+            title.outlineWidth = .18f;
+
+            List<KeyValuePair<GameplayModifierId, int>> grouped = GroupForDisplay();
+            for (int i = 0; i < grouped.Count && i < 5; i++)
+            {
+                KeyValuePair<GameplayModifierId, int> entry = grouped[i];
+                string text = GameplayModifierCatalog.Name(entry.Key);
+                if (entry.Value > 1)
+                    text += "\n<size=11><color=#707070>×" + entry.Value
+                        + "</color></size>";
+                CreateRuntimeText(root.transform, "ModifierRow" + i, text, font,
+                    17f, Color.black, TextAlignmentOptions.TopLeft,
+                    new Vector2(34f, 145f - i * 30f), new Vector2(172f, 31f));
+            }
+
+            root.transform.SetAsLastSibling();
+            return root;
+        }
+
+        private List<KeyValuePair<GameplayModifierId, int>> GroupForDisplay()
+        {
+            List<KeyValuePair<GameplayModifierId, int>> result =
+                new List<KeyValuePair<GameplayModifierId, int>>();
+            HashSet<GameplayModifierId> seen = new HashSet<GameplayModifierId>();
+            for (int i = 0; i < activeRolls.Count; i++)
+            {
+                GameplayModifierId id = activeRolls[i];
+                if (seen.Add(id))
+                    result.Add(new KeyValuePair<GameplayModifierId, int>(id,
+                        GetStacks(id)));
+            }
+            return result;
+        }
+
+        private static GameObject CloneOptionsClipboard(Transform parent)
+        {
+            try
+            {
+                GameObject template = Resources.FindObjectsOfTypeAll<GameObject>()
+                    .FirstOrDefault(x => x != null && x.name.Equals(
+                        "OptionsClipboard", StringComparison.OrdinalIgnoreCase));
+                if (template == null) return null;
+                GameObject clone = UnityEngine.Object.Instantiate(template);
+                clone.name = "GameplayModifiersOptionsClipboard";
+                clone.transform.SetParent(parent, false);
+                clone.SetActive(true);
+
+                foreach (TMP_Text text in clone.GetComponentsInChildren<TMP_Text>(true))
+                    if (text != null) text.enabled = false;
+                foreach (Selectable selectable in clone.GetComponentsInChildren<Selectable>(true))
+                    if (selectable != null && selectable.gameObject != clone)
+                        selectable.gameObject.SetActive(false);
+                foreach (Graphic graphic in clone.GetComponentsInChildren<Graphic>(true))
+                    if (graphic != null) graphic.raycastTarget = false;
+                foreach (MonoBehaviour behaviour in clone.GetComponentsInChildren<MonoBehaviour>(true))
+                {
+                    if (behaviour == null || behaviour is Graphic
+                        || behaviour is Mask || behaviour is RectMask2D
+                        || behaviour is LayoutGroup || behaviour is ContentSizeFitter)
+                        continue;
+                    behaviour.enabled = false;
+                }
+                Canvas nestedCanvas = clone.GetComponent<Canvas>();
+                if (nestedCanvas != null)
+                {
+                    nestedCanvas.overrideSorting = false;
+                    nestedCanvas.sortingOrder = 0;
+                }
+                return clone;
+            }
+            catch { return null; }
+        }
+
+        private static GameObject BuildFallbackClipboard(Transform parent)
+        {
+            GameObject red = new GameObject("GameplayModifiersClipboardFallback",
+                typeof(RectTransform), typeof(Image));
+            red.transform.SetParent(parent, false);
+            Image redImage = red.GetComponent<Image>();
+            redImage.color = new Color(.9f, .03f, .02f, 1f);
+            redImage.raycastTarget = false;
+
+            GameObject paper = new GameObject("Paper", typeof(RectTransform), typeof(Image));
+            paper.transform.SetParent(red.transform, false);
+            RectTransform paperRect = paper.GetComponent<RectTransform>();
+            paperRect.anchorMin = new Vector2(.09f, .04f);
+            paperRect.anchorMax = new Vector2(.91f, .84f);
+            paperRect.offsetMin = paperRect.offsetMax = Vector2.zero;
+            Image paperImage = paper.GetComponent<Image>();
+            paperImage.color = new Color(.98f, .98f, .95f, 1f);
+            paperImage.raycastTarget = false;
+
+            GameObject clamp = new GameObject("Clamp", typeof(RectTransform), typeof(Image));
+            clamp.transform.SetParent(red.transform, false);
+            RectTransform clampRect = clamp.GetComponent<RectTransform>();
+            clampRect.anchorMin = new Vector2(.12f, .82f);
+            clampRect.anchorMax = new Vector2(.88f, .93f);
+            clampRect.offsetMin = clampRect.offsetMax = Vector2.zero;
+            Image clampImage = clamp.GetComponent<Image>();
+            clampImage.color = new Color(.75f, .75f, .75f, 1f);
+            clampImage.raycastTarget = false;
+            return red;
+        }
+
+        private static TMP_FontAsset FindComicFont()
+        {
+            try
+            {
+                TMP_FontAsset comic = Resources.FindObjectsOfTypeAll<TMP_FontAsset>()
+                    .FirstOrDefault(x => x != null
+                        && x.name.ToLowerInvariant().Contains("comic"));
+                if (comic != null) return comic;
+                return Resources.FindObjectsOfTypeAll<TMP_FontAsset>()
+                    .FirstOrDefault(x => x != null);
+            }
+            catch { return null; }
+        }
+
+        private static TextMeshProUGUI CreateRuntimeText(Transform parent,
+            string name, string value, TMP_FontAsset font, float size, Color color,
+            TextAlignmentOptions alignment, Vector2 position, Vector2 dimensions)
+        {
+            GameObject gameObject = new GameObject(name, typeof(RectTransform));
+            gameObject.transform.SetParent(parent, false);
+            TextMeshProUGUI text = gameObject.AddComponent<TextMeshProUGUI>();
+            if (font != null) text.font = font;
+            text.text = value;
+            text.fontSize = size;
+            text.color = color;
+            text.alignment = alignment;
+            text.enableWordWrapping = false;
+            text.overflowMode = TextOverflowModes.Overflow;
+            text.raycastTarget = false;
+            RectTransform rect = gameObject.GetComponent<RectTransform>();
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 0f);
+            rect.pivot = new Vector2(0f, 0f);
+            rect.anchoredPosition = position;
+            rect.sizeDelta = dimensions;
+            return text;
+        }
+
+        private void Update()
+        {
+            if (!Enabled || activeRolls.Count == 0)
+            {
+                DestroyPauseDisplay();
+                return;
+            }
+            pauseRefresh -= Time.unscaledDeltaTime;
+            if (pauseRefresh > 0f) return;
+            pauseRefresh = .25f;
+
+            if (Time.timeScale == 0f)
+            {
+                Transform target = FindPauseParent();
+                if (target != null && (pauseObject == null || pauseParent != target))
+                {
+                    DestroyPauseDisplay();
+                    pauseParent = target;
+                    pauseObject = BuildClipboardDisplay(target, false);
+                }
+            }
+            else DestroyPauseDisplay();
+        }
+
+        private Transform FindPauseParent()
+        {
+            try
+            {
+                RectTransform[] rects = Resources.FindObjectsOfTypeAll<RectTransform>();
+                for (int i = 0; i < rects.Length; i++)
+                {
+                    RectTransform rect = rects[i];
+                    if (rect == null || !rect.gameObject.activeInHierarchy) continue;
+                    if (pauseObject != null && (rect.transform == pauseObject.transform
+                        || rect.transform.IsChildOf(pauseObject.transform))) continue;
+                    string name = rect.name.ToLowerInvariant();
+                    if (!name.Contains("pause") || name.Contains("gameplaymodifiers")) continue;
+                    Canvas canvas = rect.GetComponentInParent<Canvas>();
+                    if (canvas != null && canvas.gameObject.activeInHierarchy)
+                        return canvas.transform;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private void StopReveal()
+        {
+            if (revealRoutine != null)
+            {
+                try { StopCoroutine(revealRoutine); } catch { }
+                revealRoutine = null;
+            }
+            if (revealObject != null) Destroy(revealObject);
+            revealObject = null;
+        }
+
+        private void DestroyPauseDisplay()
+        {
+            if (pauseObject != null) Destroy(pauseObject);
+            pauseObject = null;
+            pauseParent = null;
+        }
+    }
 
     public class ChaosManager : MonoBehaviour
     {
