@@ -1345,6 +1345,9 @@ namespace KnoxumsChaosMode
                         ChaosManager.Instance.EndFloorIntro();
                     }
                     ChaosManager.Instance.ApplyFunAfterPostGen(__instance);
+                    // Визуальный ролл запускается сразу после Post Gen; корутина
+                    // сама дождётся появления игрового HUD.
+                    GameplayModifierManager.Instance?.OnFloorBeginPlay(__instance);
                 }
                 if (ChaosManager.Instance != null && ChaosManager.Instance.IsChaosModeActive)
                 {
@@ -1374,7 +1377,6 @@ namespace KnoxumsChaosMode
                     ElevatorUnlockService.KeepPitstopElevatorsOpen(__instance);
                     ChaosManager.Instance.ShowPitstopChaosReminder();
                 }
-                GameplayModifierManager.Instance?.OnFloorBeginPlay(__instance);
             }
             catch { }
         }
@@ -3709,23 +3711,27 @@ namespace KnoxumsChaosMode
             }
             if (IsPitstopScene()) return;
 
+            EnsureSetForCurrentFloor();
+            revealPending = activeRolls.Count > 0;
+        }
+
+        private void EnsureSetForCurrentFloor()
+        {
             selectedMode = KnoxumsChaosModePlugin.GameplayModifierModeConfig?.Value
                 ?? GameplayModifierMode.WholeRun;
             selectedRollCount = Mathf.Clamp(
                 KnoxumsChaosModePlugin.GameplayModifierRollsConfig?.Value ?? 3, 1, 5);
             string floorKey = BuildFloorKey();
-            bool needRoll = selectedMode == GameplayModifierMode.WholeRun
-                ? !runSetCreated
-                : !string.Equals(selectedFloorKey, floorKey,
-                    StringComparison.Ordinal);
+            bool needRoll = activeRolls.Count == 0
+                || (selectedMode == GameplayModifierMode.WholeRun
+                    ? !runSetCreated
+                    : !string.Equals(selectedFloorKey, floorKey,
+                        StringComparison.Ordinal));
 
-            if (needRoll)
-            {
-                RollSet(selectedRollCount);
-                runSetCreated = true;
-                selectedFloorKey = floorKey;
-            }
-            revealPending = activeRolls.Count > 0;
+            if (!needRoll) return;
+            RollSet(selectedRollCount);
+            runSetCreated = true;
+            selectedFloorKey = floorKey;
         }
 
         private void RollSet(int count)
@@ -3787,10 +3793,22 @@ namespace KnoxumsChaosMode
 
         public void OnFloorBeginPlay(BaseGameManager bgm)
         {
-            if (!Enabled || activeRolls.Count == 0 || !revealPending
-                || bgm == null || ElevatorUnlockService.IsPitstopManager(bgm)) return;
+            if (!Enabled || bgm == null || ElevatorUnlockService.IsPitstopManager(bgm))
+                return;
+
+            // Визуальный тест обязан работать даже на фиксированном этаже, где
+            // конкретная версия игры не вызывает LevelBuilder.StartGenerate.
+            EnsureSetForCurrentFloor();
+            if (activeRolls.Count == 0) return;
             revealPending = false;
             StopReveal();
+            try
+            {
+                KnoxumsChaosModePlugin.Log.LogInfo(
+                    "Gameplay Modifiers visual reveal started with "
+                    + activeRolls.Count + " rolls.");
+            }
+            catch { }
             revealRoutine = StartCoroutine(RevealRoutine(bgm));
         }
 
@@ -5332,11 +5350,15 @@ namespace KnoxumsChaosMode
                 typeof(RectTransform), typeof(CanvasGroup));
             pitstopReminderObject.transform.SetParent(canvas.transform, false);
             RectTransform rect = pitstopReminderObject.GetComponent<RectTransform>();
-            rect.anchorMin = new Vector2(.06f, .72f);
-            rect.anchorMax = new Vector2(.94f, .96f);
+            // Напоминание находится немного ниже вертикального центра экрана.
+            rect.anchorMin = new Vector2(.06f, .28f);
+            rect.anchorMax = new Vector2(.94f, .50f);
             rect.offsetMin = rect.offsetMax = Vector2.zero;
 
-            TMP_FontAsset font = GetComicSansFont();
+            HudManager reminderHud = null;
+            try { reminderHud = Singleton<CoreGameManager>.Instance?.GetHud(0); } catch { }
+            // Берём шрифт непосредственно из оригинального HUD игры.
+            TMP_FontAsset font = GetComicSansFont(reminderHud);
             string reminder = "<b>JUST A REMINDER!</b> All applied chaos features are intended to disable in the pitstop, they are only working in the school!";
             Color[] layerColors = { Color.black, Color.yellow };
             Vector2[] layerOffsets = { new Vector2(2f, -2f), Vector2.zero };
@@ -5353,7 +5375,7 @@ namespace KnoxumsChaosMode
                 TextMeshProUGUI text = layer.AddComponent<TextMeshProUGUI>();
                 if (font != null) text.font = font;
                 text.text = reminder;
-                text.fontSize = 24f;
+                text.fontSize = 12f;
                 text.color = layerColors[i];
                 text.alignment = TextAlignmentOptions.Center;
                 text.enableWordWrapping = true;
