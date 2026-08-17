@@ -1689,6 +1689,7 @@ namespace KnoxumsChaosMode
         [HarmonyPrefix]
         public static void Pre_POS1(ref AudioClip clip)
         {
+            if (SoundShuffleDetachedPlaybackPatch.BypassRemap) return;
             if (!SkipAudio(clip)) try { clip = ChaosManager.Instance.GetShuffledAudioClip(clip); } catch { }
         }
 
@@ -1696,14 +1697,26 @@ namespace KnoxumsChaosMode
         [HarmonyPrefix]
         public static void Pre_POS2(ref AudioClip clip)
         {
+            if (SoundShuffleDetachedPlaybackPatch.BypassRemap) return;
             if (!SkipAudio(clip)) try { clip = ChaosManager.Instance.GetShuffledAudioClip(clip); } catch { }
         }
 
         [HarmonyPatch(typeof(AudioSource), "clip", MethodType.Setter)]
         [HarmonyPrefix]
-        public static void Pre_AC(ref AudioClip value)
+        public static void Pre_AC(AudioSource __instance, ref AudioClip value)
         {
-            if (!SkipAudio(value)) try { value = ChaosManager.Instance.GetShuffledAudioClip(value); } catch { }
+            if (SoundShuffleDetachedPlaybackPatch.BypassRemap) return;
+            if (SkipAudio(value))
+            {
+                SoundShuffleDetachedPlaybackPatch.Unmark(__instance);
+                return;
+            }
+            try
+            {
+                value = ChaosManager.Instance.GetShuffledAudioClip(value);
+                SoundShuffleDetachedPlaybackPatch.Mark(__instance, value);
+            }
+            catch { SoundShuffleDetachedPlaybackPatch.Unmark(__instance); }
         }
 
         [HarmonyPatch(typeof(StandardDoor), "Lock")]
@@ -1885,6 +1898,134 @@ namespace KnoxumsChaosMode
         static void Postfix(ref bool __result)
         {
             if (Active) __result = false;
+        }
+    }
+
+    // AudioManager быстро переходит к следующей записи, поэтому обычный
+    // AudioSource.Play начал бы обрезать предыдущие случайные клипы. Каждый
+    // перемешанный clip запускаем на отдельном временном AudioSource: игровой
+    // сценарий не ждёт его, но сам звук остаётся слышимым до конца.
+    [HarmonyPatch]
+    public static class SoundShuffleDetachedPlaybackPatch
+    {
+        private sealed class MarkedSource
+        {
+            public AudioSource source;
+            public AudioClip clip;
+        }
+
+        private static readonly Dictionary<int, MarkedSource> marked =
+            new Dictionary<int, MarkedSource>();
+
+        [ThreadStatic] private static bool bypassRemap;
+        internal static bool BypassRemap => bypassRemap;
+
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            MethodInfo[] methods = typeof(AudioSource).GetMethods(
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            HashSet<MethodBase> seen = new HashSet<MethodBase>();
+            for (int i = 0; i < methods.Length; i++)
+            {
+                MethodInfo method = methods[i];
+                if (method == null || method.Name != "Play"
+                    || method.ReturnType != typeof(void)) continue;
+                ParameterInfo[] parameters = method.GetParameters();
+                bool supported = parameters.Length == 0
+                    || (parameters.Length == 1
+                        && parameters[0].ParameterType == typeof(ulong));
+                if (supported && seen.Add(method)) yield return method;
+            }
+        }
+
+        static bool Prefix(AudioSource __instance)
+        {
+            if (bypassRemap || !SoundShuffleNoAudioWaitPatch.Active) return true;
+            return !TryPlayDetached(__instance);
+        }
+
+        internal static void Mark(AudioSource source, AudioClip clip)
+        {
+            if (source == null || clip == null) return;
+            marked[source.GetInstanceID()] = new MarkedSource
+            {
+                source = source,
+                clip = clip
+            };
+        }
+
+        internal static void Unmark(AudioSource source)
+        {
+            if (source != null) marked.Remove(source.GetInstanceID());
+        }
+
+        internal static void ClearMarks()
+        {
+            marked.Clear();
+            bypassRemap = false;
+        }
+
+        private static bool TryPlayDetached(AudioSource source)
+        {
+            if (source == null || source.clip == null || source.loop) return false;
+            int id = source.GetInstanceID();
+            if (!marked.TryGetValue(id, out MarkedSource entry)
+                || entry == null || entry.source != source || entry.clip != source.clip)
+            {
+                marked.Remove(id);
+                return false;
+            }
+
+            GameObject holder = null;
+            try
+            {
+                holder = new GameObject("SoundShuffleDetachedAudio");
+                holder.transform.position = source.transform.position;
+                holder.transform.rotation = source.transform.rotation;
+                AudioSource detached = holder.AddComponent<AudioSource>();
+                detached.playOnAwake = false;
+                detached.loop = false;
+                detached.outputAudioMixerGroup = source.outputAudioMixerGroup;
+                detached.mute = source.mute;
+                detached.bypassEffects = source.bypassEffects;
+                detached.bypassListenerEffects = source.bypassListenerEffects;
+                detached.bypassReverbZones = source.bypassReverbZones;
+                detached.priority = source.priority;
+                detached.volume = source.volume;
+                detached.pitch = source.pitch;
+                detached.panStereo = source.panStereo;
+                detached.spatialBlend = source.spatialBlend;
+                detached.reverbZoneMix = source.reverbZoneMix;
+                detached.dopplerLevel = source.dopplerLevel;
+                detached.spread = source.spread;
+                detached.rolloffMode = source.rolloffMode;
+                detached.minDistance = source.minDistance;
+                detached.maxDistance = source.maxDistance;
+                detached.ignoreListenerPause = source.ignoreListenerPause;
+                detached.ignoreListenerVolume = source.ignoreListenerVolume;
+
+                bypassRemap = true;
+                detached.clip = source.clip;
+                detached.Play();
+                bypassRemap = false;
+
+                float pitch = Mathf.Max(.01f, Mathf.Abs(detached.pitch));
+                UnityEngine.Object.Destroy(holder,
+                    Mathf.Max(.1f, detached.clip.length / pitch + .25f));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                bypassRemap = false;
+                if (holder != null) UnityEngine.Object.Destroy(holder);
+                try
+                {
+                    KnoxumsChaosModePlugin.Log.LogWarning(
+                        "Sound Shuffle detached playback: " + ex.Message);
+                }
+                catch { }
+                return false;
+            }
         }
     }
 
@@ -3504,6 +3645,7 @@ namespace KnoxumsChaosMode
             if (beApplied && beLd != null) try { RestoreBuildersError(beLd); } catch { }
             beApplied = false; beLd = null;
             strMap.Clear(); instSprC.Clear(); itmSM.Clear(); itmMappedValues.Clear(); audM.Clear();
+            SoundShuffleDetachedPlaybackPatch.ClearMarks();
             pfxSpr.Clear(); allCT.Clear(); instVis.Clear(); sprOwn.Clear(); npcIC.Clear();
             itmSP.Clear(); audP.Clear(); pairedEvts.Clear(); origSpeeds.Clear();
             ResetCtrlShuffle(); ClearEggLog(); BuildersErrorRetries = 0; discoT2 = 0f;
@@ -5884,14 +6026,26 @@ namespace KnoxumsChaosMode
     public static class ElevatorButtonPressedPatch
     {
         [HarmonyPrefix]
-        static bool Prefix(Elevator __instance)
+        static bool Prefix(Elevator __instance, out bool __state)
         {
+            __state = ElevatorUnlockService.IsPitstopManager(
+                Singleton<BaseGameManager>.Instance);
             try { return ElevatorUnlockService.OnElevatorButtonPressed(__instance); }
             catch (Exception ex)
             {
                 KnoxumsChaosModePlugin.Log.LogError("Elevator.ButtonPressed lap hook: " + ex);
                 return true;
             }
+        }
+
+        [HarmonyPostfix]
+        static void Postfix(Elevator __instance, bool __state)
+        {
+            if (!__state || __instance == null) return;
+            // Prefix только вооружает выход, чтобы нативная кнопка увидела
+            // открытую дверь. После её логики гарантированно закрываем лифт.
+            ElevatorUnlockService.CloseElevatorDoors(__instance);
+            try { Physics.SyncTransforms(); } catch { }
         }
     }
 
