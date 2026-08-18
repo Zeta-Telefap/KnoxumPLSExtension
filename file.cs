@@ -3606,7 +3606,6 @@ namespace KnoxumsChaosMode
         private bool runSetCreated;
         private string selectedFloorKey = "";
         private bool revealPending;
-        private bool postGenerationReached;
         private bool beginPlayReached;
         private GameplayModifierMode selectedMode;
         private int selectedRollCount;
@@ -3813,7 +3812,6 @@ namespace KnoxumsChaosMode
             runSetCreated = false;
             selectedFloorKey = "";
             revealPending = false;
-            postGenerationReached = false;
             beginPlayReached = false;
             StopReveal();
             DestroyPauseDisplay();
@@ -3832,7 +3830,6 @@ namespace KnoxumsChaosMode
             EnsureSetForCurrentFloor();
             if (activeRolls.Count == 0) return;
             revealPending = true;
-            postGenerationReached = false;
             beginPlayReached = false;
             StopReveal();
             Transform parent = null;
@@ -3852,12 +3849,6 @@ namespace KnoxumsChaosMode
 
             EnsureSetForCurrentFloor();
             revealPending = activeRolls.Count > 0;
-            if (revealPending)
-            {
-                postGenerationReached = false;
-                beginPlayReached = false;
-                StartElevatorScreenReveal();
-            }
         }
 
         private void StartElevatorScreenReveal(Transform preferredParent = null,
@@ -3964,20 +3955,34 @@ namespace KnoxumsChaosMode
             if (!Enabled || bgm == null || ElevatorUnlockService.IsPitstopManager(bgm))
                 return;
 
-            EnsureSetForCurrentFloor();
             if (activeRolls.Count == 0) return;
             revealPending = false;
-            postGenerationReached = true;
-            StartElevatorScreenReveal();
         }
 
         public void NotifyBeginPlay(BaseGameManager bgm)
         {
-            if (bgm != null && !ElevatorUnlockService.IsPitstopManager(bgm))
+            if (bgm == null || ElevatorUnlockService.IsPitstopManager(bgm)) return;
+            beginPlayReached = true;
+            if (revealObject == null) return;
+            Canvas hudCanvas = null;
+            try { hudCanvas = Singleton<CoreGameManager>.Instance?.GetHud(0)?.Canvas(); }
+            catch { }
+            if (hudCanvas == null)
             {
-                postGenerationReached = true;
-                beginPlayReached = true;
+                StopReveal();
+                return;
             }
+            RectTransform rect = revealObject.GetComponent<RectTransform>();
+            Vector2 position = rect != null ? rect.anchoredPosition : Vector2.zero;
+            revealObject.transform.SetParent(hudCanvas.transform, false);
+            if (rect != null)
+            {
+                rect.anchorMin = rect.anchorMax = Vector2.zero;
+                rect.pivot = Vector2.zero;
+                rect.anchoredPosition = position;
+            }
+            revealObject.transform.SetAsLastSibling();
+            PlaceBelowCursor(revealObject.transform);
         }
 
         private IEnumerator RevealRoutine(Transform preferredParent,
@@ -4027,7 +4032,7 @@ namespace KnoxumsChaosMode
             {
                 if (minimumVisible > 0f)
                     minimumVisible -= Time.unscaledDeltaTime;
-                else if (postGenerationReached || beginPlayReached
+                else if (beginPlayReached
                     || (elevatorScreenMarker != null
                         && !elevatorScreenMarker.gameObject.activeInHierarchy))
                     break;
@@ -4161,6 +4166,7 @@ namespace KnoxumsChaosMode
             }
 
             root.transform.SetAsLastSibling();
+            PlaceBelowCursor(root.transform);
             return root;
         }
 
@@ -4206,6 +4212,33 @@ namespace KnoxumsChaosMode
             }
             catch { }
             return clipboard;
+        }
+
+        private static void PlaceBelowCursor(Transform visual)
+        {
+            if (visual == null || visual.parent == null) return;
+            CursorController cursor = CursorController.Instance;
+            if (cursor == null)
+            {
+                visual.SetAsLastSibling();
+                return;
+            }
+            Transform branch = cursor.transform;
+            while (branch.parent != null && branch.parent != visual.parent)
+                branch = branch.parent;
+            if (branch.parent != visual.parent)
+            {
+                visual.SetAsLastSibling();
+                return;
+            }
+            branch.SetAsLastSibling();
+            visual.SetSiblingIndex(Mathf.Max(0, visual.parent.childCount - 2));
+        }
+
+        private void LateUpdate()
+        {
+            if (revealObject != null) PlaceBelowCursor(revealObject.transform);
+            if (pauseObject != null) PlaceBelowCursor(pauseObject.transform);
         }
 
         private static TMP_FontAsset FindComicFont()
