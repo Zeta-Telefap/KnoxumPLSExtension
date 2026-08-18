@@ -21,9 +21,7 @@ using Random = UnityEngine.Random;
 
 namespace KnoxumsChaosMode
 {
-    // ============================================================================
-    //  ЧАСТЬ 1 / 5: BALDI RAMPAGE & CHAOS HARMONY-ПАТЧИ
-    // ============================================================================
+
 
     [HarmonyPatch]
     public static class BaldiRampagePatches
@@ -329,7 +327,7 @@ namespace KnoxumsChaosMode
         private static int GetAdjustedWeight(ItemObject item, int baseWeight)
         {
             const int MaxSafeWeight = 1000000;
-            // Нулевой вес означает отключённый вариант и не должен превращаться в 1.
+
             if (baseWeight <= 0) return 0;
             int w = Mathf.Clamp(baseWeight, 1, MaxSafeWeight);
             int mult = GetCachedMultiplier(item);
@@ -355,7 +353,7 @@ namespace KnoxumsChaosMode
 
         private static ItemObject FindAppleOrBanana()
         {
-            // Если ресурсы ещё не были загружены при первом поиске, разрешаем повторный поиск.
+
             if (!itemsSearched || (cachedAppleItem == null && cachedBananaItem == null))
             {
                 itemsSearched = true;
@@ -378,8 +376,8 @@ namespace KnoxumsChaosMode
 
         public static BaldiRampageController Ctl(NPC npc)
         {
-            // Контроллер трусливого Балди никогда не должен добавляться другим NPC
-            // и не должен создаваться, когда соответствующий режим выключен.
+
+
             if (npc == null || !(npc is Baldi)) return null;
             BaldiRampageController c = npc.GetComponent<BaldiRampageController>();
             if (c == null && On)
@@ -546,8 +544,8 @@ namespace KnoxumsChaosMode
         [HarmonyPrefix]
         static bool Pre_AllNotebooks(BaseGameManager __instance)
         {
-            // В Laps последняя тетрадь должна только открыть лифты. Переход
-            // круга запускается настоящей кнопкой лифта через LoadNextLevel.
+
+
             ChaosManager cm = ChaosManager.Instance;
             if (cm != null && cm.IsLapsActive) return true;
             return !On;
@@ -610,8 +608,7 @@ namespace KnoxumsChaosMode
             return false;
         }
 
-        // Эти два метода являются обработчиками для CowardEndGameAllPatch.
-        // Не ставим на них отдельные HarmonyPatch-атрибуты, иначе EndGame патчится дважды.
+
         internal static bool Pre_EndGame(CoreGameManager __instance)
         {
             if (!On) return true;
@@ -929,7 +926,7 @@ namespace KnoxumsChaosMode
                     int total = __instance.NotebookTotal;
                     if (total > 0 && found >= total && !ElevatorUnlockService.ElevatorsUnlockedThisFloor && !On)
                     {
-                        // Круг начинается только после нажатия кнопки лифта.
+
                         ElevatorUnlockService.OnAllNotebooks(__instance, "CollectNotebooks fallback");
                     }
                 }
@@ -942,7 +939,7 @@ namespace KnoxumsChaosMode
                 {
                     if (!(n is Baldi)) continue;
                     BaldiRampageController ctl = Ctl(n);
-                    // SetNotebooks сам применяет скорость; второй Enforce здесь не нужен.
+
                     if (ctl != null) ctl.SetNotebooks(__instance.FoundNotebooks);
                 }
             }
@@ -1205,8 +1202,8 @@ namespace KnoxumsChaosMode
         [HarmonyPostfix]
         public static void Postfix_BeginSpoopMode_AudioWindow()
         {
-            // Как только начинается режим погони, вступление Балди закончено и
-            // специальная no-wait обработка Sound Shuffle больше не нужна.
+
+
             ChaosManager.Instance?.EndFloorIntro();
         }
 
@@ -1230,7 +1227,7 @@ namespace KnoxumsChaosMode
                     if (total > 0 && found >= total && !ElevatorUnlockService.ElevatorsUnlockedThisFloor
                         && !BaldiRampageConfig.IsActive)
                     {
-                        // Только открываем лифты; новый круг начнётся от кнопки.
+
                         ElevatorUnlockService.OnAllNotebooks(__instance, "ChaosPatches CollectNotebooks");
                     }
                 }
@@ -1238,8 +1235,7 @@ namespace KnoxumsChaosMode
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("CollectNotebooks: " + ex.Message); }
         }
 
-        // AllNotebooks всегда оставляем игре: он открывает лифты. Сам переход
-        // круга перехватывается в LoadNextLevel после нажатия зелёной кнопки.
+
         [HarmonyPatch(typeof(BaseGameManager), "AllNotebooks")]
         [HarmonyPrefix]
         [HarmonyPriority(Priority.First)]
@@ -1298,8 +1294,8 @@ namespace KnoxumsChaosMode
         [HarmonyPrefix]
         public static void Prefix_Begin(RandomEvent __instance)
         {
-            // active нельзя выставлять до оригинального Begin: некоторые версии игры
-            // прекращают Begin, если событие уже активно.
+
+
             if (ChaosManager.Instance != null && ChaosManager.Instance.IsEventPropsShuffleActive)
                 ChaosManager.Instance.ShuffleEventProperties(__instance);
         }
@@ -1342,9 +1338,7 @@ namespace KnoxumsChaosMode
                 {
                     ChaosManager.Instance.IsLevelReady = false;
 
-                    // Важно: сначала очищаем данные старой сцены, пока
-                    // lapRestartPending ещё true, иначе ResetSchoolShuffle
-                    // сбросит CurrentLap обратно на 1.
+
                     ChaosManager.Instance.ResetSchoolShuffle();
                     ChaosManager.Instance.RestoreLapAfterRestart();
 
@@ -1355,8 +1349,8 @@ namespace KnoxumsChaosMode
                     }
                     else ChaosManager.Instance.BeginBaldiCountdownAudioWindow();
                     ChaosManager.Instance.ApplyFunAfterPostGen(__instance);
-                    // Post Gen заканчивается, пока между этажами ещё показан
-                    // отдельный Elevator Screen. Планшет рисуется именно поверх него.
+
+
                     GameplayModifierManager.Instance?.OnFloorPostGeneration(__instance);
                 }
                 if (ChaosManager.Instance != null && ChaosManager.Instance.IsChaosModeActive)
@@ -1390,8 +1384,8 @@ namespace KnoxumsChaosMode
                 }
                 else
                 {
-                    // BeginPlay означает, что Elevator Screen заканчивает работу
-                    // и открывает путь в школу. Это сигнал планшету уехать вниз.
+
+
                     GameplayModifierManager.Instance?.NotifyBeginPlay(__instance);
                 }
             }
@@ -1406,8 +1400,7 @@ namespace KnoxumsChaosMode
             {
                 ChaosManager cm = ChaosManager.Instance;
 
-                // FinishLevel/ButtonPressed может вызвать LoadNextLevel повторно,
-                // пока уже выполняется ручной переход круга.
+
                 if (cm != null && cm.IsLapTransitionInProgress) return false;
 
                 if (ElevatorUnlockService.IsPitstopManager(__instance))
@@ -1422,9 +1415,7 @@ namespace KnoxumsChaosMode
                     return true;
                 }
 
-                // На промежуточном круге отменяем загрузку следующей сцены и
-                // перестраиваем текущий этаж на месте. Если мы уже дошли сюда,
-                // нативный FinishLevel мог заморозить игрока — разморозим один раз.
+
                 if (cm != null && cm.ShouldStartNewLap())
                 {
                     cm.StartInstantNewLap(__instance, true);
@@ -1485,7 +1476,7 @@ namespace KnoxumsChaosMode
                     cm.StartInstantNewLap(__instance, true);
                     return false;
                 }
-                // Endless не уходит в обычный pitstop.
+
                 if (cm != null) cm.IsLevelReady = false;
                 ElevatorUnlockService.MarkLoadNextStarted();
             }
@@ -1550,8 +1541,7 @@ namespace KnoxumsChaosMode
                 if (ChaosManager.Instance.IsCharPropShuffleActive)
                     ChaosManager.Instance.ShuffleNpcProperties(__instance);
 
-                // В Initialize скорость Navigator ещё не обязана быть установлена.
-                // Не кэшируем и не меняем её здесь — это делается после SpawnNPCs.
+
             }
             catch { }
         }
@@ -1832,16 +1822,14 @@ namespace KnoxumsChaosMode
             {
                 if (ChaosManager.Instance == null || !ChaosManager.Instance.IsLevelReady) return;
                 if (ChaosManager.Instance.IsLapsActive) ChaosManager.Instance.InjectLapsIntoHud(__instance);
-                // PUBLIC BETA watermark временно отключён до следующего использования.
-                // ChaosManager.Instance.InjectBetaWatermarkIntoHud(__instance);
+
+
             }
             catch { }
         }
     }
 
-    // В Sound Shuffle игровые корутины не ждут фактической длины случайного
-    // клипа. Для gameplay сохраняется виртуальное время исходного звука, поэтому
-    // отсчёт не задерживается, но штатные кулдауны также не исчезают.
+
     [HarmonyPatch]
     public static class SoundShuffleNoAudioWaitPatch
     {
@@ -1912,9 +1900,8 @@ namespace KnoxumsChaosMode
                 try
                 {
                     ChaosManager chaos = ChaosManager.Instance;
-                    // Виртуальная длительность нужна только приветствию/отсчёту
-                    // Балди. В остальной игре Sound Shuffle снова использует
-                    // настоящую длительность случайного клипа.
+
+
                     return chaos != null && chaos.IsSoundsShuffleActive
                         && chaos.FloorIntroActive && chaos.IsLevelReady
                         && !chaos.IsPaused();
@@ -1929,17 +1916,14 @@ namespace KnoxumsChaosMode
             if (SoundShuffleDetachedPlaybackPatch.TryGetVirtualPlaying(
                 __instance, out bool virtualPlaying))
             {
-                // Сохраняем ожидание очереди и исходный gameplay-cooldown, но
-                // не ждём фактическую длину случайного клипа.
+
+
                 __result = __result || virtualPlaying;
             }
         }
     }
 
-    // AudioManager быстро переходит к следующей записи, поэтому обычный
-    // AudioSource.Play начал бы обрезать предыдущие случайные клипы. Каждый
-    // перемешанный clip запускаем на отдельном временном AudioSource: игровой
-    // сценарий не ждёт его, но сам звук остаётся слышимым до конца.
+
     [HarmonyPatch]
     public static class SoundShuffleDetachedPlaybackPatch
     {
@@ -2072,8 +2056,8 @@ namespace KnoxumsChaosMode
                 bypassRemap = false;
 
                 float pitch = Mathf.Max(.01f, Mathf.Abs(detached.pitch));
-                // PlaySingle должен заменить старое ожидание, а обычная очередь
-                // сама останется последовательной через virtual isPlaying.
+
+
                 entry.virtualWaitUntil = Time.unscaledTime
                     + entry.originalDuration / pitch;
                 UnityEngine.Object.Destroy(holder,
@@ -2248,10 +2232,6 @@ namespace KnoxumsChaosMode
         }
     }
 
-    // ============================================================================
-    //  ЧАСТЬ 2 / 5: PLUGIN + OPTIONS
-    // ============================================================================
-
 
     public enum ChaosModeType { Chaos, ChaosPlus1, DoubleChaos }
     public enum CloneSpawnPoint { CharPosition, CharSpawnPoint }
@@ -2382,8 +2362,8 @@ namespace KnoxumsChaosMode
             Instance = this;
             IsChaosModeEnabledConfig = Config.Bind("Gameplay", "IsChaosModeEnabled", false, "Enable Chaos Mode. ");
             SelectedChaosMode = Config.Bind("Gameplay", "SelectedChaosMode", ChaosModeType.Chaos, "Chaos Mode type. ");
-            // Legacy config key is retained so old config files remain readable,
-            // but clone-size randomization itself is disabled.
+
+
             EnableSizeChaos = Config.Bind("Gameplay", "EnableSizeChaos", false, "Legacy option (unused). ");
             IsPropShuffleEnabledConfig = Config.Bind("PropsShuffle", "IsPropShuffleEnabled", false, "Event Props Shuffle. ");
             IsCharPropShuffleEnabledConfig = Config.Bind("PropsShuffle", "IsCharPropShuffleEnabled", false, "Char Props Shuffle. ");
@@ -2401,7 +2381,7 @@ namespace KnoxumsChaosMode
             IsDiscoShuffleEnabledConfig = Config.Bind("OtherChaos", "IsDiscoShuffleEnabled", false, "Disco lighting. ");
             IsBaldiCowardEnabledConfig = Config.Bind("OtherChaos", "IsBaldiCowardEnabled", false, "Baldi-coward mode. ");
             IsLapsEnabledConfig = Config.Bind("OtherChaos", "IsLapsEnabled", false, "Enable laps mode. ");
-            // 0 = бесконечные круги; 2..5 = обычное ограниченное число кругов.
+
             LapsCountConfig = Config.Bind("OtherChaos", "LapsCount", 2,
                 "Number of laps (2-5). Set to 0 for infinite laps. ");
             CloneSpawnPointConfig = Config.Bind("Settings", "CloneSpawnPoint", CloneSpawnPoint.CharPosition, "Clone spawn location. ");
@@ -2534,8 +2514,8 @@ namespace KnoxumsChaosMode
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         private static void R2(OptionsMenu m, CustomOptionsHandler h)
         {
-            // Сохраняем именно оригинальный визуал OptionsClipboard из меню,
-            // чтобы игровой ролл не рисовал имитацию прямоугольниками.
+
+
             GameplayModifierManager.CaptureOptionsClipboardVisual(m);
             KnoxumsChaosModePlugin.Instance.RegisterChaosCategories(h);
         }
@@ -2692,12 +2672,12 @@ namespace KnoxumsChaosMode
             p5s2 = new GameObject("P5S2", typeof(RectTransform));
             p5s2.transform.SetParent(p5.transform, false);
             p5s2.transform.localPosition = Vector3.zero;
-            // В интерфейсе галочка называется Warning: включено = показывать.
-            // В конфиге сохраняем старый DisableWarning для совместимости.
+
+
             warningT = MkT(p5s2, "Warning",
                 !KnoxumsChaosModePlugin.DisableWarningConfig.Value, 0f);
 
-            // Стрелки находятся по бокам содержимого, но ближе к центру.
+
             p5LA = CreateButton(OnP5L, menuArrowLeft, menuArrowLeftHighlight,
                 "P5L", new Vector3(-150f, -55f, 0f));
             p5LA.transform.SetParent(p5.transform, false);
@@ -2870,7 +2850,7 @@ namespace KnoxumsChaosMode
 
         private void RefreshCowardLapsCover()
         {
-            // Laps скрыт из меню, но всё ещё может быть включён вручную в config.
+
             bool lapsOn = KnoxumsChaosModePlugin.IsLapsEnabledConfig?.Value ?? false;
             if (lapsOn) SetToggle(baldiCowardT, false);
             if (cowardLapsCover != null)
@@ -2982,8 +2962,7 @@ namespace KnoxumsChaosMode
         }
     }
 
-    // Оставлен для обратной совместимости, но основной комбинированный эффект теперь
-    // выполняет FunCameraFlip. При уничтожении обязательно возвращает ReverseAudio.
+
     public class FunMirrorMode : MonoBehaviour
     {
         private readonly Camera[] cameraToMirror = new Camera[2];
@@ -3260,8 +3239,8 @@ namespace KnoxumsChaosMode
         private static readonly Color PlayerColor = new Color(0xE2 / 255f, 0xC3 / 255f, 0x7F / 255f, 1f);
         private const float PlayerStrength = 6f;
         private const float PrincipalStrength = 4f;
-        // Fog overlaps the lantern falloff so an unlit interpolation strip can
-        // never appear as a white ring between the light and the black void.
+
+
         private const float VoidFogStart = 42f;
         private const float VoidFogMax = 58f;
 
@@ -3595,16 +3574,12 @@ namespace KnoxumsChaosMode
         {
             if (ChaosManager.Instance == null || !ChaosManager.Instance.IsCharacterSpritesShuffleActive
                 || !ChaosManager.Instance.IsLevelReady || npc == null || rr == null) return;
-            // Всегда преобразуем исходный спрайт renderer, а не уже перемешанный результат.
+
             for (int i = 0; i < rr.Length; i++)
                 if (rr[i] != null && originalSprites[i] != null)
                     rr[i].sprite = ChaosManager.Instance.GetShuffledCharacterSprite(originalSprites[i], npc);
         }
     }
-
-    // ============================================================================
-    //  ЧАСТЬ 3 / 5: CHAOS MANAGER (С КЛОНАМИ, КРУГАМИ И ВАТЕРМАРКОЙ BETA)
-    // ============================================================================
 
 
     public class GameplayModifierManager : MonoBehaviour
@@ -3638,9 +3613,8 @@ namespace KnoxumsChaosMode
             if (menu == null) return;
             try
             {
-                // В обычном OptionsMenu сам OptionsMenu является дочерним
-                // объектом OptionsClipboard. Корневой Image имеет приоритет над
-                // бумагой, кнопками и другими дочерними картинками.
+
+
                 Transform exactRoot = menu.transform;
                 while (exactRoot != null)
                 {
@@ -3901,9 +3875,8 @@ namespace KnoxumsChaosMode
                 if (bgm != null) level = bgm.CurrentLevel;
             }
             catch { }
-            // Seed намеренно не входит в ключ: при смерти генератор может
-            // получить новый внутренний seed, но набор этого же этажа обязан
-            // сохраниться. Новый школьный этаж определяется CurrentLevel.
+
+
             return scene + "|" + level;
         }
 
@@ -3925,8 +3898,7 @@ namespace KnoxumsChaosMode
             if (!Enabled || bgm == null || ElevatorUnlockService.IsPitstopManager(bgm))
                 return;
 
-            // Визуальный тест обязан работать даже на фиксированном этаже, где
-            // конкретная версия игры не вызывает LevelBuilder.StartGenerate.
+
             EnsureSetForCurrentFloor();
             if (activeRolls.Count == 0) return;
             revealPending = false;
@@ -3950,8 +3922,8 @@ namespace KnoxumsChaosMode
 
         private IEnumerator RevealRoutine(BaseGameManager bgm)
         {
-            // Это не выход из стартового лифта внутри школы. Ищем отдельный
-            // Elevator Screen, который показывается между Pitstop и новым этажом.
+
+
             Transform elevatorScreenMarker = null;
             Transform displayParent = null;
             float findTime = 12f;
@@ -3963,7 +3935,7 @@ namespace KnoxumsChaosMode
                 yield return null;
             }
 
-            // Fallback нужен только для теста на версиях с другим именем объекта.
+
             if (displayParent == null)
             {
                 try
@@ -3975,8 +3947,7 @@ namespace KnoxumsChaosMode
             }
             if (displayParent == null) { revealRoutine = null; yield break; }
 
-            // Post Gen вызывается после появления Elevator Screen и закрытия его
-            // дверей; небольшой settle не даёт планшету наложиться на последний кадр.
+
             float settle = .2f;
             while (settle > 0f)
             { settle -= Time.unscaledDeltaTime; yield return null; }
@@ -4110,8 +4081,8 @@ namespace KnoxumsChaosMode
             }
 
             TMP_FontAsset font = FindComicFont();
-            // Comic Sans title uses the game's usual hard shadow: a second
-            // black copy shifted slightly down and right, not TMP outline.
+
+
             CreateRuntimeText(root.transform, "ModifiersTitleShadow",
                 "Modifiers:", font, 24f, Color.black,
                 TextAlignmentOptions.Center, new Vector2(2f, 190f),
@@ -4129,8 +4100,8 @@ namespace KnoxumsChaosMode
                 if (entry.Value > 1)
                     text += "\n<size=11><color=#707070>×" + entry.Value
                         + "</color></size>";
-                // Список расположен ниже зажима и плотнее по вертикали, как на
-                // макете OptionsClipboard.
+
+
                 CreateRuntimeText(root.transform, "ModifierRow" + i, text, font,
                     17f, Color.black, TextAlignmentOptions.TopLeft,
                     new Vector2(34f, 124f - i * 24f), new Vector2(172f, 28f));
@@ -4169,8 +4140,8 @@ namespace KnoxumsChaosMode
             image.type = Image.Type.Simple;
             image.preserveAspect = true;
             image.raycastTarget = false;
-            // OptionsClipboard — пиксель-арт. Bilinear-фильтрация превращала
-            // оригинальный спрайт в мыльную картинку при масштабировании HUD.
+
+
             try
             {
                 if (sprite.texture != null)
@@ -4475,10 +4446,8 @@ namespace KnoxumsChaosMode
             else if (IsGameActive() && !generationBusy) TickClosedElevatorBarriers();
             EnforcePitstopYtp();
             if (IsLapsActive) SyncLapsHudWithNotebooks();
-            // PUBLIC BETA watermark временно отключён.
-            // if (IsLevelReady) SyncBetaWatermarkWithHud();
-            // Chaos Mode больше не ограничивает скорость NPC каждый кадр.
-            // Это ломало естественное ускорение Балди и других персонажей.
+
+
         }
 
         private void HandleCode()
@@ -4956,7 +4925,7 @@ namespace KnoxumsChaosMode
             try { ElevatorUnlockService.ClearClosedElevatorFrontBarriers(bgm ?? Singleton<BaseGameManager>.Instance); } catch { }
             AllowFunSettings();
             CreateLapsHud();
-            // CreateBetaWatermarkHud(); // Сохранено для будущего использования.
+
             RefreshSchoolItemPool();
         }
 
@@ -5090,7 +5059,7 @@ namespace KnoxumsChaosMode
             ElevatorUnlockService.ClearClosedElevatorFrontBarriers(Singleton<BaseGameManager>.Instance);
             AllowFunSettings();
             CreateLapsHud();
-            // CreateBetaWatermarkHud(); // Сохранено для будущего использования.
+
             yield return new WaitForSecondsRealtime(.4f);
             ElevatorUnlockService.ClearClosedElevatorFrontBarriers(Singleton<BaseGameManager>.Instance);
             funWaitRoutine = null;
@@ -5143,7 +5112,7 @@ namespace KnoxumsChaosMode
         }
         private void ApplyFunCamera()
         {
-            // Один компонент применяет обе оси, поэтому Mirrored и 53045009 больше не стирают матрицы друг друга.
+
             if (IsMirroredActive || IsGooshoesActive)
             {
                 if (funCam == null) funCam = gameObject.AddComponent<FunCameraFlip>();
@@ -5228,7 +5197,7 @@ namespace KnoxumsChaosMode
         {
             PopCharSpr(); PopItmSpr(); PopAud(); AttachShufflers(); FSwapNpc(); FSwapItm();
             FShufTMP(); ShuffleControls(); CreateLapsHud();
-            // CreateBetaWatermarkHud(); // Сохранено для будущего использования.
+
             ApplyCurrentLapSpeedBoost(); UpdateLapsHud();
             if (lapFadeOutPending) lapFadeOutPending = false;
         }
@@ -5252,7 +5221,7 @@ namespace KnoxumsChaosMode
             if (instSprC.TryGetValue(key, out Sprite cached) && cached != null) return cached;
             if (!instVis.TryGetValue(id, out Character target) || own == target)
             { instSprC[key] = original; return original; }
-            // Если renderer уже содержит спрайт целевого персонажа, не перемешиваем его повторно.
+
             if (sprOwn.TryGetValue(original, out Character actualOwner) && actualOwner == target)
             { instSprC[key] = original; return original; }
             if (!pfxSpr.TryGetValue(own, out List<Sprite> ownSprites)
@@ -5262,7 +5231,7 @@ namespace KnoxumsChaosMode
             int index = ownSprites.IndexOf(original);
             if (index < 0)
             {
-                // Чужой спрайт не добавляем в пул исходного персонажа.
+
                 if (sprOwn.TryGetValue(original, out actualOwner) && actualOwner != own)
                 { instSprC[key] = original; return original; }
                 ownSprites.Add(original); sprOwn[original] = own;
@@ -5310,8 +5279,6 @@ namespace KnoxumsChaosMode
             if (audP.Count == 0) return original;
             mapped = audP[Random.Range(0, audP.Count)]; audM[original] = mapped; return mapped;
         }
-
-        // -------------------- продолжение ЧАСТИ 3 в следующем блоке --------------------
 
 
         public void ShuffleEventProperties(RandomEvent e)
@@ -5497,14 +5464,14 @@ namespace KnoxumsChaosMode
                 typeof(RectTransform), typeof(CanvasGroup));
             pitstopReminderObject.transform.SetParent(canvas.transform, false);
             RectTransform rect = pitstopReminderObject.GetComponent<RectTransform>();
-            // Напоминание находится немного ниже вертикального центра экрана.
+
             rect.anchorMin = new Vector2(.06f, .28f);
             rect.anchorMax = new Vector2(.94f, .50f);
             rect.offsetMin = rect.offsetMax = Vector2.zero;
 
             HudManager reminderHud = null;
             try { reminderHud = Singleton<CoreGameManager>.Instance?.GetHud(0); } catch { }
-            // Берём шрифт непосредственно из оригинального HUD игры.
+
             TMP_FontAsset font = GetComicSansFont(reminderHud);
             string reminder = "<b>JUST A REMINDER!</b> All applied chaos features are intended to disable in the pitstop, they are only working in the school!";
             Color[] layerColors = { Color.black, Color.yellow };
@@ -5646,7 +5613,7 @@ namespace KnoxumsChaosMode
         public void UpdateLapsHud()
         {
             if (lapsHudText == null) return;
-            // В бесконечном режиме показываем только номер текущего круга.
+
             lapsHudText.text = InfiniteLaps
                 ? CurrentLap.ToString()
                 : CurrentLap + "/" + LapsCount;
@@ -5688,7 +5655,7 @@ namespace KnoxumsChaosMode
         public void ApplyCurrentLapSpeedBoost() { ApplyCurrentLapSpeedBoost(null); }
         public void ApplyCurrentLapSpeedBoost(NPC only)
         {
-            // На первом круге вообще не прикасаемся к скоростям NPC.
+
             if (!IsLapsActive || CurrentLap <= 1) return;
 
             CaptureBasePlayerSpeed();
@@ -5709,9 +5676,7 @@ namespace KnoxumsChaosMode
             }
         }
 
-        // Круг начинается от настоящей кнопки лифта, но для промежуточного
-        // круга нативный FinishLevel полностью отменяется. Текущий этаж
-        // перестраивается на месте — LoadNextLevel для этого не нужен.
+
         public void StartInstantNewLap(BaseGameManager bgm, bool nativeFinishStarted = false)
         {
             if (bgm == null || bgm.Ec == null) return;
@@ -5805,8 +5770,7 @@ namespace KnoxumsChaosMode
                 KnoxumsChaosModePlugin.Log.LogError("Lap item reset error: " + ex);
             }
 
-            // TapePlayer переживает переход на месте, поэтому одного
-            // StopAllCoroutines недостаточно: очищаем и его AudioManager.
+
             StopAllTapes();
             try
             {
@@ -5832,9 +5796,7 @@ namespace KnoxumsChaosMode
                     pm.transform.rotation = bgm.Ec.spawnRotation;
                     if (pm.plm != null) pm.plm.AddStamina(pm.plm.staminaMax, true);
 
-                    // При прямом запуске круга ButtonPressed был отменён, поэтому
-                    // игрок не заморожен. Не трогаем ActivityModifier и счётчики
-                    // interactionDisables — ими владеют шкафчики и RoomFunction.
+
                     if (nativeFinishStarted) UnlockPlayerMovement(pm, null);
                     Physics.SyncTransforms();
                     BaldiRampagePatches.SnapCameraToPlayer(
@@ -5846,8 +5808,7 @@ namespace KnoxumsChaosMode
                 KnoxumsChaosModePlugin.Log.LogError("Lap player teleport error: " + ex);
             }
 
-            // Не дёргаем ColliderGroup лифта false/true: принудительный
-            // OnTriggerExit/OnTriggerEnter сбивал триггер комнаты игрока.
+
             yield return null;
             StopAllTapes();
             yield return new WaitForFixedUpdate();
@@ -5859,7 +5820,7 @@ namespace KnoxumsChaosMode
                 KnoxumsChaosModePlugin.Log.LogWarning(
                     "Lap start: spawn elevator not found for WaitToExitSpawn.");
 
-            // Happy Baldi и школьная музыка начинают новый нативный интро-цикл.
+
             StartFloorIntro(bgm);
 
             if (lapsFlashImage != null)
@@ -5883,9 +5844,7 @@ namespace KnoxumsChaosMode
             R.Set(bgm, "elevatorsClosed", 0);
             R.Set(bgm, "waitToExitSpawn", null);
 
-            // FinishLevel очищает ElevatorManager.elevators. Сначала делаем
-            // отдельный снимок объектов сцены, затем восстанавливаем списки —
-            // нельзя очищать список и одновременно читать из того же экземпляра.
+
             List<Elevator> elevators = ElevatorUnlockService.GetElevators(bgm.Ec);
             if (elevators.Count == 0)
             {
@@ -6102,8 +6061,7 @@ namespace KnoxumsChaosMode
                 {
                     if (tape == null) continue;
 
-                    // Сначала даём TapePlayer штатно снять свой эффект, если в
-                    // этой версии игры у него есть End/Stop/Reset без аргументов.
+
                     string[] endNames = { "End", "Stop", "Reset", "ReInit" };
                     MethodInfo[] methods = tape.GetType().GetMethods(
                         BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
@@ -6181,9 +6139,8 @@ namespace KnoxumsChaosMode
             }
             try { bgm.Ec.Npcs.Clear(); R.Set(bgm, "exitedSpawn", false); R.Set(bgm, "spawned", false); R.Set(bgm, "npcsSpawned", false); } catch { }
         }
-        // Используется только как одноразовый откат нативного FinishLevel.
-        // Никогда не очищаем moveMods и игровые trigger-счётчики: ими управляют
-        // шкафчики, комнаты, detention и другие RoomFunction-компоненты.
+
+
         public void UnlockPlayerMovement(PlayerManager pm, CoreGameManager cm = null)
         {
             if (pm == null) pm = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
@@ -6348,9 +6305,7 @@ namespace KnoxumsChaosMode
             NotebooksCollectedCount = Mathf.Max(0, nb);
             BaseGameManager bgm = FindObjectOfType<BaseGameManager>();
 
-            // Поведение оригинального Chaos Mode: первый блокнот только выпускает NPC.
-            // Скорость в этот же кадр не кэшируем и не изменяем — сразу после SpawnNPCs
-            // Navigator ещё может содержать стартовое/нулевое значение.
+
             if (nb == 1)
             {
                 origSpeeds.Clear();
@@ -6364,14 +6319,13 @@ namespace KnoxumsChaosMode
                 }
                 else if (IsLapsActive)
                 {
-                    // При кругах NPC уже создаются штатным SpawnNPCs.
+
                     chaosInitialSpawnDone = true;
                 }
                 return;
             }
 
-            // Ко второму блокноту живые NPC уже полностью инициализированы.
-            // Сначала снимаем скорости со всех оригиналов, и только затем создаём клонов.
+
             NPC[] liveNpcs = FindObjectsOfType<NPC>();
             for (int i = 0; i < liveNpcs.Length; i++)
                 if (liveNpcs[i] != null)
@@ -6401,7 +6355,7 @@ namespace KnoxumsChaosMode
         {
             try
             {
-                // Сначала фиксируем скорость живого оригинала, пока клон её не изменил.
+
                 CaptureBaseSpeed(orig);
                 NPC tmpl = GetTmpl(orig); if (tmpl == null) return; Vector3 pos = GetClonePos(orig);
                 NPC cl = Instantiate(tmpl, pos, orig.transform.rotation); cl.name = tmpl.name + "_Clone"; cl.ec = orig.ec;
@@ -6412,16 +6366,16 @@ namespace KnoxumsChaosMode
                     BaldiRampageController ctl = BaldiRampagePatches.Ctl(cl);
                     if (ctl != null)
                     {
-                        // Сначала передаём состояние кассеты, затем SetNotebooks одним
-                        // вызовом рассчитывает окончательную скорость трусливого Балди.
+
+
                         ctl.SetTapePlaying(BaldiRampagePatches.IsAnyTapePlaying());
                         ctl.SetNotebooks(NotebooksCollectedCount);
                     }
                 }
                 NavMeshAgent a = cl.GetComponent<NavMeshAgent>() ?? cl.GetComponentInChildren<NavMeshAgent>(); if (a != null && a.enabled && a.isOnNavMesh) a.Warp(pos);
                 ResetRuntimeTimers(cl); RegNpcCh(cl); SyncEvts(cl); cl.gameObject.SetActive(true);
-                // Общая UpdateSpeeds() после завершения клонирования применит одно и то же
-                // значение ко всем оригиналам и клонам.
+
+
             }
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("Clone " + orig.Character + ": " + ex.Message); }
         }
@@ -6470,7 +6424,7 @@ namespace KnoxumsChaosMode
                 FieldInfo mf = R.Field(nav, "maxSpeed");
                 try
                 {
-                    // У живого NPC speed надёжнее prefab/maxSpeed.
+
                     if (sf != null) speed = (float)sf.GetValue(nav);
                     if (speed <= .01f && mf != null) speed = (float)mf.GetValue(nav);
                 }
@@ -6494,8 +6448,7 @@ namespace KnoxumsChaosMode
         {
             if (npc == null) return;
 
-            // Baldi-coward имеет собственного владельца скорости.
-            // Никакие круги/Chaos-утилиты не имеют права перезаписывать его значения.
+
             if (CowardOwnsSpeed(npc)) return;
 
             Navigator navigator = npc.GetComponentInChildren<Navigator>();
@@ -6504,8 +6457,7 @@ namespace KnoxumsChaosMode
             FieldInfo speedField = R.Field(navigator, "speed");
             if (speedField == null || speedField.FieldType != typeof(float)) return;
 
-            // Chaos/Chaos+1/DoubleChaos больше не замедляют персонажей.
-            // Единственный допустимый множитель здесь — бонус последующих кругов.
+
             float target = GetBaseSpd(npc) * LapMultiplier;
             try
             {
@@ -6515,15 +6467,13 @@ namespace KnoxumsChaosMode
             }
             catch { }
 
-            // В оригинальном рабочем Chaos Mode изменялось только Navigator.speed.
-            // maxSpeed и NavMeshAgent.speed трогать нельзя: у ряда NPC это отдельные
-            // внутренние ограничения, и их перезапись делала персонажей еле живыми.
+
         }
 
         public void UpdateSpeeds(int notebooks)
         {
-            // В обычном Chaos Mode оставляем оригиналам и клонам их штатную скорость.
-            // На последующих кругах применяется только положительный lap-бонус.
+
+
             if (!IsLapsActive || CurrentLap <= 1) return;
             foreach (NPC npc in FindObjectsOfType<NPC>())
                 ApplyNpcSpeed(npc, notebooks, true);
@@ -6531,8 +6481,8 @@ namespace KnoxumsChaosMode
 
         private void RestoreOrigSpeeds()
         {
-            // Chaos больше не изменяет скорость, поэтому при его выключении нельзя
-            // записывать старый кэш поверх актуальной динамической скорости NPC.
+
+
             origSpeeds.Clear();
         }
 
@@ -6557,10 +6507,6 @@ namespace KnoxumsChaosMode
         { if ((discoT2 += Time.deltaTime) < 1f) return; discoT2 = 0; try { EnvironmentController ec = cBGM?.Ec; if (ec == null) return; if (discoUpdateLight == null) discoUpdateLight = typeof(EnvironmentController).GetMethod("UpdateLightingAtCell", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance); foreach (Cell c in ec.hallLights) if (c != null) ApplyDisco(c, ec); foreach (RoomController r in ec.rooms) if (r?.lights != null) foreach (Cell c in r.lights) if (c != null) ApplyDisco(c, ec); } catch { } }
         private void ApplyDisco(Cell c, EnvironmentController ec) { Color color = new Color(Random.value, Random.value, Random.value); c.lightColor = color; try { discoUpdateLight?.Invoke(ec, new object[] { c }); } catch { } if (c.TileTransform != null) foreach (Light l in c.TileTransform.GetComponentsInChildren<Light>(true)) if (l != null) l.color = color; }
     }
-
-    // ============================================================================
-    //  ЧАСТЬ 4 / 5: BALDI RAMPAGE CONTROLLER & CONFIG & GRAPPLE HOOK
-    // ============================================================================
 
 
     public static class BaldiRampageConfig
@@ -6703,8 +6649,8 @@ namespace KnoxumsChaosMode
         }
         private float CurrentSpeed()
         {
-            // Prime Baldi-coward остаётся быстрым даже после нескольких тетрадей;
-            // кассета всё ещё помогает игроку, но больше не режет скорость втрое.
+
+
             float slow = BaldiRampageConfig.SpeedMultiplier(notebooks)
                 * (tapePlaying ? .60f : 1f);
             return Mathf.Max(8f, BaldiRampageConfig.EffectiveBaseFleeSpeed * slow);
@@ -6942,10 +6888,6 @@ namespace KnoxumsChaosMode
         private void OnDestroy() { try { if (entity != null) entity.OnEntityMoveInitialCollision -= OnCollision; } catch { } controller?.SetHookPullActive(false); }
     }
 
-    // ============================================================================
-    //  ЧАСТЬ 5 / 5: ЯБЛОКО + HELPER R
-    // ============================================================================
-
 
     public class AppleChargeHandler : MonoBehaviour
     {
@@ -7051,9 +6993,7 @@ namespace KnoxumsChaosMode
         { if (o == null) return; for (Type t = o.GetType(); t != null && t != typeof(object); t = t.BaseType) foreach (string n in names) try { FieldInfo f = t.GetField(n, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance); if (f != null && f.FieldType == typeof(bool)) f.SetValue(o, value); } catch { } }
     }
 
-    // BB+ 0.14: зелёная кнопка вызывает непосредственно Elevator.ButtonPressed().
-    // Это надёжная точка перехода между кругами; больше не пытаемся угадать
-    // нужную кнопку только по Transform-иерархии.
+
     [HarmonyPatch(typeof(Elevator), "ButtonPressed", new Type[] { })]
     public static class ElevatorButtonPressedPatch
     {
@@ -7074,8 +7014,8 @@ namespace KnoxumsChaosMode
         static void Postfix(Elevator __instance, bool __state)
         {
             if (!__state || __instance == null) return;
-            // Pitstop-выход выполняется нашим Prefix; Postfix повторно закрепляет
-            // закрытое состояние двери, даже когда оригинал был пропущен.
+
+
             ElevatorUnlockService.CloseElevatorDoors(__instance);
             try { Physics.SyncTransforms(); } catch { }
         }
@@ -7123,9 +7063,7 @@ namespace KnoxumsChaosMode
                 DisableGate(e);
                 ClearPocketOnly(e);
 
-                // Открытой двери недостаточно: после перехода Baldi-coward
-                // ColliderGroup/InsideCollider иногда остаются выключенными, и
-                // игрок физически не может войти в лифт Pitstop.
+
                 try { if (e.ColliderGroup != null) e.ColliderGroup.Enable(true); } catch { }
                 try
                 {
@@ -7141,7 +7079,7 @@ namespace KnoxumsChaosMode
         { if (b == null) return; foreach (Elevator e in GetElevators(b.Ec)) if (e != null) ClearPocketOnly(e); }
         private static void ClearPocketOnly(Elevator e)
         {
-            // Никогда не отключаем настоящий gateCollider закрытой двери.
+
             string[] names = { "pocketCollider", "coverCollider", "frontCollider", "hallCollider", "blockerCollider" };
             foreach (string n in names) { object v = null; try { v = R.Field(e, n)?.GetValue(e); } catch { } if (v is Collider c) Disable(c, e); }
             foreach (Collider c in e.GetComponentsInChildren<Collider>(true))
@@ -7163,8 +7101,7 @@ namespace KnoxumsChaosMode
                 UnlockElevatorButton(e);
                 try { e.SetState(ElevatorState.OpenForExit); } catch { }
 
-                // Старый fallback следил за нахождением игрока в кабине и мог
-                // отправить его дальше без нажатия настоящей кнопки.
+
                 ElevatorExitHelper fallback = e.GetComponent<ElevatorExitHelper>();
                 if (fallback != null)
                     UnityEngine.Object.Destroy(fallback);
@@ -7174,16 +7111,13 @@ namespace KnoxumsChaosMode
         { foreach (MonoBehaviour m in e.GetComponentsInChildren<MonoBehaviour>(true)) if (m != null && (m.GetType().Name.Contains("Button") || m.name.ToLowerInvariant().Contains("button"))) { m.enabled = true; m.gameObject.SetActive(true); R.SetPossibleBoolFields(m, false, "locked", "disabled", "inactive"); R.SetPossibleBoolFields(m, true, "unlocked", "interactable", "clickable"); } }
         public static void UnlockSpawnElevatorButton(Elevator e) { if (e != null) UnlockElevatorButton(e); }
 
-        // В BB+ 0.14 это надёжная точка входа: зелёная кнопка вызывает
-        // Elevator.ButtonPressed, затем нативный FinishLevel вызывает LoadNextLevel.
+
         public static bool OnElevatorButtonPressed(Elevator e)
         {
             BaseGameManager b = Singleton<BaseGameManager>.Instance;
             if (e == null || b == null) return true;
 
-            // Pitstop обрабатывается независимо от Laps/Baldi-coward. Нативная
-            // кнопка в некоторых состояниях только переводила лифт в ready и
-            // требовала второго клика, поэтому весь выход подтверждаем сами.
+
             if (IsPitstopManager(b))
             {
                 BeginPitstopDeparture(b, e);
@@ -7194,9 +7128,7 @@ namespace KnoxumsChaosMode
             if (cm == null || !cm.IsLapsActive) return true;
             if (cm.IsLapTransitionInProgress) return false;
 
-            // FinishLevel очищает manager.elevators. Восстанавливаем его из
-            // отдельного снимка — прежний код делал list.Clear(), а затем читал
-            // b.Ec.Elevators, который иногда был тем же самым списком.
+
             RepairManagerElevatorList(e, b.Ec);
 
             bool notebooksDone = AllNotebooksReallyDone(b);
@@ -7212,29 +7144,25 @@ namespace KnoxumsChaosMode
 
             if (cm.ShouldStartNewLap())
             {
-                // Это именно переход на новый КРУГ текущего этажа. Нативный
-                // ButtonPressed/FinishLevel не запускаем, иначе игра начнёт
-                // загружать следующий этаж до того, как Harmony успеет собрать
-                // текущий этаж заново.
+
+
                 KnoxumsChaosModePlugin.Log.LogInfo(
                     "Laps: elevator button -> current floor lap "
                     + (cm.CurrentLap + 1) + ".");
 
-                // Нативный ButtonPressed отменён, поэтому закрываем дверь сами
-                // до белой вспышки. ResetElevatorsToFloorStart затем откроет
-                // только стартовый лифт нового круга.
+
                 CloseElevatorDoors(e);
                 cm.StartInstantNewLap(b);
                 return false;
             }
 
-            // Последний круг должен пройти в настоящий следующий этаж/pitstop.
+
             if (cm.IsLastLap())
             {
                 cm.CommitFloorExitToPitstop();
                 cm.StartCoroutine(ConfirmExit(b, 1.5f));
-                // Не закрываем дверь в Prefix: ButtonPressed проверяет своё
-                // открытое состояние. Нативный FinishLevel закроет её сам.
+
+
             }
             return true;
         }
@@ -7244,8 +7172,8 @@ namespace KnoxumsChaosMode
             if (source == null) return;
             try
             {
-                // GetElevators всегда возвращает новый List, поэтому snapshot не
-                // исчезнет, даже если manager и EnvironmentController делят список.
+
+
                 List<Elevator> snapshot = GetElevators(ec);
                 object manager = R.Get<object>(source, "manager", null);
                 FieldInfo field = R.Field(manager, "elevators");
@@ -7268,8 +7196,8 @@ namespace KnoxumsChaosMode
             if (b == null || pitstopExitArmed || loadNextStarted) return;
             pitstopExitArmed = true;
             CloseElevatorDoors(e);
-            // Одного клика достаточно: после короткой анимации двери гарантированно
-            // вызываем LoadNextLevel, даже если нативный ButtonPressed отменён.
+
+
             if (ChaosManager.Instance != null)
                 ChaosManager.Instance.StartCoroutine(ConfirmExit(b, .6f));
             else
@@ -7287,8 +7215,7 @@ namespace KnoxumsChaosMode
         { List<Elevator> r = new List<Elevator>(); HashSet<int> s = new HashSet<int>(); try { if (ec?.Elevators != null) foreach (Elevator e in ec.Elevators) if (e != null && s.Add(e.GetInstanceID())) r.Add(e); } catch { } foreach (Elevator e in UnityEngine.Object.FindObjectsOfType<Elevator>(true)) if (e != null && s.Add(e.GetInstanceID())) r.Add(e); return r; }
     }
 
-    // Оставлен как пустой тип для совместимости с уже собранными/сохранёнными
-    // объектами старых тестовых версий. Автоматический выход из кабины отключён.
+
     public class ElevatorExitHelper : MonoBehaviour
     {
         private void Awake() { enabled = false; }
