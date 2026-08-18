@@ -1185,7 +1185,7 @@ namespace KnoxumsChaosMode
                 }
                 if (ChaosManager.Instance != null)
                 {
-                    ChaosManager.Instance.EndFloorIntro();
+                    ChaosManager.Instance.FinishBaldiCountdownAudioWindow();
                     ChaosManager.Instance.IsLevelReady = true;
                     ChaosManager.Instance.ActivateSchoolShuffle();
                     ChaosManager.Instance.ApplyCurrentLapSpeedBoost();
@@ -4120,9 +4120,11 @@ namespace KnoxumsChaosMode
                 if (entry.Value > 1)
                     text += "\n<size=11><color=#707070>×" + entry.Value
                         + "</color></size>";
+                // Список расположен ниже зажима и плотнее по вертикали, как на
+                // макете OptionsClipboard.
                 CreateRuntimeText(root.transform, "ModifierRow" + i, text, font,
                     17f, Color.black, TextAlignmentOptions.TopLeft,
-                    new Vector2(34f, 145f - i * 30f), new Vector2(172f, 31f));
+                    new Vector2(34f, 128f - i * 24f), new Vector2(172f, 28f));
             }
 
             root.transform.SetAsLastSibling();
@@ -4378,6 +4380,7 @@ namespace KnoxumsChaosMode
         private bool skipRemainingLaps;
         public bool SkipRemainingLaps => skipRemainingLaps;
         private bool floorIntroActive;
+        private Coroutine floorIntroAudioEndRoutine;
         public bool FloorIntroActive => floorIntroActive;
 
         private bool ytpFloorStartCaptured;
@@ -4546,7 +4549,7 @@ namespace KnoxumsChaosMode
             pfxSpr.Clear(); allCT.Clear(); instVis.Clear(); sprOwn.Clear(); npcIC.Clear();
             itmSP.Clear(); audP.Clear(); pairedEvts.Clear(); origSpeeds.Clear();
             ResetCtrlShuffle(); ClearEggLog(); BuildersErrorRetries = 0; discoT2 = 0f;
-            chaosInitialSpawnDone = false; floorIntroActive = false;
+            chaosInitialSpawnDone = false; EndFloorIntro();
             if (!lapRestartPending) CurrentLap = 1;
             DestroyLapsHud(); DestroyBetaWatermarkHud(); StopPitstopChaosReminder();
             playerBaseSpeedCaptured = false; playerBaseWalkSpeed = playerBaseRunSpeed = 0f;
@@ -4559,7 +4562,7 @@ namespace KnoxumsChaosMode
         {
             CurrentLap = 1; lapRestartPending = false; lapTransitionInProgress = false; pendingLap = 1;
             lapFadeOutPending = false; skipElevatorOnLap = false;
-            floorExitToPitstopCommitted = false; skipRemainingLaps = false; floorIntroActive = false;
+            floorExitToPitstopCommitted = false; skipRemainingLaps = false; EndFloorIntro();
             originalPickupItems.Clear(); previousLapPickupItems.Clear(); StopLapCoroutine();
             ElevatorUnlockService.ResetForNewFloorOrLap();
         }
@@ -4693,11 +4696,48 @@ namespace KnoxumsChaosMode
             if (pitstopYtpEnforce <= 0f) pitstopYtpCorrect = int.MinValue;
         }
 
-        public void BeginBaldiCountdownAudioWindow() { floorIntroActive = true; }
-        public void EndFloorIntro() { floorIntroActive = false; }
+        public void BeginBaldiCountdownAudioWindow()
+        {
+            if (floorIntroAudioEndRoutine != null)
+            {
+                try { StopCoroutine(floorIntroAudioEndRoutine); } catch { }
+                floorIntroAudioEndRoutine = null;
+            }
+            floorIntroActive = true;
+        }
+
+        public void FinishBaldiCountdownAudioWindow()
+        {
+            if (floorIntroAudioEndRoutine != null)
+            {
+                try { StopCoroutine(floorIntroAudioEndRoutine); } catch { }
+            }
+            // Ready or not, here I come! ставится в очередь на границе
+            // ExitedSpawn, поэтому оставляем окно ещё на несколько секунд.
+            floorIntroAudioEndRoutine = StartCoroutine(
+                EndBaldiCountdownAudioWindowAfterDelay(5f));
+        }
+
+        private IEnumerator EndBaldiCountdownAudioWindowAfterDelay(float delay)
+        {
+            while (delay > 0f)
+            { delay -= Time.unscaledDeltaTime; yield return null; }
+            floorIntroActive = false;
+            floorIntroAudioEndRoutine = null;
+        }
+
+        public void EndFloorIntro()
+        {
+            if (floorIntroAudioEndRoutine != null)
+            {
+                try { StopCoroutine(floorIntroAudioEndRoutine); } catch { }
+                floorIntroAudioEndRoutine = null;
+            }
+            floorIntroActive = false;
+        }
         public void StartFloorIntro(BaseGameManager bgm)
         {
-            floorIntroActive = true;
+            BeginBaldiCountdownAudioWindow();
             try
             {
                 MusicManager mm = Singleton<MusicManager>.Instance;
