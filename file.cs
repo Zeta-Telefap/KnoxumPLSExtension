@@ -1397,6 +1397,7 @@ namespace KnoxumsChaosMode
         {
             try
             {
+                GameplayModifierManager.Instance?.OnFloorLeaving();
                 ChaosManager cm = ChaosManager.Instance;
 
 
@@ -1441,6 +1442,7 @@ namespace KnoxumsChaosMode
         {
             try
             {
+                GameplayModifierManager.Instance?.OnFloorLeaving();
                 ChaosManager cm = ChaosManager.Instance;
                 if (cm != null && cm.IsLapTransitionInProgress) return false;
                 if (cm != null && cm.ShouldStartNewLap())
@@ -1468,6 +1470,7 @@ namespace KnoxumsChaosMode
         {
             try
             {
+                GameplayModifierManager.Instance?.OnFloorLeaving();
                 ChaosManager cm = ChaosManager.Instance;
                 if (cm != null && cm.IsLapTransitionInProgress) return false;
                 if (cm != null && cm.ShouldStartNewLap())
@@ -1492,6 +1495,7 @@ namespace KnoxumsChaosMode
         {
             try
             {
+                GameplayModifierManager.Instance?.OnFloorLeaving();
                 if (ChaosManager.Instance != null && ChaosManager.Instance.IsBuildersErrorActive)
                     ChaosManager.Instance.ClearMapDiscovery(__instance);
             }
@@ -1504,6 +1508,7 @@ namespace KnoxumsChaosMode
         {
             try
             {
+                GameplayModifierManager.Instance?.OnFloorLeaving();
                 ElevatorUnlockService.ResetForNewFloorOrLap();
                 if (ChaosManager.Instance != null)
                 {
@@ -1836,6 +1841,16 @@ namespace KnoxumsChaosMode
         static void Postfix(ElevatorScreen __instance)
         {
             GameplayModifierManager.Instance?.OnElevatorScreenStarted(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(ElevatorScreen), "ShowResults")]
+    public static class GameplayModifierElevatorResultsPatch
+    {
+        [HarmonyPrefix]
+        static void Prefix()
+        {
+            GameplayModifierManager.Instance?.OnFloorLeaving();
         }
     }
 
@@ -3596,6 +3611,7 @@ namespace KnoxumsChaosMode
         public static GameplayModifierManager Instance { get; private set; }
         private static Sprite optionsClipboardSprite;
         private static TMP_FontAsset optionsClipboardFont;
+        private static Material optionsClipboardFontMaterial;
 
         private readonly List<GameplayModifierId> activeRolls =
             new List<GameplayModifierId>();
@@ -3630,7 +3646,11 @@ namespace KnoxumsChaosMode
                     if (label == null || label.font == null) continue;
                     string path = TransformPath(label.transform).ToLowerInvariant();
                     if (path.Contains("optionsclipboard") || path.Contains("clipboard"))
-                    { optionsClipboardFont = label.font; break; }
+                    {
+                        optionsClipboardFont = label.font;
+                        optionsClipboardFontMaterial = label.fontSharedMaterial;
+                        break;
+                    }
                 }
 
                 Transform exactRoot = menu.transform;
@@ -3847,6 +3867,16 @@ namespace KnoxumsChaosMode
 
             EnsureSetForCurrentFloor();
             revealPending = activeRolls.Count > 0;
+            if (revealPending && revealRoutine == null && revealObject == null)
+            {
+                ElevatorScreen screen = Singleton<ElevatorScreen>.Instance;
+                Transform parent = null;
+                try { parent = screen != null && screen.Canvas != null
+                    ? screen.Canvas.transform : null; }
+                catch { }
+                StartElevatorScreenReveal(parent,
+                    screen != null ? screen.transform : null);
+            }
         }
 
         private void StartElevatorScreenReveal(Transform preferredParent = null,
@@ -3953,6 +3983,13 @@ namespace KnoxumsChaosMode
             if (bgm == null || ElevatorUnlockService.IsPitstopManager(bgm)) return;
             beginPlayReached = true;
             StopReveal();
+        }
+
+        public void OnFloorLeaving()
+        {
+            beginPlayReached = false;
+            StopReveal();
+            DestroyPauseDisplay();
         }
 
         private IEnumerator RevealRoutine(Transform preferredParent,
@@ -4126,13 +4163,13 @@ namespace KnoxumsChaosMode
                 KeyValuePair<GameplayModifierId, int> entry = grouped[i];
                 string text = GameplayModifierCatalog.Name(entry.Key);
                 if (entry.Value > 1)
-                    text += "\n<size=11><color=#707070>×" + entry.Value
+                    text += "\n<size=8><color=#707070>×" + entry.Value
                         + "</color></size>";
 
 
                 CreateRuntimeText(root.transform, "ModifierRow" + i, text, font,
-                    17f, Color.black, TextAlignmentOptions.TopLeft,
-                    new Vector2(34f, 112f - i * 24f), new Vector2(172f, 28f));
+                    12f, Color.black, TextAlignmentOptions.TopLeft,
+                    new Vector2(34f, 112f - i * 20f), new Vector2(172f, 24f));
             }
 
             root.transform.SetAsLastSibling();
@@ -4237,9 +4274,19 @@ namespace KnoxumsChaosMode
                 TMP_FontAsset comic = Resources.FindObjectsOfTypeAll<TMP_FontAsset>()
                     .FirstOrDefault(x => x != null
                         && x.name.ToLowerInvariant().Contains("comic"));
-                if (comic != null) return comic;
-                return Resources.FindObjectsOfTypeAll<TMP_FontAsset>()
+                if (comic != null)
+                {
+                    optionsClipboardFont = comic;
+                    TMP_Text sample = Resources.FindObjectsOfTypeAll<TMP_Text>()
+                        .FirstOrDefault(x => x != null && x.font == comic
+                            && x.fontSharedMaterial != null);
+                    if (sample != null)
+                        optionsClipboardFontMaterial = sample.fontSharedMaterial;
+                    return comic;
+                }
+                optionsClipboardFont = Resources.FindObjectsOfTypeAll<TMP_FontAsset>()
                     .FirstOrDefault(x => x != null);
+                return optionsClipboardFont;
             }
             catch { return null; }
         }
@@ -4252,6 +4299,10 @@ namespace KnoxumsChaosMode
             gameObject.transform.SetParent(parent, false);
             TextMeshProUGUI text = gameObject.AddComponent<TextMeshProUGUI>();
             if (font != null) text.font = font;
+            if (font == optionsClipboardFont && optionsClipboardFontMaterial != null)
+                text.fontSharedMaterial = optionsClipboardFontMaterial;
+            text.fontStyle = FontStyles.Normal;
+            text.enableAutoSizing = false;
             text.text = value;
             text.fontSize = size;
             text.color = color;
@@ -4300,6 +4351,8 @@ namespace KnoxumsChaosMode
 
         private Transform FindPauseParent()
         {
+            Transform best = null;
+            int bestScore = int.MinValue;
             try
             {
                 MonoBehaviour[] behaviours = Resources.FindObjectsOfTypeAll<MonoBehaviour>();
@@ -4311,12 +4364,18 @@ namespace KnoxumsChaosMode
                         || behaviour.transform.IsChildOf(pauseObject.transform))) continue;
                     string typeName = behaviour.GetType().Name.ToLowerInvariant();
                     string objectName = behaviour.gameObject.name.ToLowerInvariant();
-                    if ((!typeName.Contains("pause") && !objectName.Contains("pause"))
-                        || typeName.Contains("gameplaymodifier")
+                    if (typeName.Contains("gameplaymodifier")
                         || objectName.Contains("gameplaymodifier")) continue;
+                    int score = 0;
+                    if (typeName.Contains("pausemenu")) score += 1000;
+                    else if (typeName.Contains("pause")) score += 500;
+                    if (objectName.Contains("pausemenu")) score += 800;
+                    else if (objectName.Contains("pause")) score += 300;
+                    if (score <= 0) continue;
                     Canvas canvas = behaviour.GetComponentInParent<Canvas>();
-                    if (canvas != null && canvas.gameObject.activeInHierarchy)
-                        return canvas.transform;
+                    if (canvas != null && canvas.gameObject.activeInHierarchy
+                        && score > bestScore)
+                    { bestScore = score; best = canvas.transform; }
                 }
 
                 RectTransform[] rects = Resources.FindObjectsOfTypeAll<RectTransform>();
@@ -4328,13 +4387,15 @@ namespace KnoxumsChaosMode
                         || rect.transform.IsChildOf(pauseObject.transform))) continue;
                     string name = rect.name.ToLowerInvariant();
                     if (!name.Contains("pause") || name.Contains("gameplaymodifiers")) continue;
+                    int score = name.Contains("pausemenu") ? 700 : 200;
                     Canvas canvas = rect.GetComponentInParent<Canvas>();
-                    if (canvas != null && canvas.gameObject.activeInHierarchy)
-                        return canvas.transform;
+                    if (canvas != null && canvas.gameObject.activeInHierarchy
+                        && score > bestScore)
+                    { bestScore = score; best = canvas.transform; }
                 }
             }
             catch { }
-            return null;
+            return best;
         }
 
         private void StopReveal()
