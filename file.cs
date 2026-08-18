@@ -3595,6 +3595,7 @@ namespace KnoxumsChaosMode
         private bool runSetCreated;
         private string selectedFloorKey = "";
         private bool revealPending;
+        private bool postGenerationReached;
         private bool beginPlayReached;
         private GameplayModifierMode selectedMode;
         private int selectedRollCount;
@@ -3793,6 +3794,7 @@ namespace KnoxumsChaosMode
             runSetCreated = false;
             selectedFloorKey = "";
             revealPending = false;
+            postGenerationReached = false;
             beginPlayReached = false;
             StopReveal();
             DestroyPauseDisplay();
@@ -3816,6 +3818,26 @@ namespace KnoxumsChaosMode
 
             EnsureSetForCurrentFloor();
             revealPending = activeRolls.Count > 0;
+            if (revealPending)
+            {
+                postGenerationReached = false;
+                beginPlayReached = false;
+                StartElevatorScreenReveal();
+            }
+        }
+
+        private void StartElevatorScreenReveal()
+        {
+            if (revealRoutine != null || revealObject != null
+                || activeRolls.Count == 0) return;
+            try
+            {
+                KnoxumsChaosModePlugin.Log.LogInfo(
+                    "Gameplay Modifiers Elevator Screen reveal started with "
+                    + activeRolls.Count + " rolls.");
+            }
+            catch { }
+            revealRoutine = StartCoroutine(RevealRoutine());
         }
 
         private void EnsureSetForCurrentFloor()
@@ -3898,29 +3920,23 @@ namespace KnoxumsChaosMode
             if (!Enabled || bgm == null || ElevatorUnlockService.IsPitstopManager(bgm))
                 return;
 
-
             EnsureSetForCurrentFloor();
             if (activeRolls.Count == 0) return;
             revealPending = false;
-            beginPlayReached = false;
-            StopReveal();
-            try
-            {
-                KnoxumsChaosModePlugin.Log.LogInfo(
-                    "Gameplay Modifiers Elevator Screen reveal started with "
-                    + activeRolls.Count + " rolls.");
-            }
-            catch { }
-            revealRoutine = StartCoroutine(RevealRoutine(bgm));
+            postGenerationReached = true;
+            StartElevatorScreenReveal();
         }
 
         public void NotifyBeginPlay(BaseGameManager bgm)
         {
             if (bgm != null && !ElevatorUnlockService.IsPitstopManager(bgm))
+            {
+                postGenerationReached = true;
                 beginPlayReached = true;
+            }
         }
 
-        private IEnumerator RevealRoutine(BaseGameManager bgm)
+        private IEnumerator RevealRoutine()
         {
 
 
@@ -3974,7 +3990,7 @@ namespace KnoxumsChaosMode
             {
                 if (minimumVisible > 0f)
                     minimumVisible -= Time.unscaledDeltaTime;
-                else if (beginPlayReached
+                else if (postGenerationReached || beginPlayReached
                     || (elevatorScreenMarker != null
                         && !elevatorScreenMarker.gameObject.activeInHierarchy))
                     break;
@@ -4104,7 +4120,7 @@ namespace KnoxumsChaosMode
 
                 CreateRuntimeText(root.transform, "ModifierRow" + i, text, font,
                     17f, Color.black, TextAlignmentOptions.TopLeft,
-                    new Vector2(34f, 124f - i * 24f), new Vector2(172f, 28f));
+                    new Vector2(34f, 112f - i * 24f), new Vector2(172f, 28f));
             }
 
             root.transform.SetAsLastSibling();
