@@ -1351,7 +1351,6 @@ namespace KnoxumsChaosMode
                     ChaosManager.Instance.ApplyFunAfterPostGen(__instance);
 
 
-                    GameplayModifierManager.Instance?.OnFloorPostGeneration(__instance);
                 }
                 if (ChaosManager.Instance != null && ChaosManager.Instance.IsChaosModeActive)
                 {
@@ -3950,15 +3949,6 @@ namespace KnoxumsChaosMode
             catch { return false; }
         }
 
-        public void OnFloorPostGeneration(BaseGameManager bgm)
-        {
-            if (!Enabled || bgm == null || ElevatorUnlockService.IsPitstopManager(bgm))
-                return;
-
-            if (activeRolls.Count == 0) return;
-            revealPending = false;
-        }
-
         public void NotifyBeginPlay(BaseGameManager bgm)
         {
             if (bgm == null || ElevatorUnlockService.IsPitstopManager(bgm)) return;
@@ -4235,10 +4225,28 @@ namespace KnoxumsChaosMode
             visual.SetSiblingIndex(Mathf.Max(0, visual.parent.childCount - 2));
         }
 
+        private void EnsurePauseOverlay()
+        {
+            if (pauseObject == null) return;
+            Canvas visualCanvas = pauseObject.GetComponent<Canvas>();
+            if (visualCanvas == null) visualCanvas = pauseObject.AddComponent<Canvas>();
+            visualCanvas.overrideSorting = true;
+            visualCanvas.sortingOrder = 32000;
+            CursorController cursor = CursorController.Instance;
+            if (cursor != null)
+            {
+                Canvas cursorCanvas = cursor.GetComponent<Canvas>();
+                if (cursorCanvas == null) cursorCanvas = cursor.gameObject.AddComponent<Canvas>();
+                cursorCanvas.overrideSorting = true;
+                cursorCanvas.sortingOrder = 32001;
+            }
+            PlaceBelowCursor(pauseObject.transform);
+        }
+
         private void LateUpdate()
         {
             if (revealObject != null) PlaceBelowCursor(revealObject.transform);
-            if (pauseObject != null) PlaceBelowCursor(pauseObject.transform);
+            if (pauseObject != null) EnsurePauseOverlay();
         }
 
         private static TMP_FontAsset FindComicFont()
@@ -4298,6 +4306,13 @@ namespace KnoxumsChaosMode
                     DestroyPauseDisplay();
                     pauseParent = target;
                     pauseObject = BuildClipboardDisplay(target, false);
+                }
+                if (pauseObject != null)
+                {
+                    pauseObject.SetActive(true);
+                    RectTransform pauseRect = pauseObject.GetComponent<RectTransform>();
+                    if (pauseRect != null) pauseRect.anchoredPosition = new Vector2(10f, -8f);
+                    EnsurePauseOverlay();
                 }
             }
             else DestroyPauseDisplay();
