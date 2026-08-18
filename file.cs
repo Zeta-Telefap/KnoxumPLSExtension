@@ -1185,7 +1185,7 @@ namespace KnoxumsChaosMode
                 }
                 if (ChaosManager.Instance != null)
                 {
-                    ChaosManager.Instance.FinishBaldiCountdownAudioWindow();
+                    ChaosManager.Instance.EndFloorIntro();
                     ChaosManager.Instance.IsLevelReady = true;
                     ChaosManager.Instance.ActivateSchoolShuffle();
                     ChaosManager.Instance.ApplyCurrentLapSpeedBoost();
@@ -1199,6 +1199,15 @@ namespace KnoxumsChaosMode
                 }
             }
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("ExitedSpawn: " + ex.Message); }
+        }
+
+        [HarmonyPatch(typeof(BaseGameManager), "BeginSpoopMode")]
+        [HarmonyPostfix]
+        public static void Postfix_BeginSpoopMode_AudioWindow()
+        {
+            // Как только начинается режим погони, вступление Балди закончено и
+            // специальная no-wait обработка Sound Shuffle больше не нужна.
+            ChaosManager.Instance?.EndFloorIntro();
         }
 
         [HarmonyPatch(typeof(BaseGameManager), "CollectNotebooks")]
@@ -4380,7 +4389,6 @@ namespace KnoxumsChaosMode
         private bool skipRemainingLaps;
         public bool SkipRemainingLaps => skipRemainingLaps;
         private bool floorIntroActive;
-        private Coroutine floorIntroAudioEndRoutine;
         public bool FloorIntroActive => floorIntroActive;
 
         private bool ytpFloorStartCaptured;
@@ -4696,45 +4704,8 @@ namespace KnoxumsChaosMode
             if (pitstopYtpEnforce <= 0f) pitstopYtpCorrect = int.MinValue;
         }
 
-        public void BeginBaldiCountdownAudioWindow()
-        {
-            if (floorIntroAudioEndRoutine != null)
-            {
-                try { StopCoroutine(floorIntroAudioEndRoutine); } catch { }
-                floorIntroAudioEndRoutine = null;
-            }
-            floorIntroActive = true;
-        }
-
-        public void FinishBaldiCountdownAudioWindow()
-        {
-            if (floorIntroAudioEndRoutine != null)
-            {
-                try { StopCoroutine(floorIntroAudioEndRoutine); } catch { }
-            }
-            // Ready or not, here I come! ставится в очередь на границе
-            // ExitedSpawn, поэтому оставляем окно ещё на несколько секунд.
-            floorIntroAudioEndRoutine = StartCoroutine(
-                EndBaldiCountdownAudioWindowAfterDelay(5f));
-        }
-
-        private IEnumerator EndBaldiCountdownAudioWindowAfterDelay(float delay)
-        {
-            while (delay > 0f)
-            { delay -= Time.unscaledDeltaTime; yield return null; }
-            floorIntroActive = false;
-            floorIntroAudioEndRoutine = null;
-        }
-
-        public void EndFloorIntro()
-        {
-            if (floorIntroAudioEndRoutine != null)
-            {
-                try { StopCoroutine(floorIntroAudioEndRoutine); } catch { }
-                floorIntroAudioEndRoutine = null;
-            }
-            floorIntroActive = false;
-        }
+        public void BeginBaldiCountdownAudioWindow() { floorIntroActive = true; }
+        public void EndFloorIntro() { floorIntroActive = false; }
         public void StartFloorIntro(BaseGameManager bgm)
         {
             BeginBaldiCountdownAudioWindow();
