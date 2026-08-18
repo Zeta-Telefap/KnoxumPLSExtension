@@ -3778,7 +3778,6 @@ namespace KnoxumsChaosMode
         private void OnSceneChanged(UnityEngine.SceneManagement.Scene oldScene,
             UnityEngine.SceneManagement.Scene newScene)
         {
-            StopReveal();
             DestroyPauseDisplay();
             if (LooksLikeMenuScene(newScene.name)) ResetRun();
         }
@@ -3953,26 +3952,7 @@ namespace KnoxumsChaosMode
         {
             if (bgm == null || ElevatorUnlockService.IsPitstopManager(bgm)) return;
             beginPlayReached = true;
-            if (revealObject == null) return;
-            Canvas hudCanvas = null;
-            try { hudCanvas = Singleton<CoreGameManager>.Instance?.GetHud(0)?.Canvas(); }
-            catch { }
-            if (hudCanvas == null)
-            {
-                StopReveal();
-                return;
-            }
-            RectTransform rect = revealObject.GetComponent<RectTransform>();
-            Vector2 position = rect != null ? rect.anchoredPosition : Vector2.zero;
-            revealObject.transform.SetParent(hudCanvas.transform, false);
-            if (rect != null)
-            {
-                rect.anchorMin = rect.anchorMax = Vector2.zero;
-                rect.pivot = Vector2.zero;
-                rect.anchoredPosition = position;
-            }
-            revealObject.transform.SetAsLastSibling();
-            PlaceBelowCursor(revealObject.transform);
+            StopReveal();
         }
 
         private IEnumerator RevealRoutine(Transform preferredParent,
@@ -4322,6 +4302,23 @@ namespace KnoxumsChaosMode
         {
             try
             {
+                MonoBehaviour[] behaviours = Resources.FindObjectsOfTypeAll<MonoBehaviour>();
+                for (int i = 0; i < behaviours.Length; i++)
+                {
+                    MonoBehaviour behaviour = behaviours[i];
+                    if (behaviour == null || !behaviour.gameObject.activeInHierarchy) continue;
+                    if (pauseObject != null && (behaviour.transform == pauseObject.transform
+                        || behaviour.transform.IsChildOf(pauseObject.transform))) continue;
+                    string typeName = behaviour.GetType().Name.ToLowerInvariant();
+                    string objectName = behaviour.gameObject.name.ToLowerInvariant();
+                    if ((!typeName.Contains("pause") && !objectName.Contains("pause"))
+                        || typeName.Contains("gameplaymodifier")
+                        || objectName.Contains("gameplaymodifier")) continue;
+                    Canvas canvas = behaviour.GetComponentInParent<Canvas>();
+                    if (canvas != null && canvas.gameObject.activeInHierarchy)
+                        return canvas.transform;
+                }
+
                 RectTransform[] rects = Resources.FindObjectsOfTypeAll<RectTransform>();
                 for (int i = 0; i < rects.Length; i++)
                 {
