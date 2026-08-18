@@ -1830,6 +1830,16 @@ namespace KnoxumsChaosMode
     }
 
 
+    [HarmonyPatch(typeof(ElevatorScreen), "Start")]
+    public static class GameplayModifierElevatorScreenPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(ElevatorScreen __instance)
+        {
+            GameplayModifierManager.Instance?.OnElevatorScreenStarted(__instance);
+        }
+    }
+
     [HarmonyPatch]
     public static class SoundShuffleNoAudioWaitPatch
     {
@@ -3586,6 +3596,7 @@ namespace KnoxumsChaosMode
     {
         public static GameplayModifierManager Instance { get; private set; }
         private static Sprite optionsClipboardSprite;
+        private static TMP_FontAsset optionsClipboardFont;
 
         private readonly List<GameplayModifierId> activeRolls =
             new List<GameplayModifierId>();
@@ -3614,7 +3625,15 @@ namespace KnoxumsChaosMode
             if (menu == null) return;
             try
             {
-
+                TMP_Text[] labels = menu.GetComponentsInChildren<TMP_Text>(true);
+                for (int i = 0; i < labels.Length; i++)
+                {
+                    TMP_Text label = labels[i];
+                    if (label == null || label.font == null) continue;
+                    string path = TransformPath(label.transform).ToLowerInvariant();
+                    if (path.Contains("optionsclipboard") || path.Contains("clipboard"))
+                    { optionsClipboardFont = label.font; break; }
+                }
 
                 Transform exactRoot = menu.transform;
                 while (exactRoot != null)
@@ -3807,6 +3826,21 @@ namespace KnoxumsChaosMode
 
         public bool Has(GameplayModifierId id) { return GetStacks(id) > 0; }
 
+        public void OnElevatorScreenStarted(ElevatorScreen screen)
+        {
+            if (!Enabled || screen == null) return;
+            EnsureSetForCurrentFloor();
+            if (activeRolls.Count == 0) return;
+            revealPending = true;
+            postGenerationReached = false;
+            beginPlayReached = false;
+            StopReveal();
+            Transform parent = null;
+            try { parent = screen.Canvas != null ? screen.Canvas.transform : null; }
+            catch { }
+            StartElevatorScreenReveal(parent, screen.transform);
+        }
+
         public void PrepareForGeneration(LevelBuilder builder)
         {
             if (!Enabled)
@@ -3826,7 +3860,8 @@ namespace KnoxumsChaosMode
             }
         }
 
-        private void StartElevatorScreenReveal()
+        private void StartElevatorScreenReveal(Transform preferredParent = null,
+            Transform preferredMarker = null)
         {
             if (revealRoutine != null || revealObject != null
                 || activeRolls.Count == 0) return;
@@ -3837,7 +3872,8 @@ namespace KnoxumsChaosMode
                     + activeRolls.Count + " rolls.");
             }
             catch { }
-            revealRoutine = StartCoroutine(RevealRoutine());
+            revealRoutine = StartCoroutine(RevealRoutine(preferredParent,
+                preferredMarker));
         }
 
         private void EnsureSetForCurrentFloor()
@@ -3891,15 +3927,23 @@ namespace KnoxumsChaosMode
             string scene = UnityEngine.SceneManagement.SceneManager
                 .GetActiveScene().name ?? "";
             int level = -1;
+            string title = "";
             try
             {
+                CoreGameManager core = Singleton<CoreGameManager>.Instance;
                 BaseGameManager bgm = Singleton<BaseGameManager>.Instance;
                 if (bgm != null) level = bgm.CurrentLevel;
+                if (core != null)
+                {
+                    int coreLevel = R.Get<int>(core, "currentLevel", level);
+                    if (coreLevel >= 0) level = coreLevel;
+                    if (core.sceneObject != null)
+                        title = core.sceneObject.levelTitle ?? "";
+                }
             }
             catch { }
 
-
-            return scene + "|" + level;
+            return scene + "|" + level + "|" + title;
         }
 
         private static bool IsPitstopScene()
@@ -3936,12 +3980,11 @@ namespace KnoxumsChaosMode
             }
         }
 
-        private IEnumerator RevealRoutine()
+        private IEnumerator RevealRoutine(Transform preferredParent,
+            Transform preferredMarker)
         {
-
-
-            Transform elevatorScreenMarker = null;
-            Transform displayParent = null;
+            Transform elevatorScreenMarker = preferredMarker;
+            Transform displayParent = preferredParent;
             float findTime = 12f;
             while (findTime > 0f && displayParent == null)
             {
@@ -3950,7 +3993,6 @@ namespace KnoxumsChaosMode
                 findTime -= Time.unscaledDeltaTime;
                 yield return null;
             }
-
 
             if (displayParent == null)
             {
@@ -3962,11 +4004,6 @@ namespace KnoxumsChaosMode
                 catch { }
             }
             if (displayParent == null) { revealRoutine = null; yield break; }
-
-
-            float settle = .2f;
-            while (settle > 0f)
-            { settle -= Time.unscaledDeltaTime; yield return null; }
 
             revealObject = BuildClipboardDisplay(displayParent, true);
             if (revealObject == null) { revealRoutine = null; yield break; }
@@ -4173,6 +4210,7 @@ namespace KnoxumsChaosMode
 
         private static TMP_FontAsset FindComicFont()
         {
+            if (optionsClipboardFont != null) return optionsClipboardFont;
             try
             {
                 TMP_FontAsset comic = Resources.FindObjectsOfTypeAll<TMP_FontAsset>()
