@@ -1993,9 +1993,14 @@ namespace KnoxumsChaosMode
 
         internal static bool TryGetVirtualPlaying(AudioManager manager, out bool playing)
         {
+            if (manager == null) { playing = false; return false; }
+            return TryGetVirtualPlaying(manager.audioDevice, out playing);
+        }
+
+        internal static bool TryGetVirtualPlaying(AudioSource source, out bool playing)
+        {
             playing = false;
-            if (manager == null || manager.audioDevice == null) return false;
-            AudioSource source = manager.audioDevice;
+            if (source == null) return false;
             int id = source.GetInstanceID();
             if (!marked.TryGetValue(id, out MarkedSource entry)
                 || entry == null || entry.source != source)
@@ -2052,8 +2057,10 @@ namespace KnoxumsChaosMode
                 bypassRemap = false;
 
                 float pitch = Mathf.Max(.01f, Mathf.Abs(detached.pitch));
-                float virtualStart = Mathf.Max(Time.unscaledTime, entry.virtualWaitUntil);
-                entry.virtualWaitUntil = virtualStart + entry.originalDuration / pitch;
+                // PlaySingle должен заменить старое ожидание, а обычная очередь
+                // сама останется последовательной через virtual isPlaying.
+                entry.virtualWaitUntil = Time.unscaledTime
+                    + entry.originalDuration / pitch;
                 UnityEngine.Object.Destroy(holder,
                     Mathf.Max(.1f, detached.clip.length / pitch + .25f));
                 return true;
@@ -2071,6 +2078,19 @@ namespace KnoxumsChaosMode
                 catch { }
                 return false;
             }
+        }
+    }
+
+    [HarmonyPatch(typeof(AudioSource), "get_isPlaying")]
+    public static class SoundShuffleVirtualIsPlayingPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(AudioSource __instance, ref bool __result)
+        {
+            if (!SoundShuffleNoAudioWaitPatch.Active) return;
+            if (SoundShuffleDetachedPlaybackPatch.TryGetVirtualPlaying(
+                __instance, out bool virtualPlaying))
+                __result = virtualPlaying;
         }
     }
 
@@ -3278,6 +3298,10 @@ namespace KnoxumsChaosMode
         private static readonly Color PlayerColor = new Color(0xE2 / 255f, 0xC3 / 255f, 0x7F / 255f, 1f);
         private const float PlayerStrength = 6f;
         private const float PrincipalStrength = 4f;
+        // Fog overlaps the lantern falloff so an unlit interpolation strip can
+        // never appear as a white ring between the light and the black void.
+        private const float VoidFogStart = 42f;
+        private const float VoidFogMax = 58f;
 
         private EnvironmentController ec;
         private readonly List<FunLanternSource> sources = new List<FunLanternSource>();
@@ -3290,6 +3314,7 @@ namespace KnoxumsChaosMode
         private bool savedDarkOk;
         private Fog voidFog;
         private bool voidReady;
+        private bool darknessInitialized;
 
         private Camera savedMainCam, savedBillboardCam;
         private CameraClearFlags savedMainFlags, savedBillboardFlags;
@@ -3358,7 +3383,7 @@ namespace KnoxumsChaosMode
                 voidReady = true;
                 try
                 {
-                    voidFog = new Fog { color = Color.black, startDist = 50f, maxDist = 62f, strength = 1f, priority = 999 };
+                    voidFog = new Fog { color = Color.black, startDist = VoidFogStart, maxDist = VoidFogMax, strength = 1f, priority = 999 };
                     if (ec != null) ec.AddFog(voidFog);
                 }
                 catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogWarning("Lights Out void fog: " + ex.Message); }
@@ -3370,8 +3395,8 @@ namespace KnoxumsChaosMode
         {
             try { Shader.SetGlobalColor("_SkyboxColor", Color.black); } catch { }
             try { Shader.SetGlobalColor("_FogColor", Color.black); } catch { }
-            try { Shader.SetGlobalFloat("_FogStartDistance", 50f); } catch { }
-            try { Shader.SetGlobalFloat("_FogMaxDistance", 62f); } catch { }
+            try { Shader.SetGlobalFloat("_FogStartDistance", VoidFogStart); } catch { }
+            try { Shader.SetGlobalFloat("_FogMaxDistance", VoidFogMax); } catch { }
             try { Shader.SetGlobalFloat("_FogStrength", 1f); } catch { }
             try { Shader.SetGlobalInt("_FogActive", 1); } catch { }
             try
@@ -3463,6 +3488,26 @@ namespace KnoxumsChaosMode
             sources.Add(new FunLanternSource { transform = tr, strength = strength, color = color });
         }
 
+        private void BlackoutWholeGrid(CoreGameManager cgm)
+        {
+            if (darknessInitialized || ec == null || cgm == null) return;
+            if (ec.levelSize.x <= 0 || ec.levelSize.z <= 0) return;
+            try
+            {
+                for (int x = 0; x < ec.levelSize.x; x++)
+                    for (int z = 0; z < ec.levelSize.z; z++)
+                    {
+                        IntVector2 position;
+                        position.x = x;
+                        position.z = z;
+                        cgm.UpdateLighting(Color.black, position);
+                    }
+                ec.UpdateQueuedLightChanges();
+                darknessInitialized = true;
+            }
+            catch { }
+        }
+
         private void Update()
         {
             if (ec == null) return;
@@ -3472,6 +3517,7 @@ namespace KnoxumsChaosMode
             CoreGameManager cgm = null;
             try { cgm = Singleton<CoreGameManager>.Instance; } catch { }
             if (cgm == null) return;
+            BlackoutWholeGrid(cgm);
 
             List<IntVector2> now = new List<IntVector2>();
             HashSet<int> keys = new HashSet<int>();
@@ -3558,6 +3604,7 @@ namespace KnoxumsChaosMode
             catch { }
             ec = null;
             voidReady = false;
+            darknessInitialized = false;
             shaderStateSaved = false;
             savedMainCamera = savedBillboardCamera = false;
             savedMainCam = savedBillboardCam = null;
