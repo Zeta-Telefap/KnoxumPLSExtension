@@ -2525,6 +2525,9 @@ namespace KnoxumsChaosMode
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         private static void R2(OptionsMenu m, CustomOptionsHandler h)
         {
+            // Сохраняем именно оригинальный визуал OptionsClipboard из меню,
+            // чтобы игровой ролл не рисовал имитацию прямоугольниками.
+            GameplayModifierManager.CaptureOptionsClipboardVisual(m);
             KnoxumsChaosModePlugin.Instance.RegisterChaosCategories(h);
         }
     }
@@ -3598,6 +3601,7 @@ namespace KnoxumsChaosMode
     public class GameplayModifierManager : MonoBehaviour
     {
         public static GameplayModifierManager Instance { get; private set; }
+        private static Sprite optionsClipboardSprite;
 
         private readonly List<GameplayModifierId> activeRolls =
             new List<GameplayModifierId>();
@@ -3619,6 +3623,134 @@ namespace KnoxumsChaosMode
         public IReadOnlyList<GameplayModifierId> ActiveRolls => activeRolls;
         public bool Enabled =>
             KnoxumsChaosModePlugin.GameplayModifiersEnabledConfig?.Value ?? false;
+
+        public static void CaptureOptionsClipboardVisual(OptionsMenu menu)
+        {
+            if (menu == null) return;
+            try
+            {
+                // В обычном OptionsMenu сам OptionsMenu является дочерним
+                // объектом OptionsClipboard. Корневой Image имеет приоритет над
+                // бумагой, кнопками и другими дочерними картинками.
+                Transform exactRoot = menu.transform;
+                while (exactRoot != null)
+                {
+                    if (exactRoot.name.Equals("OptionsClipboard",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        Image rootImage = exactRoot.GetComponent<Image>();
+                        if (rootImage != null && rootImage.sprite != null)
+                        { optionsClipboardSprite = rootImage.sprite; return; }
+                        SpriteRenderer rootRenderer = exactRoot.GetComponent<SpriteRenderer>();
+                        if (rootRenderer != null && rootRenderer.sprite != null)
+                        { optionsClipboardSprite = rootRenderer.sprite; return; }
+                    }
+                    exactRoot = exactRoot.parent;
+                }
+
+                Image best = null;
+                float bestScore = float.MinValue;
+                Image[] images = menu.GetComponentsInChildren<Image>(true);
+                for (int i = 0; i < images.Length; i++)
+                {
+                    Image image = images[i];
+                    if (image == null || image.sprite == null) continue;
+                    string path = TransformPath(image.transform).ToLowerInvariant();
+                    string spriteName = image.sprite.name.ToLowerInvariant();
+                    bool clipboard = path.Contains("optionsclipboard")
+                        || spriteName.Contains("optionsclipboard")
+                        || path.Contains("clipboard");
+                    if (!clipboard) continue;
+                    float score = image.sprite.rect.width * image.sprite.rect.height;
+                    if (path.Contains("optionsclipboard")) score += 10000000f;
+                    if (spriteName.Contains("optionsclipboard")) score += 20000000f;
+                    if (path.Contains("clipboard")) score += 5000000f;
+                    if (score > bestScore) { bestScore = score; best = image; }
+                }
+                if (best != null) optionsClipboardSprite = best.sprite;
+
+                if (optionsClipboardSprite == null)
+                {
+                    SpriteRenderer[] renderers = menu.GetComponentsInChildren<SpriteRenderer>(true);
+                    for (int i = 0; i < renderers.Length; i++)
+                    {
+                        SpriteRenderer renderer = renderers[i];
+                        if (renderer == null || renderer.sprite == null) continue;
+                        string path = TransformPath(renderer.transform).ToLowerInvariant();
+                        string spriteName = renderer.sprite.name.ToLowerInvariant();
+                        if (path.Contains("optionsclipboard")
+                            || spriteName.Contains("optionsclipboard")
+                            || path.Contains("clipboard"))
+                        { optionsClipboardSprite = renderer.sprite; break; }
+                    }
+                }
+
+                if (optionsClipboardSprite == null)
+                {
+                    Transform cursor = menu.transform;
+                    while (cursor != null)
+                    {
+                        if (cursor.name.IndexOf("OptionsClipboard",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            Image image = cursor.GetComponent<Image>()
+                                ?? cursor.GetComponentInChildren<Image>(true);
+                            if (image != null && image.sprite != null)
+                                optionsClipboardSprite = image.sprite;
+                            break;
+                        }
+                        cursor = cursor.parent;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static string TransformPath(Transform transform)
+        {
+            string path = "";
+            for (int i = 0; i < 10 && transform != null; i++)
+            {
+                path = transform.name + "/" + path;
+                transform = transform.parent;
+            }
+            return path;
+        }
+
+        private static Sprite ResolveOptionsClipboardSprite()
+        {
+            if (optionsClipboardSprite != null) return optionsClipboardSprite;
+            try
+            {
+                Sprite[] sprites = Resources.FindObjectsOfTypeAll<Sprite>();
+                for (int i = 0; i < sprites.Length; i++)
+                {
+                    Sprite sprite = sprites[i];
+                    if (sprite == null) continue;
+                    string name = sprite.name.ToLowerInvariant();
+                    if (name == "optionsclipboard" || name.Contains("optionsclipboard"))
+                    { optionsClipboardSprite = sprite; return sprite; }
+                }
+
+                GameObject[] objects = Resources.FindObjectsOfTypeAll<GameObject>();
+                for (int i = 0; i < objects.Length; i++)
+                {
+                    GameObject gameObject = objects[i];
+                    if (gameObject == null || gameObject.name.IndexOf(
+                        "OptionsClipboard", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    Image image = gameObject.GetComponent<Image>()
+                        ?? gameObject.GetComponentInChildren<Image>(true);
+                    if (image != null && image.sprite != null)
+                    { optionsClipboardSprite = image.sprite; return image.sprite; }
+                    SpriteRenderer renderer = gameObject.GetComponent<SpriteRenderer>()
+                        ?? gameObject.GetComponentInChildren<SpriteRenderer>(true);
+                    if (renderer != null && renderer.sprite != null)
+                    { optionsClipboardSprite = renderer.sprite; return renderer.sprite; }
+                }
+            }
+            catch { }
+            return null;
+        }
 
         private void Awake()
         {
@@ -3946,8 +4078,18 @@ namespace KnoxumsChaosMode
             rootRect.sizeDelta = new Vector2(230f, 230f);
             rootRect.anchoredPosition = new Vector2(10f, -8f);
 
-            GameObject clipboard = CloneOptionsClipboard(root.transform);
-            if (clipboard == null) clipboard = BuildFallbackClipboard(root.transform);
+            GameObject clipboard = BuildOriginalOptionsClipboard(root.transform);
+            if (clipboard == null)
+            {
+                try
+                {
+                    KnoxumsChaosModePlugin.Log.LogError(
+                        "Gameplay Modifiers: original OptionsClipboard sprite was not found.");
+                }
+                catch { }
+                Destroy(root);
+                return null;
+            }
             RectTransform clipboardRect = clipboard.GetComponent<RectTransform>();
             if (clipboardRect != null)
             {
@@ -4002,74 +4144,21 @@ namespace KnoxumsChaosMode
             return result;
         }
 
-        private static GameObject CloneOptionsClipboard(Transform parent)
+        private static GameObject BuildOriginalOptionsClipboard(Transform parent)
         {
-            try
-            {
-                GameObject template = Resources.FindObjectsOfTypeAll<GameObject>()
-                    .FirstOrDefault(x => x != null && x.name.Equals(
-                        "OptionsClipboard", StringComparison.OrdinalIgnoreCase));
-                if (template == null) return null;
-                GameObject clone = UnityEngine.Object.Instantiate(template);
-                clone.name = "GameplayModifiersOptionsClipboard";
-                clone.transform.SetParent(parent, false);
-                clone.SetActive(true);
-
-                foreach (TMP_Text text in clone.GetComponentsInChildren<TMP_Text>(true))
-                    if (text != null) text.enabled = false;
-                foreach (Selectable selectable in clone.GetComponentsInChildren<Selectable>(true))
-                    if (selectable != null && selectable.gameObject != clone)
-                        selectable.gameObject.SetActive(false);
-                foreach (Graphic graphic in clone.GetComponentsInChildren<Graphic>(true))
-                    if (graphic != null) graphic.raycastTarget = false;
-                foreach (MonoBehaviour behaviour in clone.GetComponentsInChildren<MonoBehaviour>(true))
-                {
-                    if (behaviour == null || behaviour is Graphic
-                        || behaviour is Mask || behaviour is RectMask2D
-                        || behaviour is LayoutGroup || behaviour is ContentSizeFitter)
-                        continue;
-                    behaviour.enabled = false;
-                }
-                Canvas nestedCanvas = clone.GetComponent<Canvas>();
-                if (nestedCanvas != null)
-                {
-                    nestedCanvas.overrideSorting = false;
-                    nestedCanvas.sortingOrder = 0;
-                }
-                return clone;
-            }
-            catch { return null; }
-        }
-
-        private static GameObject BuildFallbackClipboard(Transform parent)
-        {
-            GameObject red = new GameObject("GameplayModifiersClipboardFallback",
+            if (parent == null) return null;
+            Sprite sprite = ResolveOptionsClipboardSprite();
+            if (sprite == null) return null;
+            GameObject clipboard = new GameObject("GameplayModifiersOptionsClipboard",
                 typeof(RectTransform), typeof(Image));
-            red.transform.SetParent(parent, false);
-            Image redImage = red.GetComponent<Image>();
-            redImage.color = new Color(.9f, .03f, .02f, 1f);
-            redImage.raycastTarget = false;
-
-            GameObject paper = new GameObject("Paper", typeof(RectTransform), typeof(Image));
-            paper.transform.SetParent(red.transform, false);
-            RectTransform paperRect = paper.GetComponent<RectTransform>();
-            paperRect.anchorMin = new Vector2(.09f, .04f);
-            paperRect.anchorMax = new Vector2(.91f, .84f);
-            paperRect.offsetMin = paperRect.offsetMax = Vector2.zero;
-            Image paperImage = paper.GetComponent<Image>();
-            paperImage.color = new Color(.98f, .98f, .95f, 1f);
-            paperImage.raycastTarget = false;
-
-            GameObject clamp = new GameObject("Clamp", typeof(RectTransform), typeof(Image));
-            clamp.transform.SetParent(red.transform, false);
-            RectTransform clampRect = clamp.GetComponent<RectTransform>();
-            clampRect.anchorMin = new Vector2(.12f, .82f);
-            clampRect.anchorMax = new Vector2(.88f, .93f);
-            clampRect.offsetMin = clampRect.offsetMax = Vector2.zero;
-            Image clampImage = clamp.GetComponent<Image>();
-            clampImage.color = new Color(.75f, .75f, .75f, 1f);
-            clampImage.raycastTarget = false;
-            return red;
+            clipboard.transform.SetParent(parent, false);
+            Image image = clipboard.GetComponent<Image>();
+            image.sprite = sprite;
+            image.color = Color.white;
+            image.type = Image.Type.Simple;
+            image.preserveAspect = true;
+            image.raycastTarget = false;
+            return clipboard;
         }
 
         private static TMP_FontAsset FindComicFont()
