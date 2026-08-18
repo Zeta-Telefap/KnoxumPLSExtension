@@ -1848,9 +1848,9 @@ namespace KnoxumsChaosMode
     public static class GameplayModifierElevatorResultsPatch
     {
         [HarmonyPrefix]
-        static void Prefix()
+        static void Prefix(ElevatorScreen __instance)
         {
-            GameplayModifierManager.Instance?.OnFloorLeaving();
+            GameplayModifierManager.Instance?.OnElevatorResults(__instance);
         }
     }
 
@@ -3611,7 +3611,6 @@ namespace KnoxumsChaosMode
         public static GameplayModifierManager Instance { get; private set; }
         private static Sprite optionsClipboardSprite;
         private static TMP_FontAsset optionsClipboardFont;
-        private static Material optionsClipboardFontMaterial;
 
         private readonly List<GameplayModifierId> activeRolls =
             new List<GameplayModifierId>();
@@ -3629,6 +3628,7 @@ namespace KnoxumsChaosMode
         private GameObject pauseObject;
         private Transform pauseParent;
         private float pauseRefresh;
+        private int resultsElevatorScreenId;
 
         public IReadOnlyList<GameplayModifierId> ActiveRolls => activeRolls;
         public bool Enabled =>
@@ -3648,7 +3648,6 @@ namespace KnoxumsChaosMode
                     if (path.Contains("optionsclipboard") || path.Contains("clipboard"))
                     {
                         optionsClipboardFont = label.font;
-                        optionsClipboardFontMaterial = label.fontSharedMaterial;
                         break;
                     }
                 }
@@ -3831,6 +3830,7 @@ namespace KnoxumsChaosMode
             selectedFloorKey = "";
             revealPending = false;
             beginPlayReached = false;
+            resultsElevatorScreenId = 0;
             StopReveal();
             DestroyPauseDisplay();
         }
@@ -3845,6 +3845,7 @@ namespace KnoxumsChaosMode
         public void OnElevatorScreenStarted(ElevatorScreen screen)
         {
             if (!Enabled || screen == null) return;
+            if (resultsElevatorScreenId == screen.GetInstanceID()) return;
             EnsureSetForCurrentFloor();
             if (activeRolls.Count == 0) return;
             revealPending = true;
@@ -3867,6 +3868,7 @@ namespace KnoxumsChaosMode
 
             EnsureSetForCurrentFloor();
             revealPending = activeRolls.Count > 0;
+            resultsElevatorScreenId = 0;
             if (revealPending && revealRoutine == null && revealObject == null)
             {
                 ElevatorScreen screen = Singleton<ElevatorScreen>.Instance;
@@ -3983,6 +3985,12 @@ namespace KnoxumsChaosMode
             if (bgm == null || ElevatorUnlockService.IsPitstopManager(bgm)) return;
             beginPlayReached = true;
             StopReveal();
+        }
+
+        public void OnElevatorResults(ElevatorScreen screen)
+        {
+            OnFloorLeaving();
+            resultsElevatorScreenId = screen != null ? screen.GetInstanceID() : 0;
         }
 
         public void OnFloorLeaving()
@@ -4163,7 +4171,7 @@ namespace KnoxumsChaosMode
                 KeyValuePair<GameplayModifierId, int> entry = grouped[i];
                 string text = GameplayModifierCatalog.Name(entry.Key);
                 if (entry.Value > 1)
-                    text += "\n<size=8><color=#707070>×" + entry.Value
+                    text += "\n<space=18px><size=8><color=#707070>×" + entry.Value
                         + "</color></size>";
 
 
@@ -4277,11 +4285,6 @@ namespace KnoxumsChaosMode
                 if (comic != null)
                 {
                     optionsClipboardFont = comic;
-                    TMP_Text sample = Resources.FindObjectsOfTypeAll<TMP_Text>()
-                        .FirstOrDefault(x => x != null && x.font == comic
-                            && x.fontSharedMaterial != null);
-                    if (sample != null)
-                        optionsClipboardFontMaterial = sample.fontSharedMaterial;
                     return comic;
                 }
                 optionsClipboardFont = Resources.FindObjectsOfTypeAll<TMP_FontAsset>()
@@ -4299,10 +4302,6 @@ namespace KnoxumsChaosMode
             gameObject.transform.SetParent(parent, false);
             TextMeshProUGUI text = gameObject.AddComponent<TextMeshProUGUI>();
             if (font != null) text.font = font;
-            if (font == optionsClipboardFont && optionsClipboardFontMaterial != null)
-                text.fontSharedMaterial = optionsClipboardFontMaterial;
-            text.fontStyle = FontStyles.Normal;
-            text.enableAutoSizing = false;
             text.text = value;
             text.fontSize = size;
             text.color = color;
@@ -4320,33 +4319,7 @@ namespace KnoxumsChaosMode
 
         private void Update()
         {
-            if (!Enabled || activeRolls.Count == 0)
-            {
-                DestroyPauseDisplay();
-                return;
-            }
-            pauseRefresh -= Time.unscaledDeltaTime;
-            if (pauseRefresh > 0f) return;
-            pauseRefresh = .25f;
-
-            if (Time.timeScale == 0f)
-            {
-                Transform target = FindPauseParent();
-                if (target != null && (pauseObject == null || pauseParent != target))
-                {
-                    DestroyPauseDisplay();
-                    pauseParent = target;
-                    pauseObject = BuildClipboardDisplay(target, false);
-                }
-                if (pauseObject != null)
-                {
-                    pauseObject.SetActive(true);
-                    RectTransform pauseRect = pauseObject.GetComponent<RectTransform>();
-                    if (pauseRect != null) pauseRect.anchoredPosition = new Vector2(10f, -8f);
-                    EnsurePauseOverlay();
-                }
-            }
-            else DestroyPauseDisplay();
+            if (pauseObject != null) DestroyPauseDisplay();
         }
 
         private Transform FindPauseParent()
