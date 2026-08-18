@@ -4114,11 +4114,11 @@ namespace KnoxumsChaosMode
             // black copy shifted slightly down and right, not TMP outline.
             CreateRuntimeText(root.transform, "ModifiersTitleShadow",
                 "Modifiers:", font, 24f, Color.black,
-                TextAlignmentOptions.Center, new Vector2(2f, 186f),
+                TextAlignmentOptions.Center, new Vector2(2f, 190f),
                 new Vector2(220f, 34f));
             CreateRuntimeText(root.transform, "ModifiersTitle",
                 "Modifiers:", font, 24f, Color.white,
-                TextAlignmentOptions.Center, new Vector2(0f, 188f),
+                TextAlignmentOptions.Center, new Vector2(0f, 192f),
                 new Vector2(220f, 34f));
 
             List<KeyValuePair<GameplayModifierId, int>> grouped = GroupForDisplay();
@@ -4133,7 +4133,7 @@ namespace KnoxumsChaosMode
                 // макете OptionsClipboard.
                 CreateRuntimeText(root.transform, "ModifierRow" + i, text, font,
                     17f, Color.black, TextAlignmentOptions.TopLeft,
-                    new Vector2(34f, 128f - i * 24f), new Vector2(172f, 28f));
+                    new Vector2(34f, 124f - i * 24f), new Vector2(172f, 28f));
             }
 
             root.transform.SetAsLastSibling();
@@ -4169,6 +4169,18 @@ namespace KnoxumsChaosMode
             image.type = Image.Type.Simple;
             image.preserveAspect = true;
             image.raycastTarget = false;
+            // OptionsClipboard — пиксель-арт. Bilinear-фильтрация превращала
+            // оригинальный спрайт в мыльную картинку при масштабировании HUD.
+            try
+            {
+                if (sprite.texture != null)
+                {
+                    sprite.texture.filterMode = FilterMode.Point;
+                    sprite.texture.wrapMode = TextureWrapMode.Clamp;
+                    sprite.texture.anisoLevel = 0;
+                }
+            }
+            catch { }
             return clipboard;
         }
 
