@@ -2284,12 +2284,9 @@ namespace KnoxumsChaosMode
         PartyStyle,
         Steamgen,
         ClumsyExplorer,
-        NegativeStickers,
         Hyperwatchers,
         Overlearned,
-        CloudyLenses,
         SneakyTricky,
-        Posterizator,
         SqueeshNot
     }
 
@@ -2317,12 +2314,9 @@ namespace KnoxumsChaosMode
                 { GameplayModifierId.PartyStyle, "Party Style!" },
                 { GameplayModifierId.Steamgen, "Steamgen" },
                 { GameplayModifierId.ClumsyExplorer, "Clumsy Explorer" },
-                { GameplayModifierId.NegativeStickers, "Negative Stickers" },
                 { GameplayModifierId.Hyperwatchers, "Hyperwatchers" },
                 { GameplayModifierId.Overlearned, "Overlearned" },
-                { GameplayModifierId.CloudyLenses, "Cloudy Lenses" },
                 { GameplayModifierId.SneakyTricky, "Sneaky-Tricky!" },
-                { GameplayModifierId.Posterizator, "Posterizator" },
                 { GameplayModifierId.SqueeshNot, "Squeesh-not!" }
             };
 
