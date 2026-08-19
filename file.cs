@@ -4153,7 +4153,18 @@ namespace KnoxumsChaosMode
                 clipboardRect.localScale = Vector3.one;
             }
 
-            TMP_FontAsset font = FindComicFont();
+            HudManager modifierHud = null;
+            try { modifierHud = Singleton<CoreGameManager>.Instance?.GetHud(0); }
+            catch { }
+            TMP_FontAsset font = modifierHud != null
+                ? ChaosManager.Instance?.GetComicSansFont(modifierHud) : null;
+            if (font == null)
+            {
+                ElevatorScreen elevatorScreen = Singleton<ElevatorScreen>.Instance;
+                TMP_Text floorLabel = R.Get<TMP_Text>(elevatorScreen, "floorText", null);
+                if (floorLabel != null) font = floorLabel.font;
+            }
+            if (font == null) font = FindComicFont();
 
 
             CreateRuntimeText(root.transform, "ModifiersTitleShadow",
@@ -4171,13 +4182,13 @@ namespace KnoxumsChaosMode
                 KeyValuePair<GameplayModifierId, int> entry = grouped[i];
                 string text = GameplayModifierCatalog.Name(entry.Key);
                 if (entry.Value > 1)
-                    text += "\n<space=18px><size=8><color=#707070>×" + entry.Value
+                    text += "\n<space=26px><size=9><color=#707070>×" + entry.Value
                         + "</color></size>";
 
 
                 CreateRuntimeText(root.transform, "ModifierRow" + i, text, font,
-                    12f, Color.black, TextAlignmentOptions.TopLeft,
-                    new Vector2(34f, 112f - i * 20f), new Vector2(172f, 24f));
+                    14f, Color.black, TextAlignmentOptions.TopLeft,
+                    new Vector2(34f, 112f - i * 22f), new Vector2(172f, 26f));
             }
 
             root.transform.SetAsLastSibling();
@@ -5687,7 +5698,7 @@ namespace KnoxumsChaosMode
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("CreateLapsHud: " + ex.Message); }
         }
         private static TMP_FontAsset cachedComicSansFont;
-        private TMP_FontAsset GetComicSansFont(HudManager hud = null)
+        internal TMP_FontAsset GetComicSansFont(HudManager hud = null)
         {
             if (cachedComicSansFont != null) return cachedComicSansFont;
             try
