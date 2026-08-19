@@ -1213,6 +1213,7 @@ namespace KnoxumsChaosMode
         {
             try
             {
+                GameplayModifierManager.Instance?.OnNotebookCollected(count);
                 if (ChaosManager.Instance != null && ChaosManager.Instance.IsChaosModeActive && count > 0)
                     ChaosManager.Instance.HandleNotebookCollection(__instance.FoundNotebooks);
                 if (ChaosManager.Instance != null && count > 0)
@@ -1541,6 +1542,7 @@ namespace KnoxumsChaosMode
         {
             try
             {
+                GameplayModifierManager.Instance?.ApplyNpcModifiers(__instance);
                 if (ChaosManager.Instance == null) return;
                 if (ChaosManager.Instance.IsCharPropShuffleActive)
                     ChaosManager.Instance.ShuffleNpcProperties(__instance);
@@ -1851,6 +1853,97 @@ namespace KnoxumsChaosMode
         static void Prefix(ElevatorScreen __instance)
         {
             GameplayModifierManager.Instance?.OnElevatorResults(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(Navigator), "SetSpeed", new Type[] { typeof(float) })]
+    public static class GameplayModifierNavigatorSpeedPatch
+    {
+        [HarmonyPrefix]
+        static void Prefix(Navigator __instance, ref float __0)
+        {
+            GameplayModifierManager.Instance?.ModifyNavigatorSpeed(__instance, ref __0);
+        }
+    }
+
+    [HarmonyPatch(typeof(Map), "Find", new Type[]
+    {
+        typeof(int), typeof(int), typeof(int), typeof(RoomController)
+    })]
+    public static class GameplayModifierMapFindPatch
+    {
+        [HarmonyPrefix]
+        static bool Prefix(int posX, int posZ, RoomController room)
+        {
+            GameplayModifierManager manager = GameplayModifierManager.Instance;
+            return manager == null || manager.AllowMapReveal(posX, posZ, room);
+        }
+    }
+
+    [HarmonyPatch(typeof(NPC), "EntityTriggerEnter", new Type[]
+    {
+        typeof(Entity), typeof(Collider), typeof(bool)
+    })]
+    public static class GameplayModifierLethalTouchPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(NPC __instance, Entity otherEntity, bool validCollision)
+        {
+            if (!validCollision || otherEntity == null) return;
+            PlayerManager player = otherEntity.GetComponentInParent<PlayerManager>();
+            if (player != null)
+                GameplayModifierManager.Instance?.TriggerLethalTouch(__instance, player);
+        }
+    }
+
+    [HarmonyPatch(typeof(CoreGameManager), "EndGame", new Type[]
+    {
+        typeof(Transform), typeof(Baldi)
+    })]
+    public static class GameplayModifierLossCameraPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(CoreGameManager __instance, Transform player)
+        {
+            GameplayModifierManager.Instance?.RetargetLossCamera(__instance, player);
+        }
+    }
+
+    [HarmonyPatch(typeof(ItemManager), "UseItem")]
+    public static class GameplayModifierItemUsePatch
+    {
+        [HarmonyPrefix]
+        static void Prefix(ItemManager __instance, out ItemObject __state)
+        {
+            __state = null;
+            if (__instance == null || __instance.items == null) return;
+            int slot = __instance.selectedItem;
+            if (slot >= 0 && slot < __instance.items.Length)
+                __state = __instance.items[slot];
+        }
+
+        [HarmonyPostfix]
+        static void Postfix(ItemManager __instance, ItemObject __state)
+        {
+            GameplayModifierManager.Instance?.OnItemUsed(__instance, __state);
+        }
+    }
+
+    [HarmonyPatch(typeof(Entity), "UpdateTriggerState")]
+    public static class GameplayModifierSquishedTriggerPatch
+    {
+        [HarmonyPrefix]
+        static void Prefix(Entity __instance, out bool __state)
+        {
+            __state = GameplayModifierManager.Instance != null
+                && GameplayModifierManager.Instance.KeepNpcTriggerWhileSquished(__instance);
+            if (__state) R.Set(__instance, "squished", false);
+        }
+
+        [HarmonyPostfix]
+        static void Postfix(Entity __instance, bool __state)
+        {
+            if (__state) R.Set(__instance, "squished", true);
         }
     }
 
@@ -2369,6 +2462,7 @@ namespace KnoxumsChaosMode
         public static ConfigEntry<bool> GameplayModifiersEnabledConfig { get; private set; }
         public static ConfigEntry<GameplayModifierMode> GameplayModifierModeConfig { get; private set; }
         public static ConfigEntry<int> GameplayModifierRollsConfig { get; private set; }
+        public static ConfigEntry<string> GameplayModifierForcedRollsConfig { get; private set; }
 
         private Harmony harmony;
         private GameObject chaosManagerObject;
@@ -2417,6 +2511,8 @@ namespace KnoxumsChaosMode
                 "Keep one set for the whole run or reroll before every school floor. ");
             GameplayModifierRollsConfig = Config.Bind("GameplayModifiers", "Rolls", 3,
                 "Number of modifier rolls (1-5). Duplicate rolls stack up to 3. ");
+            GameplayModifierForcedRollsConfig = Config.Bind("GameplayModifiers", "ForcedRolls", "",
+                "Testing only. Comma-separated modifier IDs; duplicates create stacks. Empty means random. ");
 
             BaldiRampageConfig.Init(Config);
 
@@ -3615,12 +3711,30 @@ namespace KnoxumsChaosMode
         private bool beginPlayReached;
         private GameplayModifierMode selectedMode;
         private int selectedRollCount;
+        private string selectedForcedRolls = "";
+        private readonly Dictionary<int, NpcSpeedState> npcSpeeds = new Dictionary<int, NpcSpeedState>();
+        private readonly Dictionary<int, bool> clumsyRooms = new Dictionary<int, bool>();
+        private readonly HashSet<int> clumsyCells = new HashSet<int>();
+        private Coroutine stealRoutine;
+        private GameObject stealVisual;
+        private float rouletteTimer;
+        private bool rouletteRight;
+        private bool rouletteInitialized;
+        private bool lethalTriggered;
+        private Transform lethalCatcher;
         private Coroutine revealRoutine;
         private GameObject revealObject;
         private GameObject pauseObject;
         private Transform pauseParent;
         private float pauseRefresh;
         private int resultsElevatorScreenId;
+
+        private sealed class NpcSpeedState
+        {
+            public Navigator navigator;
+            public float speed;
+            public float maxSpeed;
+        }
 
         public IReadOnlyList<GameplayModifierId> ActiveRolls => activeRolls;
         public bool Enabled =>
@@ -3772,6 +3886,8 @@ namespace KnoxumsChaosMode
                 ?? GameplayModifierMode.WholeRun;
             selectedRollCount = Mathf.Clamp(
                 KnoxumsChaosModePlugin.GameplayModifierRollsConfig?.Value ?? 3, 1, 5);
+            selectedForcedRolls = KnoxumsChaosModePlugin.GameplayModifierForcedRollsConfig?.Value ?? "";
+            rouletteRight = random.Next(0, 2) == 0;
         }
 
         private void OnEnable()
@@ -3808,14 +3924,18 @@ namespace KnoxumsChaosMode
                 ?? GameplayModifierMode.WholeRun;
             int rolls = Mathf.Clamp(
                 KnoxumsChaosModePlugin.GameplayModifierRollsConfig?.Value ?? 3, 1, 5);
-            if (!Enabled || mode != selectedMode || rolls != selectedRollCount)
+            string forced = KnoxumsChaosModePlugin.GameplayModifierForcedRollsConfig?.Value ?? "";
+            if (!Enabled || mode != selectedMode || rolls != selectedRollCount
+                || !string.Equals(forced, selectedForcedRolls, StringComparison.OrdinalIgnoreCase))
                 ResetRun();
             selectedMode = mode;
             selectedRollCount = rolls;
+            selectedForcedRolls = forced;
         }
 
         public void ResetRun()
         {
+            ResetRuntimeEffects();
             activeRolls.Clear();
             stacks.Clear();
             runSetCreated = false;
@@ -3833,6 +3953,299 @@ namespace KnoxumsChaosMode
         }
 
         public bool Has(GameplayModifierId id) { return GetStacks(id) > 0; }
+
+        private bool SchoolRuntimeActive()
+        {
+            if (!Enabled || activeRolls.Count == 0 || IsPitstopScene()) return false;
+            try { return Singleton<BaseGameManager>.Instance != null; }
+            catch { return false; }
+        }
+
+        public void ApplyNpcModifiers(NPC npc)
+        {
+            int stack = GetStacks(GameplayModifierId.McSpeeders);
+            if (npc == null || stack <= 0 || !SchoolRuntimeActive()) return;
+            Navigator navigator = npc.Navigator ?? npc.GetComponentInChildren<Navigator>();
+            if (navigator == null) return;
+            int id = navigator.GetInstanceID();
+            if (npcSpeeds.ContainsKey(id)) return;
+            float speed = R.Get<float>(navigator, "speed", 0f);
+            float maxSpeed = R.Get<float>(navigator, "maxSpeed", speed);
+            npcSpeeds[id] = new NpcSpeedState
+            {
+                navigator = navigator,
+                speed = speed,
+                maxSpeed = maxSpeed
+            };
+            float multiplier = Mathf.Pow(2f, stack);
+            R.Set(navigator, "speed", speed * multiplier);
+            R.Set(navigator, "maxSpeed", maxSpeed * multiplier);
+        }
+
+        public void ModifyNavigatorSpeed(Navigator navigator, ref float value)
+        {
+            int stack = GetStacks(GameplayModifierId.McSpeeders);
+            if (navigator == null || stack <= 0 || !SchoolRuntimeActive()) return;
+            NPC npc = navigator.GetComponent<NPC>() ?? navigator.GetComponentInParent<NPC>();
+            if (npc == null) return;
+            int id = navigator.GetInstanceID();
+            if (!npcSpeeds.TryGetValue(id, out NpcSpeedState state))
+            {
+                state = new NpcSpeedState
+                {
+                    navigator = navigator,
+                    speed = R.Get<float>(navigator, "speed", value),
+                    maxSpeed = R.Get<float>(navigator, "maxSpeed", value)
+                };
+                npcSpeeds[id] = state;
+            }
+            float current = R.Get<float>(navigator, "speed", float.NaN);
+            if (!float.IsNaN(current) && Mathf.Abs(value - current) < .001f
+                && Mathf.Abs(current - state.speed) > .001f) return;
+            value *= Mathf.Pow(2f, stack);
+        }
+
+        public bool AllowMapReveal(int x, int z, RoomController room)
+        {
+            int stack = GetStacks(GameplayModifierId.ClumsyExplorer);
+            if (stack <= 0 || !SchoolRuntimeActive()) return true;
+            float chance = Mathf.Clamp01(.25f * stack);
+            if (room != null && room.type != RoomType.Hall)
+            {
+                int roomId = room.GetInstanceID();
+                if (!clumsyRooms.TryGetValue(roomId, out bool allowed))
+                {
+                    allowed = random.NextDouble() >= chance;
+                    clumsyRooms[roomId] = allowed;
+                }
+                return allowed;
+            }
+            int key = x * 73856093 ^ z * 19349663;
+            if (clumsyCells.Contains(key)) return false;
+            if (random.NextDouble() < chance)
+            {
+                clumsyCells.Add(key);
+                return false;
+            }
+            return true;
+        }
+
+        public void OnNotebookCollected(int count)
+        {
+            int stack = GetStacks(GameplayModifierId.GottaSteal);
+            if (count <= 0 || stack <= 0 || !SchoolRuntimeActive()) return;
+            if (stealRoutine != null) StopCoroutine(stealRoutine);
+            if (stealVisual != null) Destroy(stealVisual);
+            stealVisual = null;
+            stealRoutine = StartCoroutine(GottaStealRoutine(stack * count));
+        }
+
+        public void OnItemUsed(ItemManager itemManager, ItemObject usedItem)
+        {
+            if (GetStacks(GameplayModifierId.ItemRoulette) <= 0
+                || itemManager == null || usedItem == null
+                || usedItem.itemType == Items.None || !SchoolRuntimeActive()) return;
+            rouletteRight = !rouletteRight;
+        }
+
+        public void TriggerLethalTouch(NPC catcher, PlayerManager player)
+        {
+            if (catcher == null || player == null || lethalTriggered
+                || GetStacks(GameplayModifierId.LethalTouchers) <= 0
+                || !SchoolRuntimeActive() || catcher is Baldi
+                || catcher.Character == Character.Chalkles) return;
+            Baldi baldi = catcher.ec != null ? catcher.ec.GetBaldi() : null;
+            BaseGameManager manager = Singleton<BaseGameManager>.Instance;
+            if (baldi == null || manager == null) return;
+            lethalTriggered = true;
+            lethalCatcher = catcher.transform;
+            manager.EndGame(player.transform, baldi);
+        }
+
+        public void RetargetLossCamera(CoreGameManager core, Transform player)
+        {
+            if (!lethalTriggered || lethalCatcher == null || core == null) return;
+            try
+            {
+                GameCamera camera = core.GetCamera(0);
+                camera.UpdateTargets(lethalCatcher, 0);
+                camera.offestPos = (player.position - lethalCatcher.position).normalized * 2f
+                    + Vector3.up;
+                camera.SetControllable(false);
+                camera.matchTargetRotation = false;
+            }
+            catch { }
+        }
+
+        public bool KeepNpcTriggerWhileSquished(Entity entity)
+        {
+            return entity != null && entity.Squished
+                && GetStacks(GameplayModifierId.SqueeshNot) > 0
+                && SchoolRuntimeActive()
+                && entity.GetComponentInParent<NPC>() != null;
+        }
+
+        private IEnumerator GottaStealRoutine(int amount)
+        {
+            CoreGameManager core = Singleton<CoreGameManager>.Instance;
+            PlayerManager player = core != null ? core.GetPlayer(0) : null;
+            ItemManager items = player != null ? player.itm : null;
+            if (items == null) { stealRoutine = null; yield break; }
+
+            GottaSweep sweep = Resources.FindObjectsOfTypeAll<GottaSweep>()
+                .FirstOrDefault(x => x != null && x.gameObject.activeInHierarchy)
+                ?? Resources.FindObjectsOfTypeAll<GottaSweep>().FirstOrDefault(x => x != null);
+            Sprite sprite = null;
+            SoundObject sound = null;
+            if (sweep != null)
+            {
+                SpriteRenderer renderer = sweep.GetComponentsInChildren<SpriteRenderer>(true)
+                    .FirstOrDefault(x => x != null && x.sprite != null);
+                if (renderer != null) sprite = renderer.sprite;
+                sound = R.Get<SoundObject>(sweep, "audIntro", null);
+            }
+            if (sound != null && core.audMan != null) core.audMan.PlaySingle(sound);
+
+            HudManager hud = null;
+            Canvas canvas = null;
+            try { hud = core.GetHud(0); canvas = hud?.Canvas(); } catch { }
+            RectTransform visualRect = null;
+            float sweepStart = -310f;
+            float sweepEnd = 310f;
+            if (canvas != null && sprite != null)
+            {
+                Transform visualParent = hud != null && hud.inventory != null
+                    ? hud.inventory.transform : canvas.transform;
+                stealVisual = new GameObject("GottaStealSweep", typeof(RectTransform), typeof(Image));
+                stealVisual.transform.SetParent(visualParent, false);
+                Image image = stealVisual.GetComponent<Image>();
+                image.sprite = sprite;
+                image.preserveAspect = true;
+                image.raycastTarget = false;
+                visualRect = stealVisual.GetComponent<RectTransform>();
+                visualRect.anchorMin = visualRect.anchorMax = new Vector2(.5f, .5f);
+                visualRect.pivot = new Vector2(.5f, .5f);
+                visualRect.sizeDelta = new Vector2(90f, 90f);
+                RectTransform inventoryRect = visualParent as RectTransform;
+                if (inventoryRect != null && inventoryRect.rect.width > 1f)
+                {
+                    sweepStart = inventoryRect.rect.xMin - 45f;
+                    sweepEnd = inventoryRect.rect.xMax + 45f;
+                }
+                stealVisual.transform.SetAsLastSibling();
+            }
+
+            bool removed = false;
+            float time = 0f;
+            while (time < .8f)
+            {
+                time += Time.unscaledDeltaTime;
+                float progress = Mathf.Clamp01(time / .8f);
+                if (visualRect != null)
+                    visualRect.anchoredPosition = new Vector2(
+                        Mathf.Lerp(sweepStart, sweepEnd, progress), 0f);
+                if (!removed && progress >= .45f)
+                {
+                    removed = true;
+                    RemoveRandomInventoryItems(items, amount);
+                }
+                yield return null;
+            }
+            if (!removed) RemoveRandomInventoryItems(items, amount);
+            if (stealVisual != null) Destroy(stealVisual);
+            stealVisual = null;
+            stealRoutine = null;
+        }
+
+        private void RemoveRandomInventoryItems(ItemManager itemManager, int amount)
+        {
+            if (itemManager == null || itemManager.items == null) return;
+            bool[] locked = R.Get<bool[]>(itemManager, "slotLocked", null);
+            List<int> occupied = new List<int>();
+            int max = Mathf.Min(R.Get<int>(itemManager, "maxItem",
+                itemManager.items.Length - 1), itemManager.items.Length - 1);
+            for (int i = 0; i <= max; i++)
+            {
+                ItemObject item = itemManager.items[i];
+                if (item == null || item.itemType == Items.None) continue;
+                if (locked != null && i < locked.Length && locked[i]) continue;
+                occupied.Add(i);
+            }
+            for (int count = 0; count < amount && occupied.Count > 0; count++)
+            {
+                int pick = random.Next(0, occupied.Count);
+                int slot = occupied[pick];
+                occupied.RemoveAt(pick);
+                itemManager.RemoveItem(slot);
+            }
+        }
+
+        private void TickItemRoulette()
+        {
+            int stack = GetStacks(GameplayModifierId.ItemRoulette);
+            if (stack <= 0 || !SchoolRuntimeActive() || Time.timeScale == 0f) return;
+            if (!rouletteInitialized)
+            {
+                rouletteInitialized = true;
+                rouletteTimer = 1f / Mathf.Pow(2f, stack - 1);
+                return;
+            }
+            rouletteTimer -= Time.deltaTime;
+            if (rouletteTimer > 0f) return;
+            rouletteTimer = 1f / Mathf.Pow(2f, stack - 1);
+            CoreGameManager core = Singleton<CoreGameManager>.Instance;
+            PlayerManager player = core != null ? core.GetPlayer(0) : null;
+            ItemManager itemManager = player != null ? player.itm : null;
+            if (itemManager == null || itemManager.items == null) return;
+            int max = Mathf.Min(R.Get<int>(itemManager, "maxItem",
+                itemManager.items.Length - 1), itemManager.items.Length - 1);
+            if (max < 1) return;
+            ItemObject[] values = itemManager.items;
+            if (rouletteRight)
+            {
+                ItemObject last = values[max];
+                for (int i = max; i > 0; i--) values[i] = values[i - 1];
+                values[0] = last;
+            }
+            else
+            {
+                ItemObject first = values[0];
+                for (int i = 0; i < max; i++) values[i] = values[i + 1];
+                values[max] = first;
+            }
+            itemManager.UpdateItems();
+            itemManager.UpdateSelect();
+        }
+
+        private void RestoreNpcSpeeds()
+        {
+            foreach (NpcSpeedState state in npcSpeeds.Values)
+            {
+                if (state == null || state.navigator == null) continue;
+                R.Set(state.navigator, "speed", state.speed);
+                R.Set(state.navigator, "maxSpeed", state.maxSpeed);
+            }
+            npcSpeeds.Clear();
+        }
+
+        private void ResetRuntimeEffects()
+        {
+            RestoreNpcSpeeds();
+            clumsyRooms.Clear();
+            clumsyCells.Clear();
+            rouletteTimer = 0f;
+            rouletteRight = random.Next(0, 2) == 0;
+            rouletteInitialized = false;
+            lethalTriggered = false;
+            lethalCatcher = null;
+            if (stealRoutine != null)
+            {
+                try { StopCoroutine(stealRoutine); } catch { }
+                stealRoutine = null;
+            }
+            if (stealVisual != null) Destroy(stealVisual);
+            stealVisual = null;
+        }
 
         public void OnElevatorScreenStarted(ElevatorScreen screen)
         {
@@ -3895,6 +4308,7 @@ namespace KnoxumsChaosMode
                 ?? GameplayModifierMode.WholeRun;
             selectedRollCount = Mathf.Clamp(
                 KnoxumsChaosModePlugin.GameplayModifierRollsConfig?.Value ?? 3, 1, 5);
+            selectedForcedRolls = KnoxumsChaosModePlugin.GameplayModifierForcedRollsConfig?.Value ?? "";
             string floorKey = BuildFloorKey();
             bool needRoll = activeRolls.Count == 0
                 || (selectedMode == GameplayModifierMode.WholeRun
@@ -3910,20 +4324,35 @@ namespace KnoxumsChaosMode
 
         private void RollSet(int count)
         {
+            ResetRuntimeEffects();
             activeRolls.Clear();
             stacks.Clear();
-            GameplayModifierId[] all = GameplayModifierCatalog.All;
-            for (int slot = 0; slot < count && all.Length > 0; slot++)
+            List<GameplayModifierId> forced = ParseForcedRolls(selectedForcedRolls);
+            if (forced.Count > 0)
             {
-                GameplayModifierId pick = all[0];
-                for (int attempt = 0; attempt < 128; attempt++)
+                for (int i = 0; i < forced.Count && activeRolls.Count < 5; i++)
                 {
-                    pick = all[random.Next(0, all.Length)];
-                    if (GetStacks(pick) < 3) break;
+                    GameplayModifierId id = forced[i];
+                    if (GetStacks(id) >= 3) continue;
+                    activeRolls.Add(id);
+                    stacks[id] = GetStacks(id) + 1;
                 }
-                if (GetStacks(pick) >= 3) continue;
-                activeRolls.Add(pick);
-                stacks[pick] = GetStacks(pick) + 1;
+            }
+            else
+            {
+                GameplayModifierId[] all = GameplayModifierCatalog.All;
+                for (int slot = 0; slot < count && all.Length > 0; slot++)
+                {
+                    GameplayModifierId pick = all[0];
+                    for (int attempt = 0; attempt < 128; attempt++)
+                    {
+                        pick = all[random.Next(0, all.Length)];
+                        if (GetStacks(pick) < 3) break;
+                    }
+                    if (GetStacks(pick) >= 3) continue;
+                    activeRolls.Add(pick);
+                    stacks[pick] = GetStacks(pick) + 1;
+                }
             }
 
             try
@@ -3933,6 +4362,34 @@ namespace KnoxumsChaosMode
                         activeRolls.Select(x => GameplayModifierCatalog.Name(x)).ToArray()));
             }
             catch { }
+        }
+
+        private static List<GameplayModifierId> ParseForcedRolls(string value)
+        {
+            List<GameplayModifierId> result = new List<GameplayModifierId>();
+            if (string.IsNullOrWhiteSpace(value)) return result;
+            string[] parts = value.Split(new[] { ',', ';', '+' },
+                StringSplitOptions.RemoveEmptyEntries);
+            GameplayModifierId[] all = GameplayModifierCatalog.All;
+            for (int i = 0; i < parts.Length && result.Count < 5; i++)
+            {
+                string wanted = NormalizeModifierName(parts[i]);
+                for (int j = 0; j < all.Length; j++)
+                {
+                    GameplayModifierId id = all[j];
+                    if (wanted == NormalizeModifierName(id.ToString())
+                        || wanted == NormalizeModifierName(GameplayModifierCatalog.Name(id)))
+                    { result.Add(id); break; }
+                }
+            }
+            return result;
+        }
+
+        private static string NormalizeModifierName(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return "";
+            return new string(value.Where(char.IsLetterOrDigit).ToArray())
+                .ToLowerInvariant();
         }
 
         private string BuildFloorKey()
@@ -3976,6 +4433,8 @@ namespace KnoxumsChaosMode
         {
             if (bgm == null || ElevatorUnlockService.IsPitstopManager(bgm)) return;
             beginPlayReached = true;
+            foreach (NPC npc in UnityEngine.Object.FindObjectsOfType<NPC>(true))
+                if (npc != null && npc.gameObject.activeInHierarchy) ApplyNpcModifiers(npc);
             StopReveal();
         }
 
@@ -3988,6 +4447,7 @@ namespace KnoxumsChaosMode
         public void OnFloorLeaving()
         {
             beginPlayReached = false;
+            ResetRuntimeEffects();
             StopReveal();
             DestroyPauseDisplay();
         }
@@ -4323,6 +4783,7 @@ namespace KnoxumsChaosMode
         private void Update()
         {
             if (pauseObject != null) DestroyPauseDisplay();
+            TickItemRoulette();
         }
 
         private Transform FindPauseParent()
