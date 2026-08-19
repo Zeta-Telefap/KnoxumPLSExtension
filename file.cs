@@ -1947,6 +1947,47 @@ namespace KnoxumsChaosMode
         }
     }
 
+    [HarmonyPatch(typeof(BeltManager), "OnTriggerEnter")]
+    public static class BeltManagerTriggerEnterPatch
+    {
+        [HarmonyPrefix]
+        static bool Prefix(BeltManager __instance, Collider other)
+        {
+            if (__instance == null || other == null || !other.isTrigger) return false;
+            Entity entity = other.GetComponent<Entity>() ?? other.GetComponentInParent<Entity>();
+            if (entity == null) return false;
+            ActivityModifier activity = entity.ExternalActivity;
+            MovementModifier modifier = R.Get<MovementModifier>(__instance, "moveMod", null);
+            List<ActivityModifier> current = R.Get<List<ActivityModifier>>(__instance,
+                "currentActMods", null);
+            if (activity == null || modifier == null) return false;
+            if (!activity.moveMods.Contains(modifier)) activity.moveMods.Add(modifier);
+            if (current != null && !current.Contains(activity)) current.Add(activity);
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(BeltManager), "OnTriggerExit")]
+    public static class BeltManagerTriggerExitPatch
+    {
+        [HarmonyPrefix]
+        static bool Prefix(BeltManager __instance, Collider other)
+        {
+            if (__instance == null || other == null || !other.isTrigger) return false;
+            Entity entity = other.GetComponent<Entity>() ?? other.GetComponentInParent<Entity>();
+            if (entity == null) return false;
+            ActivityModifier activity = entity.ExternalActivity;
+            MovementModifier modifier = R.Get<MovementModifier>(__instance, "moveMod", null);
+            List<ActivityModifier> current = R.Get<List<ActivityModifier>>(__instance,
+                "currentActMods", null);
+            if (activity != null && modifier != null)
+                while (activity.moveMods.Remove(modifier)) { }
+            if (current != null && activity != null)
+                while (current.Remove(activity)) { }
+            return false;
+        }
+    }
+
     [HarmonyPatch]
     public static class SoundShuffleNoAudioWaitPatch
     {
@@ -3179,7 +3220,7 @@ namespace KnoxumsChaosMode
     [DefaultExecutionOrder(32000)]
     public class FunCameraFlip : MonoBehaviour
     {
-        private readonly Camera[] cams = new Camera[2];
+        private readonly Camera[] cams = new Camera[3];
         private bool hooked;
         private bool gooshoesOffset;
         private bool mirrorOn;
@@ -3241,7 +3282,12 @@ namespace KnoxumsChaosMode
             {
                 CoreGameManager gc = Singleton<CoreGameManager>.Instance;
                 GameCamera cam = gc != null ? gc.GetCamera(0) : null;
-                if (cam != null) { cams[0] = cam.camCom; cams[1] = cam.billboardCam; }
+                if (cam != null)
+                {
+                    cams[0] = cam.camCom;
+                    cams[1] = cam.billboardCam;
+                    cams[2] = cam.mapCam;
+                }
             }
             catch { }
         }
@@ -3337,7 +3383,13 @@ namespace KnoxumsChaosMode
         }
 
         private void OnDisable() { Shutdown(); }
-        private bool IsOurs(Camera camera) { return camera != null && (camera == cams[0] || camera == cams[1]); }
+        private bool IsOurs(Camera camera)
+        {
+            if (camera == null) return false;
+            for (int i = 0; i < cams.Length; i++)
+                if (camera == cams[i]) return true;
+            return false;
+        }
         private void ReverseCulling(ScriptableRenderContext ctx, Camera camera)
         { if (IsOurs(camera)) { PushMatrixOn(camera, mirrorOn ? -1f : 1f, gooshoesOn ? -1f : 1f); GL.invertCulling = true; } }
         private void ReturnCulling(ScriptableRenderContext ctx, Camera camera) { if (IsOurs(camera)) GL.invertCulling = false; }
@@ -6969,7 +7021,11 @@ namespace KnoxumsChaosMode
                         ctl.SetNotebooks(NotebooksCollectedCount);
                     }
                 }
-                NavMeshAgent a = cl.GetComponent<NavMeshAgent>() ?? cl.GetComponentInChildren<NavMeshAgent>(); if (a != null && a.enabled && a.isOnNavMesh) a.Warp(pos);
+                NavMeshAgent a = cl.GetComponent<NavMeshAgent>() ?? cl.GetComponentInChildren<NavMeshAgent>();
+                if (a != null && a.enabled && a.isOnNavMesh) a.Warp(pos);
+                Entity cloneEntity = cl.Navigator != null ? cl.Navigator.Entity : null;
+                if (cloneEntity != null) cloneEntity.Teleport(pos);
+                else cl.transform.position = pos;
                 ResetRuntimeTimers(cl); RegNpcCh(cl); SyncEvts(cl); cl.gameObject.SetActive(true);
 
 
@@ -6979,6 +7035,7 @@ namespace KnoxumsChaosMode
         private Vector3 GetClonePos(NPC o)
         {
             Vector3 p = o.transform.position;
+            float desiredY = o.transform.position.y;
             if (CurrentCloneSpawnPoint == CloneSpawnPoint.CharPosition)
             { NPC last = FindObjectsOfType<NPC>().LastOrDefault(n => n != null && n.Character == o.Character); if (last != null) p = last.transform.position; }
             else if (o.ec != null)
@@ -6986,7 +7043,9 @@ namespace KnoxumsChaosMode
                 FieldInfo f = R.Field(o.ec, "spawnPositions"); object v = f?.GetValue(o.ec);
                 if (v is IntVector2[] a && a.Length > 0) { IntVector2 q = a[Random.Range(0, a.Length)]; p = new Vector3(q.x * 10f + 5f, o.transform.position.y, q.z * 10f + 5f); }
             }
-            if (NavMesh.SamplePosition(p, out NavMeshHit hit, 8f, NavMesh.AllAreas)) p = hit.position; return p;
+            if (NavMesh.SamplePosition(p, out NavMeshHit hit, 8f, NavMesh.AllAreas)) p = hit.position;
+            p.y = desiredY;
+            return p;
         }
         private NPC GetTmpl(NPC o)
         {
