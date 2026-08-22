@@ -2678,8 +2678,8 @@ namespace KnoxumsChaosMode
     {
         private TextMeshProUGUI pageTitleText;
         private int activePage;
-        private const int PAGES = 7;
-        private GameObject p0, p1, p2, p3, p4, pMods, p5;
+        private const int PAGES = 6;
+        private GameObject p0, p1, p2, p3, p4, p5;
         private MenuToggle chaosT;
         private TextMeshProUGUI modeT;
         private int modeI;
@@ -2705,11 +2705,6 @@ namespace KnoxumsChaosMode
         private GameObject cowardLapsCover;
         private bool lastLapsVisual;
         private MenuToggle lightsOutT, mirroredT, gooshoesT, lbTestT;
-        private MenuToggle modifiersEnableT;
-        private TextMeshProUGUI modifiersModeT;
-        private StandardMenuButton modifiersModeLA, modifiersModeRA;
-        private AdjustmentBars modifiersRollsB;
-        private int modifiersModeI;
 
         public override void Build()
         {
@@ -2792,23 +2787,6 @@ namespace KnoxumsChaosMode
             gooshoesT = MkT(p4, "53045009", KnoxumsChaosModePlugin.IsGooshoesEnabledConfig.Value, -60f);
             lbTestT = MkT(p4, "LB Test School", KnoxumsChaosModePlugin.IsLbTestSchoolEnabledConfig.Value, -90f);
 
-            pMods = MkC("PMods");
-            modifiersEnableT = MkT(pMods, "Enable",
-                KnoxumsChaosModePlugin.GameplayModifiersEnabledConfig.Value, 0f);
-            MkL(pMods, "Mode:", -40f);
-            modifiersModeLA = MkB(pMods, OnModifiersModeL, -110f, -75f, true);
-            modifiersModeT = MkTxt(pMods, -75f);
-            modifiersModeRA = MkB(pMods, OnModifiersModeR, 110f, -75f, false);
-            modifiersModeI = Mathf.Clamp(
-                (int)KnoxumsChaosModePlugin.GameplayModifierModeConfig.Value, 0, 1);
-            UpdModifiersMode();
-            MkL(pMods, "Rolls:", -110f);
-            modifiersRollsB = CreateBars(delegate { }, "GameplayModifiersRollsBars",
-                new Vector3(-80f, -140f, 0f), 5);
-            modifiersRollsB.transform.SetParent(pMods.transform, false);
-            modifiersRollsB.Adjust(Mathf.Clamp(
-                KnoxumsChaosModePlugin.GameplayModifierRollsConfig.Value, 1, 5));
-
             p5 = MkC("P5");
 
             p5s1 = new GameObject("P5S1", typeof(RectTransform));
@@ -2866,11 +2844,6 @@ namespace KnoxumsChaosMode
             AddTooltip(mirroredT, "Mirror the camera and look controls.");
             AddTooltip(gooshoesT, "USE THESE TO STICK TO THE CEILING!");
             AddTooltip(lbTestT, "School lights pulse like the Lightbulb Testing Room.");
-            AddTooltip(modifiersEnableT, "Enable random gameplay modifiers.");
-            AddTooltip(modifiersModeLA,
-                "Whole Run keeps one set for the run. Floor rerolls before each school floor.");
-            AddTooltip(modifiersModeRA,
-                "Whole Run keeps one set for the run. Floor rerolls before each school floor.");
 
             activePage = 0;
             UpdPage();
@@ -3031,22 +3004,14 @@ namespace KnoxumsChaosMode
         {
             if (pageTitleText == null) return;
             p0.SetActive(activePage == 0); p1.SetActive(activePage == 1); p2.SetActive(activePage == 2);
-            p3.SetActive(activePage == 3); p4.SetActive(activePage == 4);
-            pMods.SetActive(activePage == 5); p5.SetActive(activePage == 6);
+            p3.SetActive(activePage == 3); p4.SetActive(activePage == 4); p5.SetActive(activePage == 5);
             pageTitleText.text = new[] { "Chaos Mode", "Props Shuffle", "School Shuffle",
-                "Other Chaos", "Fun Settings", "Gameplay Modifiers", "Settings" }[activePage];
+                "Other Chaos", "Fun Settings", "Settings" }[activePage];
         }
 
         private void OnML() { modeI = (modeI - 1 + 3) % 3; UpdMode(); }
         private void OnMR() { modeI = (modeI + 1) % 3; UpdMode(); }
         private void UpdMode() { modeI = Mathf.Clamp(modeI, 0, 2); if (modeT != null) modeT.text = new[] { "Chaos", "Chaos+1", "Double Chaos" }[modeI]; }
-        private void OnModifiersModeL() { modifiersModeI = (modifiersModeI + 1) % 2; UpdModifiersMode(); }
-        private void OnModifiersModeR() { modifiersModeI = (modifiersModeI + 1) % 2; UpdModifiersMode(); }
-        private void UpdModifiersMode()
-        {
-            if (modifiersModeT != null)
-                modifiersModeT.text = modifiersModeI == 0 ? "Whole Run" : "Floor";
-        }
         private void OnSL() { spawnI = (spawnI - 1 + 2) % 2; UpdSpawn(); }
         private void OnSR() { spawnI = (spawnI + 1) % 2; UpdSpawn(); }
         private void UpdSpawn() { spawnI = Mathf.Clamp(spawnI, 0, 1); if (spawnT != null) spawnT.text = spawnI == 0 ? "char. position" : "char. spawn point"; }
@@ -3099,17 +3064,10 @@ namespace KnoxumsChaosMode
                     KnoxumsChaosModePlugin.IsGooshoesEnabledConfig.Value = (bool)vf.GetValue(gooshoesT);
                     KnoxumsChaosModePlugin.IsLbTestSchoolEnabledConfig.Value = (bool)vf.GetValue(lbTestT);
                     KnoxumsChaosModePlugin.DisableWarningConfig.Value = !(bool)vf.GetValue(warningT);
-                    KnoxumsChaosModePlugin.GameplayModifiersEnabledConfig.Value =
-                        (bool)vf.GetValue(modifiersEnableT);
                 }
                 KnoxumsChaosModePlugin.PropShuffleTemperatureConfig.Value = Mathf.Clamp(tempB.GetRaw(), 1, 15);
                 KnoxumsChaosModePlugin.CloneSpawnPointConfig.Value = (CloneSpawnPoint)Mathf.Clamp(spawnI, 0, 1);
-                KnoxumsChaosModePlugin.GameplayModifierModeConfig.Value =
-                    (GameplayModifierMode)Mathf.Clamp(modifiersModeI, 0, 1);
-                KnoxumsChaosModePlugin.GameplayModifierRollsConfig.Value =
-                    Mathf.Clamp(modifiersRollsB.GetRaw(), 1, 5);
                 KnoxumsChaosModePlugin.Instance.Config.Save();
-                GameplayModifierManager.Instance?.OnSettingsChanged();
             }
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("Apply: " + ex.Message); }
         }
