@@ -3175,10 +3175,35 @@ namespace KnoxumsChaosMode
         private void PostRender(Camera camera) { if (IsOurs(camera)) GL.invertCulling = false; }
     }
 
+    [HarmonyPatch(typeof(Map), "OnPreCullCallback")]
+    public static class MirroredQuickMapPatch
+    {
+        [HarmonyPrefix]
+        static void Prefix(Map __instance, Camera camera, out Entity __state)
+        {
+            __state = null;
+            if (!(KnoxumsChaosModePlugin.IsMirroredEnabledConfig?.Value ?? false)
+                || __instance == null || camera == null) return;
+            List<Camera> cameras = R.Get<List<Camera>>(__instance, "cams", null);
+            if (cameras == null || cameras.Count == 0 || cameras[0] != camera) return;
+            PlayerManager player = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
+            Entity entity = player != null && player.plm != null ? player.plm.Entity : null;
+            if (entity == null || entity.Flipped) return;
+            R.Set(entity, "flipped", true);
+            __state = entity;
+        }
+
+        [HarmonyPostfix]
+        static void Postfix(Entity __state)
+        {
+            if (__state != null) R.Set(__state, "flipped", false);
+        }
+    }
+
     [DefaultExecutionOrder(32000)]
     public class FunCameraFlip : MonoBehaviour
     {
-        private readonly Camera[] cams = new Camera[3];
+        private readonly Camera[] cams = new Camera[2];
         private bool hooked;
         private bool gooshoesOffset;
         private bool mirrorOn;
@@ -3244,7 +3269,6 @@ namespace KnoxumsChaosMode
                 {
                     cams[0] = cam.camCom;
                     cams[1] = cam.billboardCam;
-                    cams[2] = cam.mapCam;
                 }
             }
             catch { }
