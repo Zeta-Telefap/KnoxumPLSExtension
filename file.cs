@@ -3175,16 +3175,41 @@ namespace KnoxumsChaosMode
         private void PostRender(Camera camera) { if (IsOurs(camera)) GL.invertCulling = false; }
     }
 
+    [HarmonyPatch(typeof(Map), "OnPreCullCallback")]
+    public static class MirroredQuickMapPatch
+    {
+        [HarmonyPostfix]
+        static void Postfix(Map __instance, Camera camera)
+        {
+            if (!(KnoxumsChaosModePlugin.IsMirroredEnabledConfig?.Value ?? false)
+                || __instance == null || camera == null) return;
+            List<Camera> cameras = R.Get<List<Camera>>(__instance, "cams", null);
+            if (cameras == null || cameras.Count == 0 || cameras[0] != camera) return;
+            PlayerManager player = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
+            Entity entity = player != null && player.plm != null ? player.plm.Entity : null;
+            if (entity != null && entity.Flipped) return;
+            camera.projectionMatrix *= Matrix4x4.Scale(new Vector3(-1f, 1f, 1f));
+            try
+            {
+                MethodInfo method = __instance.GetType().GetMethod("UpdateMapIconMirroring",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (method != null) method.Invoke(__instance, new object[] { true });
+            }
+            catch { }
+        }
+    }
+
     [DefaultExecutionOrder(32000)]
     public class FunCameraFlip : MonoBehaviour
     {
-        private readonly Camera[] cams = new Camera[3];
+        private readonly Camera[] cams = new Camera[2];
         private bool hooked;
         private bool gooshoesOffset;
         private bool mirrorOn;
         private bool gooshoesOn;
         private bool mirrorEffectsOn;
-        private bool playerReversed;
+        private bool playerReverseCaptured;
+        private bool originalPlayerReversed;
         private bool subtitleReversed;
         private bool audioReversed;
         private bool mapFlipped;
@@ -3194,11 +3219,13 @@ namespace KnoxumsChaosMode
         {
             mirrorOn = mirror;
             gooshoesOn = gooshoes;
+            CapturePlayerReverseState();
             GrabCameras();
             ApplyMirrorEffects(mirror);
             PushMatrix();
             ApplyGooshoesOffset(gooshoes);
             ApplyEntityFlip(gooshoes);
+            SyncPlayerReverseState();
             if ((mirror || gooshoes) && !hooked)
             {
                 hooked = true;
@@ -3213,7 +3240,12 @@ namespace KnoxumsChaosMode
         private void LateUpdate()
         {
             if (ChaosManager.Instance != null && !ChaosManager.Instance.IsLevelReady) return;
-            if (mirrorOn || gooshoesOn) { GrabCameras(); PushMatrix(); }
+            if (mirrorOn || gooshoesOn)
+            {
+                GrabCameras();
+                PushMatrix();
+                SyncPlayerReverseState();
+            }
         }
 
         private void PushMatrix()
@@ -3244,7 +3276,6 @@ namespace KnoxumsChaosMode
                 {
                     cams[0] = cam.camCom;
                     cams[1] = cam.billboardCam;
-                    cams[2] = cam.mapCam;
                 }
             }
             catch { }
@@ -3263,6 +3294,29 @@ namespace KnoxumsChaosMode
             catch { return false; }
         }
 
+        private void CapturePlayerReverseState()
+        {
+            if (playerReverseCaptured) return;
+            PlayerManager player = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
+            if (player == null) return;
+            originalPlayerReversed = R.Get<bool>(player, "reversed", false);
+            playerReverseCaptured = true;
+        }
+
+        private void SyncPlayerReverseState()
+        {
+            PlayerManager player = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
+            if (player == null) return;
+            CapturePlayerReverseState();
+            Entity entity = player.plm != null ? player.plm.Entity : null;
+            bool flipped = entity != null && entity.Flipped;
+            bool desired = originalPlayerReversed ^ (mirrorOn || gooshoesOn || flipped);
+            bool current = R.Get<bool>(player, "reversed", false);
+            bool controlled = true;
+            if (current != desired) controlled = TryInvokeNoArg(player, "Reverse");
+            FunLookInvertPatch.NeedPlusLook = mirrorOn && !controlled;
+        }
+
         private void ApplyMirrorEffects(bool on)
         {
             if (on == mirrorEffectsOn) return;
@@ -3271,15 +3325,12 @@ namespace KnoxumsChaosMode
             {
                 try { Singleton<SubtitleManager>.Instance.Reverse(); subtitleReversed = true; } catch { }
                 try { audioReversed = TryInvokeNoArg(Singleton<CoreGameManager>.Instance?.GetCamera(0), "ReverseAudio"); } catch { }
-                playerReversed = TryInvokeNoArg(Singleton<CoreGameManager>.Instance?.GetPlayer(0), "Reverse");
-                FunLookInvertPatch.NeedPlusLook = !playerReversed;
             }
             else
             {
                 FunLookInvertPatch.NeedPlusLook = false;
                 if (subtitleReversed) { try { Singleton<SubtitleManager>.Instance.Reverse(); } catch { } subtitleReversed = false; }
                 if (audioReversed) { TryInvokeNoArg(Singleton<CoreGameManager>.Instance?.GetCamera(0), "ReverseAudio"); audioReversed = false; }
-                if (playerReversed) { TryInvokeNoArg(Singleton<CoreGameManager>.Instance?.GetPlayer(0), "Reverse"); playerReversed = false; }
             }
         }
 
@@ -3337,6 +3388,8 @@ namespace KnoxumsChaosMode
             }
             mirrorOn = false;
             gooshoesOn = false;
+            SyncPlayerReverseState();
+            playerReverseCaptured = false;
             try { GL.invertCulling = false; } catch { }
         }
 
@@ -3349,10 +3402,10 @@ namespace KnoxumsChaosMode
             return false;
         }
         private void ReverseCulling(ScriptableRenderContext ctx, Camera camera)
-        { if (IsOurs(camera)) { PushMatrixOn(camera, mirrorOn ? -1f : 1f, gooshoesOn ? -1f : 1f); GL.invertCulling = true; } }
+        { if (IsOurs(camera)) { PushMatrixOn(camera, mirrorOn ? -1f : 1f, gooshoesOn ? -1f : 1f); GL.invertCulling = mirrorOn ^ gooshoesOn; } }
         private void ReturnCulling(ScriptableRenderContext ctx, Camera camera) { if (IsOurs(camera)) GL.invertCulling = false; }
         private void PreRender(Camera camera)
-        { if (IsOurs(camera)) { PushMatrixOn(camera, mirrorOn ? -1f : 1f, gooshoesOn ? -1f : 1f); GL.invertCulling = true; } }
+        { if (IsOurs(camera)) { PushMatrixOn(camera, mirrorOn ? -1f : 1f, gooshoesOn ? -1f : 1f); GL.invertCulling = mirrorOn ^ gooshoesOn; } }
         private void PostRender(Camera camera) { if (IsOurs(camera)) GL.invertCulling = false; }
     }
 
