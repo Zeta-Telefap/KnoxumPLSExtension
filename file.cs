@@ -2393,6 +2393,7 @@ namespace KnoxumsChaosMode
 
     public enum ChaosModeType { Chaos, ChaosPlus1, DoubleChaos }
     public enum CloneSpawnPoint { CharPosition, CharSpawnPoint }
+    public enum ChaosStyle { Classic, Party }
 
     public enum GameplayModifierMode
     {
@@ -2500,6 +2501,7 @@ namespace KnoxumsChaosMode
         public static ConfigEntry<bool> IsLbTestSchoolEnabledConfig { get; private set; }
         public static ConfigEntry<bool> IsItemMischiefEnabledConfig { get; private set; }
         public static ConfigEntry<bool> DisableWarningConfig { get; private set; }
+        public static ConfigEntry<ChaosStyle> StyleConfig { get; private set; }
         public static ConfigEntry<bool> GameplayModifiersEnabledConfig { get; private set; }
         public static ConfigEntry<GameplayModifierMode> GameplayModifierModeConfig { get; private set; }
         public static ConfigEntry<int> GameplayModifierRollsConfig { get; private set; }
@@ -2539,6 +2541,8 @@ namespace KnoxumsChaosMode
             IncludeExitsConfig = Config.Bind("Settings", "IncludeExits", false, "Spawn on exit lock. ");
             DisableWarningConfig = Config.Bind("Settings", "DisableWarning", false,
                 "Disable the Knoxum's Chaos Mode photosensitivity warning on startup. ");
+            StyleConfig = Config.Bind("Settings", "Style", ChaosStyle.Classic,
+                "Visual and voice style: Classic or Party. ");
             EggConfig = Config.Bind("Secret", "egg", false, "You know what to do. ");
             IsLightsOutEnabledConfig = Config.Bind("FunSettings", "IsLightsOutEnabled", false, "Lights Out. ");
             IsMirroredEnabledConfig = Config.Bind("FunSettings", "IsMirroredEnabled", false, "Mirrored camera. ");
@@ -2582,6 +2586,7 @@ namespace KnoxumsChaosMode
             chaosManagerObject = new GameObject("KnoxumsChaosManager");
             chaosManagerObject.AddComponent<ChaosManager>();
             chaosManagerObject.AddComponent<GameplayModifierManager>();
+            chaosManagerObject.AddComponent<PartyStyleManager>();
             DontDestroyOnLoad(chaosManagerObject);
         }
 
@@ -2702,6 +2707,9 @@ namespace KnoxumsChaosMode
         private const int P5PAGES = 2;
         private StandardMenuButton p5LA, p5RA;
         private MenuToggle warningT;
+        private TextMeshProUGUI styleT;
+        private StandardMenuButton styleLA, styleRA;
+        private int styleI;
         private GameObject cowardLapsCover;
         private bool lastLapsVisual;
         private MenuToggle lightsOutT, mirroredT, gooshoesT, lbTestT;
@@ -2807,6 +2815,12 @@ namespace KnoxumsChaosMode
 
             warningT = MkT(p5s2, "Warning",
                 !KnoxumsChaosModePlugin.DisableWarningConfig.Value, 0f);
+            MkL(p5s2, "Style:", -40f);
+            styleLA = MkB(p5s2, OnStyleL, -105f, -75f, true);
+            styleT = MkTxt(p5s2, -75f);
+            styleRA = MkB(p5s2, OnStyleR, 105f, -75f, false);
+            styleI = Mathf.Clamp((int)KnoxumsChaosModePlugin.StyleConfig.Value, 0, 1);
+            UpdStyle();
 
 
             p5LA = CreateButton(OnP5L, menuArrowLeft, menuArrowLeftHighlight,
@@ -2840,6 +2854,8 @@ namespace KnoxumsChaosMode
             AddTooltip(inclT, "Characters' clones spawn on broken exit lock.");
             AddTooltip(warningT,
                 "Show this mod's photosensitivity warning on startup.");
+            AddTooltip(styleLA, "Classic uses the original Baldi style. Party uses embedded PartyStyle resources.");
+            AddTooltip(styleRA, "Classic uses the original Baldi style. Party uses embedded PartyStyle resources.");
             AddTooltip(lightsOutT, "Dark school with local lantern lighting.");
             AddTooltip(mirroredT, "Mirror the camera and look controls.");
             AddTooltip(gooshoesT, "USE THESE TO STICK TO THE CEILING!");
@@ -3012,6 +3028,12 @@ namespace KnoxumsChaosMode
         private void OnML() { modeI = (modeI - 1 + 3) % 3; UpdMode(); }
         private void OnMR() { modeI = (modeI + 1) % 3; UpdMode(); }
         private void UpdMode() { modeI = Mathf.Clamp(modeI, 0, 2); if (modeT != null) modeT.text = new[] { "Chaos", "Chaos+1", "Double Chaos" }[modeI]; }
+        private void OnStyleL() { styleI = (styleI + 1) % 2; UpdStyle(); }
+        private void OnStyleR() { styleI = (styleI + 1) % 2; UpdStyle(); }
+        private void UpdStyle()
+        {
+            if (styleT != null) styleT.text = styleI == 0 ? "Classic" : "Party";
+        }
         private void OnSL() { spawnI = (spawnI - 1 + 2) % 2; UpdSpawn(); }
         private void OnSR() { spawnI = (spawnI + 1) % 2; UpdSpawn(); }
         private void UpdSpawn() { spawnI = Mathf.Clamp(spawnI, 0, 1); if (spawnT != null) spawnT.text = spawnI == 0 ? "char. position" : "char. spawn point"; }
@@ -3067,12 +3089,282 @@ namespace KnoxumsChaosMode
                 }
                 KnoxumsChaosModePlugin.PropShuffleTemperatureConfig.Value = Mathf.Clamp(tempB.GetRaw(), 1, 15);
                 KnoxumsChaosModePlugin.CloneSpawnPointConfig.Value = (CloneSpawnPoint)Mathf.Clamp(spawnI, 0, 1);
+                KnoxumsChaosModePlugin.StyleConfig.Value = (ChaosStyle)Mathf.Clamp(styleI, 0, 1);
                 KnoxumsChaosModePlugin.Instance.Config.Save();
+                PartyStyleManager.Instance?.RefreshNow();
             }
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("Apply: " + ex.Message); }
         }
     }
 
+
+    public class PartyStyleManager : MonoBehaviour
+    {
+        public static PartyStyleManager Instance { get; private set; }
+        private readonly Dictionary<string, string> imageResources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> audioResources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, Texture2D> textures = new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<long, Sprite> sprites = new Dictionary<long, Sprite>();
+        private readonly HashSet<int> generatedSprites = new HashSet<int>();
+        private AudioClip balHi;
+        private float refreshTimer;
+
+        public bool Active => KnoxumsChaosModePlugin.StyleConfig?.Value == ChaosStyle.Party;
+
+        private void Awake()
+        {
+            Instance = this;
+            IndexResources();
+        }
+
+        private void IndexResources()
+        {
+            try
+            {
+                string[] names = Assembly.GetExecutingAssembly().GetManifestResourceNames();
+                for (int i = 0; i < names.Length; i++)
+                {
+                    string resource = names[i];
+                    int marker = resource.IndexOf("PartyStyle.", StringComparison.OrdinalIgnoreCase);
+                    if (marker < 0) continue;
+                    string tail = resource.Substring(marker + "PartyStyle.".Length);
+                    int extension = tail.LastIndexOf('.');
+                    if (extension <= 0) continue;
+                    string key = tail.Substring(0, extension);
+                    int separator = key.LastIndexOf('.');
+                    if (separator >= 0) key = key.Substring(separator + 1);
+                    string ext = tail.Substring(extension + 1).ToLowerInvariant();
+                    if (key.Equals("Present", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (ext == "png" || ext == "jpg" || ext == "jpeg") imageResources[key] = resource;
+                    else if (ext == "wav") audioResources[key] = resource;
+                }
+            }
+            catch { }
+        }
+
+        private Texture2D LoadTexture(string key)
+        {
+            if (textures.TryGetValue(key, out Texture2D cached)) return cached;
+            if (!imageResources.TryGetValue(key, out string resource)) return null;
+            try
+            {
+                using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resource))
+                {
+                    if (stream == null) return null;
+                    byte[] data = new byte[stream.Length];
+                    stream.Read(data, 0, data.Length);
+                    Texture2D texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    texture.filterMode = FilterMode.Point;
+                    texture.wrapMode = TextureWrapMode.Clamp;
+                    if (!texture.LoadImage(data)) { Destroy(texture); return null; }
+                    texture.name = key;
+                    textures[key] = texture;
+                    return texture;
+                }
+            }
+            catch { return null; }
+        }
+
+        public Sprite ReplaceSprite(Sprite original)
+        {
+            if (!Active || original == null || generatedSprites.Contains(original.GetInstanceID())) return original;
+            Texture2D texture = null;
+            bool sheet = false;
+            if (original.texture != null)
+            {
+                texture = LoadTexture(original.texture.name);
+                sheet = texture != null;
+            }
+            if (texture == null) texture = LoadTexture(original.name);
+            if (texture == null) return original;
+            long key = ((long)original.GetInstanceID() << 32) | (uint)texture.GetInstanceID();
+            if (sprites.TryGetValue(key, out Sprite cached)) return cached;
+            try
+            {
+                Rect rect = sheet ? original.rect : new Rect(0f, 0f, texture.width, texture.height);
+                if (rect.xMax > texture.width || rect.yMax > texture.height)
+                    rect = new Rect(0f, 0f, texture.width, texture.height);
+                Vector2 pivot = new Vector2(
+                    original.rect.width > 0f ? original.pivot.x / original.rect.width : .5f,
+                    original.rect.height > 0f ? original.pivot.y / original.rect.height : .5f);
+                Sprite replacement = Sprite.Create(texture, rect, pivot,
+                    original.pixelsPerUnit, 0, SpriteMeshType.FullRect, original.border);
+                replacement.name = original.name;
+                sprites[key] = replacement;
+                generatedSprites.Add(replacement.GetInstanceID());
+                return replacement;
+            }
+            catch { return original; }
+        }
+
+        public AudioClip ReplaceAudio(AudioClip original)
+        {
+            if (!Active || original == null || !original.name.Equals("BAL_Hi", StringComparison.OrdinalIgnoreCase)) return original;
+            if (balHi != null) return balHi;
+            if (!audioResources.TryGetValue("BAL_Hi", out string resource)) return original;
+            try
+            {
+                using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resource))
+                {
+                    if (stream == null) return original;
+                    balHi = LoadWav(stream, "BAL_Hi");
+                }
+            }
+            catch { }
+            return balHi ?? original;
+        }
+
+        private static AudioClip LoadWav(Stream stream, string name)
+        {
+            using (BinaryReader reader = new BinaryReader(stream))
+            {
+                if (new string(reader.ReadChars(4)) != "RIFF") return null;
+                reader.ReadInt32();
+                if (new string(reader.ReadChars(4)) != "WAVE") return null;
+                short format = 1;
+                short channels = 1;
+                int sampleRate = 44100;
+                short bits = 16;
+                byte[] data = null;
+                while (reader.BaseStream.Position + 8 <= reader.BaseStream.Length)
+                {
+                    string chunk = new string(reader.ReadChars(4));
+                    int size = reader.ReadInt32();
+                    long next = reader.BaseStream.Position + size + (size & 1);
+                    if (chunk == "fmt ")
+                    {
+                        format = reader.ReadInt16();
+                        channels = reader.ReadInt16();
+                        sampleRate = reader.ReadInt32();
+                        reader.ReadInt32();
+                        reader.ReadInt16();
+                        bits = reader.ReadInt16();
+                    }
+                    else if (chunk == "data") data = reader.ReadBytes(size);
+                    reader.BaseStream.Position = Math.Min(next, reader.BaseStream.Length);
+                }
+                if (data == null || channels <= 0 || bits <= 0) return null;
+                int bytesPerSample = bits / 8;
+                if (bytesPerSample <= 0) return null;
+                int sampleCount = data.Length / bytesPerSample;
+                float[] samples = new float[sampleCount];
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    int offset = i * bytesPerSample;
+                    if (format == 3 && bits == 32)
+                        samples[i] = BitConverter.ToSingle(data, offset);
+                    else if (bits == 8)
+                        samples[i] = (data[offset] - 128f) / 128f;
+                    else if (bits == 16)
+                        samples[i] = BitConverter.ToInt16(data, offset) / 32768f;
+                    else if (bits == 24)
+                    {
+                        int value = data[offset] | data[offset + 1] << 8 | data[offset + 2] << 16;
+                        if ((value & 8388608) != 0) value |= -16777216;
+                        samples[i] = value / 8388608f;
+                    }
+                    else if (bits == 32)
+                        samples[i] = BitConverter.ToInt32(data, offset) / 2147483648f;
+                }
+                int frames = sampleCount / channels;
+                if (frames <= 0) return null;
+                AudioClip clip = AudioClip.Create(name, frames, channels, sampleRate, false);
+                clip.SetData(samples, 0);
+                return clip;
+            }
+        }
+
+        public void RefreshNow()
+        {
+            refreshTimer = 0f;
+            RefreshLiveSprites();
+        }
+
+        private void Update()
+        {
+            if (!Active) return;
+            refreshTimer -= Time.unscaledDeltaTime;
+            if (refreshTimer > 0f) return;
+            refreshTimer = .5f;
+            RefreshLiveSprites();
+        }
+
+        private void RefreshLiveSprites()
+        {
+            if (!Active) return;
+            SpriteRenderer[] renderers = Resources.FindObjectsOfTypeAll<SpriteRenderer>();
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                SpriteRenderer renderer = renderers[i];
+                if (renderer == null || !renderer.gameObject.activeInHierarchy || renderer.sprite == null) continue;
+                Sprite replacement = ReplaceSprite(renderer.sprite);
+                if (replacement != renderer.sprite) renderer.sprite = replacement;
+            }
+            Image[] images = Resources.FindObjectsOfTypeAll<Image>();
+            for (int i = 0; i < images.Length; i++)
+            {
+                Image image = images[i];
+                if (image == null || !image.gameObject.activeInHierarchy || image.sprite == null) continue;
+                Sprite replacement = ReplaceSprite(image.sprite);
+                if (replacement != image.sprite) image.sprite = replacement;
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(SpriteRenderer), "sprite", MethodType.Setter)]
+    public static class PartyStyleSpriteRendererPatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.Last)]
+        static void Prefix(ref Sprite value)
+        {
+            if (PartyStyleManager.Instance != null) value = PartyStyleManager.Instance.ReplaceSprite(value);
+        }
+    }
+
+    [HarmonyPatch(typeof(Image), "sprite", MethodType.Setter)]
+    public static class PartyStyleImagePatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.Last)]
+        static void Prefix(ref Sprite value)
+        {
+            if (PartyStyleManager.Instance != null) value = PartyStyleManager.Instance.ReplaceSprite(value);
+        }
+    }
+
+    [HarmonyPatch(typeof(AudioSource), "clip", MethodType.Setter)]
+    public static class PartyStyleAudioClipPatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        static void Prefix(ref AudioClip value)
+        {
+            if (PartyStyleManager.Instance != null) value = PartyStyleManager.Instance.ReplaceAudio(value);
+        }
+    }
+
+    [HarmonyPatch(typeof(AudioSource), "PlayOneShot", new Type[] { typeof(AudioClip) })]
+    public static class PartyStyleAudioOneShotPatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        static void Prefix(ref AudioClip clip)
+        {
+            if (PartyStyleManager.Instance != null) clip = PartyStyleManager.Instance.ReplaceAudio(clip);
+        }
+    }
+
+    [HarmonyPatch(typeof(AudioSource), "PlayOneShot", new Type[] { typeof(AudioClip), typeof(float) })]
+    public static class PartyStyleAudioOneShotVolumePatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        static void Prefix(ref AudioClip clip)
+        {
+            if (PartyStyleManager.Instance != null) clip = PartyStyleManager.Instance.ReplaceAudio(clip);
+        }
+    }
 
     public class FunMirrorMode : MonoBehaviour
     {
