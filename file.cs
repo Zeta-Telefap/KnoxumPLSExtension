@@ -1350,7 +1350,6 @@ namespace KnoxumsChaosMode
                     }
                     else ChaosManager.Instance.BeginBaldiCountdownAudioWindow();
                     ChaosManager.Instance.ApplyFunAfterPostGen(__instance);
-                    PartyStyleManager.Instance?.ApplyPresents(__instance);
 
 
                 }
@@ -1385,6 +1384,7 @@ namespace KnoxumsChaosMode
                 }
                 else
                 {
+                    PartyStyleManager.Instance?.ApplyPresents(__instance);
 
 
                     GameplayModifierManager.Instance?.NotifyBeginPlay(__instance);
@@ -3104,14 +3104,34 @@ namespace KnoxumsChaosMode
         public static PartyStyleManager Instance { get; private set; }
         private readonly Dictionary<string, string> imageResources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> audioResources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> imageFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> audioFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> assetNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, Texture2D> textures = new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<long, Sprite> sprites = new Dictionary<long, Sprite>();
         private readonly HashSet<int> generatedSprites = new HashSet<int>();
+        private readonly Dictionary<int, Sprite> generatedOriginals = new Dictionary<int, Sprite>();
+        private readonly List<SpriteRenderer> trackedRenderers = new List<SpriteRenderer>();
+        private readonly List<Image> trackedImages = new List<Image>();
+        private readonly HashSet<int> trackedRendererIds = new HashSet<int>();
+        private readonly HashSet<int> trackedImageIds = new HashSet<int>();
+        private readonly Dictionary<int, PresentPickupState> presentStates = new Dictionary<int, PresentPickupState>();
         private AudioClip balHi;
         private ItemObject presentItem;
         private Sprite presentSprite;
         private List<ItemObject> presentPool;
         private float refreshTimer;
+        private bool wasActive;
+        private bool indexReported;
+        private bool presentFailureReported;
+
+        private sealed class PresentPickupState
+        {
+            public Pickup pickup;
+            public ItemObject item;
+            public bool hidden;
+            public string objectName;
+        }
 
         public bool Active => KnoxumsChaosModePlugin.StyleConfig?.Value == ChaosStyle.Party;
 
@@ -3119,51 +3139,186 @@ namespace KnoxumsChaosMode
         {
             Instance = this;
             IndexResources();
+            wasActive = Active;
+        }
+
+        private static List<string> ExpectedImageKeys()
+        {
+            List<string> keys = new List<string>
+            {
+                "Slap_Sheet",
+                "Slap_Broken_Sheet",
+                "BAL_Countdown_Sheet",
+                "Present"
+            };
+            for (int i = 0; i <= 99; i++)
+                if (i == 0 || (i & 1) != 0)
+                    keys.Add("Baldi_Wave" + i.ToString("0000"));
+            return keys;
+        }
+
+        private static string NormalizeAssetKey(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return "";
+            value = value.Replace("(Clone)", "").Replace(" clone", "");
+            char[] chars = new char[value.Length];
+            int count = 0;
+            for (int i = 0; i < value.Length; i++)
+                if (char.IsLetterOrDigit(value[i])) chars[count++] = char.ToLowerInvariant(value[i]);
+            return new string(chars, 0, count);
+        }
+
+        private static string MatchExpectedKey(string source, List<string> expected)
+        {
+            string normalized = NormalizeAssetKey(source);
+            string best = null;
+            int bestLength = -1;
+            for (int i = 0; i < expected.Count; i++)
+            {
+                string key = expected[i];
+                string candidate = NormalizeAssetKey(key);
+                if (normalized.EndsWith(candidate, StringComparison.OrdinalIgnoreCase)
+                    && candidate.Length > bestLength)
+                {
+                    best = key;
+                    bestLength = candidate.Length;
+                }
+            }
+            return best;
         }
 
         private void IndexResources()
         {
+            imageResources.Clear();
+            audioResources.Clear();
+            imageFiles.Clear();
+            audioFiles.Clear();
+            assetNames.Clear();
+            List<string> expected = ExpectedImageKeys();
             try
             {
-                string[] names = Assembly.GetExecutingAssembly().GetManifestResourceNames();
+                Assembly assembly = Assembly.GetExecutingAssembly();
+                string[] names = assembly.GetManifestResourceNames();
                 for (int i = 0; i < names.Length; i++)
                 {
                     string resource = names[i];
-                    int marker = resource.IndexOf("PartyStyle.", StringComparison.OrdinalIgnoreCase);
-                    if (marker < 0) continue;
-                    string tail = resource.Substring(marker + "PartyStyle.".Length);
-                    int extension = tail.LastIndexOf('.');
-                    if (extension <= 0) continue;
-                    string key = tail.Substring(0, extension);
-                    int separator = key.LastIndexOf('.');
-                    if (separator >= 0) key = key.Substring(separator + 1);
-                    string ext = tail.Substring(extension + 1).ToLowerInvariant();
-                    if (ext == "png" || ext == "jpg" || ext == "jpeg") imageResources[key] = resource;
-                    else if (ext == "wav") audioResources[key] = resource;
+                    string lower = resource.ToLowerInvariant();
+                    if (lower.EndsWith(".png") || lower.EndsWith(".jpg") || lower.EndsWith(".jpeg"))
+                    {
+                        int extension = resource.LastIndexOf('.');
+                        string key = MatchExpectedKey(extension > 0 ? resource.Substring(0, extension) : resource, expected);
+                        if (key == null) continue;
+                        string normalized = NormalizeAssetKey(key);
+                        imageResources[normalized] = resource;
+                        assetNames[normalized] = key;
+                    }
+                    else if (lower.EndsWith(".wav"))
+                    {
+                        int extension = resource.LastIndexOf('.');
+                        string stem = extension > 0 ? resource.Substring(0, extension) : resource;
+                        if (!NormalizeAssetKey(stem).EndsWith("balhi", StringComparison.OrdinalIgnoreCase)) continue;
+                        audioResources["balhi"] = resource;
+                    }
+                }
+                string directory = null;
+                try { directory = Path.GetDirectoryName(assembly.Location); } catch { }
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    string[] roots =
+                    {
+                        Path.Combine(directory, "PartyStyle"),
+                        Path.Combine(directory, "Resources", "PartyStyle")
+                    };
+                    for (int r = 0; r < roots.Length; r++)
+                    {
+                        if (!Directory.Exists(roots[r])) continue;
+                        string[] files = Directory.GetFiles(roots[r], "*", SearchOption.AllDirectories);
+                        for (int i = 0; i < files.Length; i++)
+                        {
+                            string file = files[i];
+                            string extension = Path.GetExtension(file).ToLowerInvariant();
+                            if (extension == ".png" || extension == ".jpg" || extension == ".jpeg")
+                            {
+                                string key = MatchExpectedKey(Path.GetFileNameWithoutExtension(file), expected);
+                                if (key == null) continue;
+                                string normalized = NormalizeAssetKey(key);
+                                if (!imageResources.ContainsKey(normalized)) imageFiles[normalized] = file;
+                                assetNames[normalized] = key;
+                            }
+                            else if (extension == ".wav"
+                                && NormalizeAssetKey(Path.GetFileNameWithoutExtension(file)) == "balhi"
+                                && !audioResources.ContainsKey("balhi"))
+                                audioFiles["balhi"] = file;
+                        }
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogWarning("Party Style resource index: " + ex.Message);
+            }
+            if (!indexReported)
+            {
+                indexReported = true;
+                int images = imageResources.Count + imageFiles.Count;
+                int audio = audioResources.Count + audioFiles.Count;
+                if (images == 0 && audio == 0)
+                    KnoxumsChaosModePlugin.Log.LogWarning("Party Style: no PartyStyle image or audio resources were found");
+                else
+                    KnoxumsChaosModePlugin.Log.LogInfo("Party Style: found " + images + " images and " + audio + " audio files");
+            }
+        }
+
+        private static byte[] ReadStream(Stream stream)
+        {
+            if (stream == null) return null;
+            using (MemoryStream memory = new MemoryStream())
+            {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+                    memory.Write(buffer, 0, read);
+                return memory.ToArray();
+            }
+        }
+
+        private byte[] LoadBytes(string normalized, Dictionary<string, string> resources,
+            Dictionary<string, string> files)
+        {
+            try
+            {
+                if (resources.TryGetValue(normalized, out string resource))
+                {
+                    using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resource))
+                        return ReadStream(stream);
+                }
+                if (files.TryGetValue(normalized, out string file) && File.Exists(file))
+                    return File.ReadAllBytes(file);
+            }
             catch { }
+            return null;
         }
 
         private Texture2D LoadTexture(string key)
         {
-            if (textures.TryGetValue(key, out Texture2D cached)) return cached;
-            if (!imageResources.TryGetValue(key, out string resource)) return null;
+            string normalized = NormalizeAssetKey(key);
+            if (textures.TryGetValue(normalized, out Texture2D cached)) return cached;
+            byte[] data = LoadBytes(normalized, imageResources, imageFiles);
+            if (data == null) return null;
             try
             {
-                using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resource))
+                Texture2D texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                texture.filterMode = FilterMode.Point;
+                texture.wrapMode = TextureWrapMode.Clamp;
+                texture.anisoLevel = 0;
+                if (!texture.LoadImage(data))
                 {
-                    if (stream == null) return null;
-                    byte[] data = new byte[stream.Length];
-                    stream.Read(data, 0, data.Length);
-                    Texture2D texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                    texture.filterMode = FilterMode.Point;
-                    texture.wrapMode = TextureWrapMode.Clamp;
-                    if (!texture.LoadImage(data)) { Destroy(texture); return null; }
-                    texture.name = key;
-                    textures[key] = texture;
-                    return texture;
+                    Destroy(texture);
+                    return null;
                 }
+                texture.name = assetNames.TryGetValue(normalized, out string name) ? name : key;
+                textures[normalized] = texture;
+                return texture;
             }
             catch { return null; }
         }
@@ -3185,7 +3340,7 @@ namespace KnoxumsChaosMode
             try
             {
                 Rect rect = sheet ? original.rect : new Rect(0f, 0f, texture.width, texture.height);
-                if (rect.xMax > texture.width || rect.yMax > texture.height)
+                if (rect.x < 0f || rect.y < 0f || rect.xMax > texture.width || rect.yMax > texture.height)
                     rect = new Rect(0f, 0f, texture.width, texture.height);
                 Vector2 pivot = new Vector2(
                     original.rect.width > 0f ? original.pivot.x / original.rect.width : .5f,
@@ -3195,6 +3350,7 @@ namespace KnoxumsChaosMode
                 replacement.name = original.name;
                 sprites[key] = replacement;
                 generatedSprites.Add(replacement.GetInstanceID());
+                generatedOriginals[replacement.GetInstanceID()] = original;
                 return replacement;
             }
             catch { return original; }
@@ -3202,16 +3358,14 @@ namespace KnoxumsChaosMode
 
         public AudioClip ReplaceAudio(AudioClip original)
         {
-            if (!Active || original == null || !original.name.Equals("BAL_Hi", StringComparison.OrdinalIgnoreCase)) return original;
+            if (!Active || original == null || NormalizeAssetKey(original.name) != "balhi") return original;
             if (balHi != null) return balHi;
-            if (!audioResources.TryGetValue("BAL_Hi", out string resource)) return original;
+            byte[] data = LoadBytes("balhi", audioResources, audioFiles);
+            if (data == null) return original;
             try
             {
-                using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resource))
-                {
-                    if (stream == null) return original;
+                using (MemoryStream stream = new MemoryStream(data, false))
                     balHi = LoadWav(stream, "BAL_Hi");
-                }
             }
             catch { }
             return balHi ?? original;
@@ -3351,8 +3505,17 @@ namespace KnoxumsChaosMode
         public void ApplyPresents(BaseGameManager manager)
         {
             if (!Active || manager == null || manager.Ec == null
-                || ElevatorUnlockService.IsPitstopManager(manager)
-                || !EnsurePresentItem()) return;
+                || ElevatorUnlockService.IsPitstopManager(manager)) return;
+            if (!EnsurePresentItem())
+            {
+                if (!presentFailureReported)
+                {
+                    presentFailureReported = true;
+                    KnoxumsChaosModePlugin.Log.LogWarning("Party Style: Present resource or item template is unavailable");
+                }
+                return;
+            }
+            presentFailureReported = false;
             RefreshPresentPool();
             HashSet<Pickup> pickups = new HashSet<Pickup>();
             if (manager.Ec.items != null)
@@ -3369,6 +3532,15 @@ namespace KnoxumsChaosMode
             foreach (Pickup pickup in pickups)
             {
                 if (PickupInShop(pickup)) continue;
+                int id = pickup.GetInstanceID();
+                if (presentStates.ContainsKey(id)) continue;
+                presentStates[id] = new PresentPickupState
+                {
+                    pickup = pickup,
+                    item = pickup.item,
+                    hidden = R.Get<bool>(pickup, "hidden", false),
+                    objectName = pickup.transform.name
+                };
                 pickup.AssignItem(presentItem);
                 pickup.Hide(false);
             }
@@ -3387,31 +3559,35 @@ namespace KnoxumsChaosMode
             return false;
         }
 
-        public void RefreshNow()
+        private void RestoreClassicPresents()
         {
-            refreshTimer = 0f;
-            RefreshLiveSprites();
+            foreach (PresentPickupState state in presentStates.Values)
+            {
+                Pickup pickup = state != null ? state.pickup : null;
+                if (pickup == null || pickup.item != presentItem) continue;
+                try
+                {
+                    pickup.AssignItem(state.item ?? Singleton<CoreGameManager>.Instance.NoneItem);
+                    pickup.Hide(state.hidden);
+                    pickup.transform.name = state.objectName;
+                }
+                catch { }
+            }
+            presentStates.Clear();
         }
 
-        private void Update()
+        private void TrackAndReplaceLiveSprites()
         {
-            if (!Active) return;
-            refreshTimer -= Time.unscaledDeltaTime;
-            if (refreshTimer > 0f) return;
-            refreshTimer = .5f;
-            RefreshLiveSprites();
-        }
-
-        private void RefreshLiveSprites()
-        {
-            if (!Active) return;
             SpriteRenderer[] renderers = Resources.FindObjectsOfTypeAll<SpriteRenderer>();
             for (int i = 0; i < renderers.Length; i++)
             {
                 SpriteRenderer renderer = renderers[i];
                 if (renderer == null || !renderer.gameObject.activeInHierarchy || renderer.sprite == null) continue;
                 Sprite replacement = ReplaceSprite(renderer.sprite);
-                if (replacement != renderer.sprite) renderer.sprite = replacement;
+                if (replacement == renderer.sprite) continue;
+                int id = renderer.GetInstanceID();
+                if (trackedRendererIds.Add(id)) trackedRenderers.Add(renderer);
+                renderer.sprite = replacement;
             }
             Image[] images = Resources.FindObjectsOfTypeAll<Image>();
             for (int i = 0; i < images.Length; i++)
@@ -3419,8 +3595,114 @@ namespace KnoxumsChaosMode
                 Image image = images[i];
                 if (image == null || !image.gameObject.activeInHierarchy || image.sprite == null) continue;
                 Sprite replacement = ReplaceSprite(image.sprite);
+                if (replacement == image.sprite) continue;
+                int id = image.GetInstanceID();
+                if (trackedImageIds.Add(id)) trackedImages.Add(image);
+                image.sprite = replacement;
+            }
+        }
+
+        private void RefreshTrackedSprites()
+        {
+            for (int i = trackedRenderers.Count - 1; i >= 0; i--)
+            {
+                SpriteRenderer renderer = trackedRenderers[i];
+                if (renderer == null)
+                {
+                    trackedRenderers.RemoveAt(i);
+                    continue;
+                }
+                if (!renderer.gameObject.activeInHierarchy || renderer.sprite == null) continue;
+                Sprite replacement = ReplaceSprite(renderer.sprite);
+                if (replacement != renderer.sprite) renderer.sprite = replacement;
+            }
+            for (int i = trackedImages.Count - 1; i >= 0; i--)
+            {
+                Image image = trackedImages[i];
+                if (image == null)
+                {
+                    trackedImages.RemoveAt(i);
+                    continue;
+                }
+                if (!image.gameObject.activeInHierarchy || image.sprite == null) continue;
+                Sprite replacement = ReplaceSprite(image.sprite);
                 if (replacement != image.sprite) image.sprite = replacement;
             }
+        }
+
+        private void RestoreClassicSprites()
+        {
+            for (int i = trackedRenderers.Count - 1; i >= 0; i--)
+            {
+                SpriteRenderer renderer = trackedRenderers[i];
+                if (renderer == null || renderer.sprite == null) continue;
+                if (generatedOriginals.TryGetValue(renderer.sprite.GetInstanceID(), out Sprite original))
+                    renderer.sprite = original;
+            }
+            for (int i = trackedImages.Count - 1; i >= 0; i--)
+            {
+                Image image = trackedImages[i];
+                if (image == null || image.sprite == null) continue;
+                if (generatedOriginals.TryGetValue(image.sprite.GetInstanceID(), out Sprite original))
+                    image.sprite = original;
+            }
+            trackedRenderers.Clear();
+            trackedImages.Clear();
+            trackedRendererIds.Clear();
+            trackedImageIds.Clear();
+        }
+
+        private void RestoreClassic()
+        {
+            RestoreClassicSprites();
+            RestoreClassicPresents();
+        }
+
+        public void RefreshNow()
+        {
+            bool active = Active;
+            if (!active)
+            {
+                RestoreClassic();
+                wasActive = false;
+                return;
+            }
+            if (imageResources.Count + imageFiles.Count + audioResources.Count + audioFiles.Count == 0)
+                IndexResources();
+            wasActive = true;
+            refreshTimer = 0f;
+            TrackAndReplaceLiveSprites();
+            try { ApplyPresents(Singleton<BaseGameManager>.Instance); } catch { }
+        }
+
+        private void LateUpdate()
+        {
+            bool active = Active;
+            if (active != wasActive)
+            {
+                wasActive = active;
+                if (!active)
+                {
+                    RestoreClassic();
+                    return;
+                }
+                refreshTimer = 0f;
+                try { ApplyPresents(Singleton<BaseGameManager>.Instance); } catch { }
+            }
+            if (!active) return;
+            refreshTimer -= Time.unscaledDeltaTime;
+            if (refreshTimer <= 0f)
+            {
+                refreshTimer = .5f;
+                TrackAndReplaceLiveSprites();
+            }
+            RefreshTrackedSprites();
+        }
+
+        private void OnDisable()
+        {
+            RestoreClassic();
+            if (Instance == this) Instance = null;
         }
     }
 
@@ -3476,6 +3758,28 @@ namespace KnoxumsChaosMode
         static void Prefix(ref AudioClip clip)
         {
             if (PartyStyleManager.Instance != null) clip = PartyStyleManager.Instance.ReplaceAudio(clip);
+        }
+    }
+
+    [HarmonyPatch(typeof(AudioSourceManager), "SetClip", new Type[] { typeof(SoundType), typeof(AudioClip) })]
+    public static class PartyStyleAudioSourceManagerClipPatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        static void Prefix(ref AudioClip clip)
+        {
+            if (PartyStyleManager.Instance != null) clip = PartyStyleManager.Instance.ReplaceAudio(clip);
+        }
+    }
+
+    [HarmonyPatch(typeof(AudioSourceManager), "PlayOneShot", new Type[] { typeof(SoundType), typeof(AudioClip), typeof(float) })]
+    public static class PartyStyleAudioSourceManagerOneShotPatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        static void Prefix(ref AudioClip audioClip)
+        {
+            if (PartyStyleManager.Instance != null) audioClip = PartyStyleManager.Instance.ReplaceAudio(audioClip);
         }
     }
 
@@ -3772,11 +4076,12 @@ namespace KnoxumsChaosMode
                 PlayerManager pm = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
                 Entity ent = pm != null && pm.plm != null ? pm.plm.Entity : null;
                 if (ent == null && pm != null) ent = R.Get<Entity>(pm, "entity", null);
+                if (ent == null || ent.Ec == null) return;
                 ok = TryInvokeNoArg(ent, "Flip");
             }
             catch { }
-            mapFlipped = on;
-            if (!ok) KnoxumsChaosModePlugin.Log.LogWarning("53045009: Entity.Flip() not found");
+            if (ok) mapFlipped = on;
+            else KnoxumsChaosModePlugin.Log.LogWarning("53045009: Entity.Flip() not found");
         }
 
         private void ApplyGooshoesOffset(bool on)
@@ -6013,6 +6318,7 @@ namespace KnoxumsChaosMode
             IsLevelReady = true;
             try { ElevatorUnlockService.ClearClosedElevatorFrontBarriers(bgm ?? Singleton<BaseGameManager>.Instance); } catch { }
             AllowFunSettings();
+            PartyStyleManager.Instance?.ApplyPresents(bgm);
             CreateLapsHud();
 
             RefreshSchoolItemPool();
@@ -6122,8 +6428,12 @@ namespace KnoxumsChaosMode
             try
             {
                 CoreGameManager cg = Singleton<CoreGameManager>.Instance;
-                if (cg == null || cg.GetPlayer(0) == null) return false;
-                GameCamera cam = cg.GetCamera(0); return cam != null && cam.camCom != null;
+                PlayerManager player = cg != null ? cg.GetPlayer(0) : null;
+                Entity entity = player != null && player.plm != null ? player.plm.Entity : null;
+                if (entity == null && player != null) entity = R.Get<Entity>(player, "entity", null);
+                if (entity == null || entity.Ec == null) return false;
+                GameCamera cam = cg.GetCamera(0);
+                return cam != null && cam.camCom != null;
             }
             catch { return false; }
         }
@@ -6147,6 +6457,7 @@ namespace KnoxumsChaosMode
             IsLevelReady = true;
             ElevatorUnlockService.ClearClosedElevatorFrontBarriers(Singleton<BaseGameManager>.Instance);
             AllowFunSettings();
+            PartyStyleManager.Instance?.ApplyPresents(Singleton<BaseGameManager>.Instance);
             CreateLapsHud();
 
             yield return new WaitForSecondsRealtime(.4f);
