@@ -1350,6 +1350,7 @@ namespace KnoxumsChaosMode
                     }
                     else ChaosManager.Instance.BeginBaldiCountdownAudioWindow();
                     ChaosManager.Instance.ApplyFunAfterPostGen(__instance);
+                    PartyStyleManager.Instance?.ApplyPresents(__instance);
 
 
                 }
@@ -3107,6 +3108,9 @@ namespace KnoxumsChaosMode
         private readonly Dictionary<long, Sprite> sprites = new Dictionary<long, Sprite>();
         private readonly HashSet<int> generatedSprites = new HashSet<int>();
         private AudioClip balHi;
+        private ItemObject presentItem;
+        private Sprite presentSprite;
+        private List<ItemObject> presentPool;
         private float refreshTimer;
 
         public bool Active => KnoxumsChaosModePlugin.StyleConfig?.Value == ChaosStyle.Party;
@@ -3134,7 +3138,6 @@ namespace KnoxumsChaosMode
                     int separator = key.LastIndexOf('.');
                     if (separator >= 0) key = key.Substring(separator + 1);
                     string ext = tail.Substring(extension + 1).ToLowerInvariant();
-                    if (key.Equals("Present", StringComparison.OrdinalIgnoreCase)) continue;
                     if (ext == "png" || ext == "jpg" || ext == "jpeg") imageResources[key] = resource;
                     else if (ext == "wav") audioResources[key] = resource;
                 }
@@ -3274,6 +3277,116 @@ namespace KnoxumsChaosMode
             }
         }
 
+        private bool EnsurePresentItem()
+        {
+            if (presentItem != null && presentSprite != null) return true;
+            Texture2D texture = LoadTexture("Present");
+            if (texture == null) return false;
+            if (presentSprite == null)
+            {
+                presentSprite = Sprite.Create(texture,
+                    new Rect(0f, 0f, texture.width, texture.height),
+                    new Vector2(.5f, .5f), 100f);
+                presentSprite.name = "Present";
+                generatedSprites.Add(presentSprite.GetInstanceID());
+            }
+            ItemObject template = Resources.FindObjectsOfTypeAll<ItemObject>()
+                .FirstOrDefault(x => x != null && x.item != null
+                    && x.itemType != Items.None && x.itemType != Items.StickerPack
+                    && x.itemType != Items.Points && x.itemType != Items.Map);
+            if (template == null) return false;
+            presentItem = UnityEngine.Object.Instantiate(template);
+            presentItem.name = "Present";
+            presentItem.itemType = Items.placeholder1;
+            presentItem.itemSpriteLarge = presentSprite;
+            presentItem.itemSpriteSmall = presentSprite;
+            presentItem.nameKey = "Present";
+            presentItem.descKey = "Present";
+            presentItem.value = 0;
+            presentItem.price = 0;
+            presentItem.addToInventory = true;
+            presentItem.overrideDisabled = true;
+            return true;
+        }
+
+        private void RefreshPresentPool()
+        {
+            presentPool = new List<ItemObject>();
+            ItemObject[] all = Resources.FindObjectsOfTypeAll<ItemObject>();
+            for (int i = 0; i < all.Length; i++)
+            {
+                ItemObject item = all[i];
+                if (item == null || item == presentItem || item.item == null
+                    || item.itemType == Items.None || item.itemType == Items.StickerPack
+                    || item.itemType == Items.Points || item.itemType == Items.Map) continue;
+                string name = (item.name + " " + item.nameKey + " "
+                    + item.itemType).ToLowerInvariant();
+                if (name.Contains("glue") || name.Contains("glue stick")
+                    || name.Contains("gluestick") || name.Contains("lostitem")) continue;
+                if (!presentPool.Contains(item)) presentPool.Add(item);
+            }
+        }
+
+        public bool IsPresent(ItemObject item)
+        {
+            return Active && presentItem != null && item == presentItem;
+        }
+
+        public ItemObject RandomPresentReward()
+        {
+            if (!Active) return null;
+            if (presentPool == null || presentPool.Count == 0) RefreshPresentPool();
+            if (presentPool == null || presentPool.Count == 0) return null;
+            return presentPool[UnityEngine.Random.Range(0, presentPool.Count)];
+        }
+
+        public void RestorePresentPickup(Pickup pickup)
+        {
+            if (pickup == null || presentItem == null) return;
+            pickup.item = presentItem;
+            if (pickup.itemSprite != null) pickup.itemSprite.sprite = presentSprite;
+            pickup.transform.name = "Item_Present";
+        }
+
+        public void ApplyPresents(BaseGameManager manager)
+        {
+            if (!Active || manager == null || manager.Ec == null
+                || ElevatorUnlockService.IsPitstopManager(manager)
+                || !EnsurePresentItem()) return;
+            RefreshPresentPool();
+            HashSet<Pickup> pickups = new HashSet<Pickup>();
+            if (manager.Ec.items != null)
+                for (int i = 0; i < manager.Ec.items.Count; i++)
+                    if (manager.Ec.items[i] != null) pickups.Add(manager.Ec.items[i]);
+            if (manager.Ec.rooms != null)
+                for (int i = 0; i < manager.Ec.rooms.Count; i++)
+                {
+                    RoomController room = manager.Ec.rooms[i];
+                    if (room == null || room.pickups == null) continue;
+                    for (int j = 0; j < room.pickups.Count; j++)
+                        if (room.pickups[j] != null) pickups.Add(room.pickups[j]);
+                }
+            foreach (Pickup pickup in pickups)
+            {
+                if (PickupInShop(pickup)) continue;
+                pickup.AssignItem(presentItem);
+                pickup.Hide(false);
+            }
+            try { manager.Ec.map?.UpdateIcons(); } catch { }
+        }
+
+        private static bool PickupInShop(Pickup pickup)
+        {
+            Transform transform = pickup != null ? pickup.transform : null;
+            for (int i = 0; i < 5 && transform != null; i++, transform = transform.parent)
+            {
+                string name = transform.name.ToLowerInvariant();
+                if (name.Contains("shop") || name.Contains("store")
+                    || name.Contains("johnny") || name.Contains("pitstop")) return true;
+            }
+            return false;
+        }
+
         public void RefreshNow()
         {
             refreshTimer = 0f;
@@ -3363,6 +3476,30 @@ namespace KnoxumsChaosMode
         static void Prefix(ref AudioClip clip)
         {
             if (PartyStyleManager.Instance != null) clip = PartyStyleManager.Instance.ReplaceAudio(clip);
+        }
+    }
+
+    [HarmonyPatch(typeof(Pickup), "Collect", new Type[] { typeof(int) })]
+    public static class PartyStylePresentPickupPatch
+    {
+        [HarmonyPrefix]
+        static void Prefix(Pickup __instance, out ItemObject __state)
+        {
+            __state = null;
+            PartyStyleManager manager = PartyStyleManager.Instance;
+            if (manager == null || __instance == null || !manager.IsPresent(__instance.item)) return;
+            ItemObject reward = manager.RandomPresentReward();
+            if (reward == null) return;
+            __state = __instance.item;
+            __instance.item = reward;
+        }
+
+        [HarmonyPostfix]
+        static void Postfix(Pickup __instance, ItemObject __state)
+        {
+            if (__state == null || __instance == null || !__instance.gameObject.activeSelf) return;
+            if (__instance.item != null && __instance.item.itemType != Items.None)
+                PartyStyleManager.Instance?.RestorePresentPickup(__instance);
         }
     }
 
