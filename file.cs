@@ -3378,15 +3378,26 @@ namespace KnoxumsChaosMode
             catch { return original; }
         }
 
-        private Sprite ReplaceSpriteExact(Sprite original, string resourceKey, bool sheet)
+        private static string DirectBaldiTextureKey(Sprite original)
         {
-            if (!Active || original == null || generatedSprites.Contains(original.GetInstanceID())) return original;
-            return BuildPartySprite(original, LoadTexture(resourceKey), sheet);
+            if (original == null) return null;
+            string textureName = original.texture != null ? NormalizeAssetKey(original.texture.name) : "";
+            string spriteName = NormalizeAssetKey(original.name);
+            if (textureName == "slapbrokensheet" || spriteName == "slapbrokensheet")
+                return "Slap_Broken_Sheet";
+            if (textureName == "balditalkstandingsheet" || spriteName == "balditalkstandingsheet")
+                return "Baldi_Talk_Standing_Sheet";
+            if (textureName == "baldiapple" || spriteName == "baldiapple")
+                return "BaldiApple";
+            return null;
         }
 
         public Sprite ReplaceSprite(Sprite original)
         {
             if (!Active || original == null || generatedSprites.Contains(original.GetInstanceID())) return original;
+            string direct = DirectBaldiTextureKey(original);
+            if (direct != null)
+                return BuildPartySprite(original, LoadTexture(direct), true);
             Texture2D texture = null;
             bool sheet = false;
             if (original.texture != null)
@@ -4023,52 +4034,36 @@ namespace KnoxumsChaosMode
             }
         }
 
-        private void RefreshSpecialBaldiSprites()
+        private void RefreshBaldiSprites()
         {
             Baldi[] baldis = UnityEngine.Object.FindObjectsOfType<Baldi>(true);
             for (int i = 0; i < baldis.Length; i++)
             {
                 Baldi baldi = baldis[i];
                 if (baldi == null || !baldi.gameObject.activeInHierarchy) continue;
+                HashSet<SpriteRenderer> renderers = new HashSet<SpriteRenderer>();
+                foreach (SpriteRenderer renderer in baldi.GetComponentsInChildren<SpriteRenderer>(true))
+                    if (renderer != null) renderers.Add(renderer);
                 Animator animator = R.Get<Animator>(baldi, "animator", null);
-                VolumeAnimator volumeAnimator = R.Get<VolumeAnimator>(baldi, "volumeAnimator", null);
-                if (animator == null) continue;
-                string clipName = "";
+                if (animator != null)
+                {
+                    foreach (SpriteRenderer renderer in animator.GetComponentsInChildren<SpriteRenderer>(true))
+                        if (renderer != null) renderers.Add(renderer);
+                    foreach (SpriteRenderer renderer in animator.GetComponentsInParent<SpriteRenderer>(true))
+                        if (renderer != null) renderers.Add(renderer);
+                }
                 try
                 {
-                    AnimatorClipInfo[] clips = animator.GetCurrentAnimatorClipInfo(0);
-                    for (int j = 0; j < clips.Length; j++)
-                        if (clips[j].clip != null) clipName += NormalizeAssetKey(clips[j].clip.name);
+                    Entity entity = baldi.Navigator != null ? baldi.Navigator.Entity : null;
+                    if (entity != null)
+                        foreach (SpriteRenderer renderer in entity.GetComponentsInChildren<SpriteRenderer>(true))
+                            if (renderer != null) renderers.Add(renderer);
                 }
                 catch { }
-                AnimatorStateInfo state = animator.GetCurrentAnimatorStateInfo(0);
-                string resource = null;
-                bool sheet = false;
-                if (clipName.Contains("apple") || state.IsName("BAL_AppleIntro")
-                    || state.IsName("BAL_AppleLoop"))
+                foreach (SpriteRenderer renderer in renderers)
                 {
-                    resource = "BaldiApple";
-                    sheet = true;
-                }
-                else if (clipName.Contains("slapbroken")
-                    || state.IsName("BAL_Slap_Broken"))
-                {
-                    resource = "Slap_Broken_Sheet";
-                    sheet = true;
-                }
-                else if (clipName.Contains("talk")
-                    || volumeAnimator != null && volumeAnimator.enabled)
-                {
-                    resource = "Baldi_Talk_Standing_Sheet";
-                    sheet = true;
-                }
-                if (resource == null) continue;
-                SpriteRenderer[] renderers = baldi.GetComponentsInChildren<SpriteRenderer>(true);
-                for (int j = 0; j < renderers.Length; j++)
-                {
-                    SpriteRenderer renderer = renderers[j];
                     if (renderer == null || !renderer.gameObject.activeInHierarchy || renderer.sprite == null) continue;
-                    Sprite replacement = ReplaceSpriteExact(renderer.sprite, resource, sheet);
+                    Sprite replacement = ReplaceSprite(renderer.sprite);
                     if (replacement == renderer.sprite) continue;
                     if (trackedRendererIds.Add(renderer.GetInstanceID())) trackedRenderers.Add(renderer);
                     renderer.sprite = replacement;
@@ -4151,7 +4146,7 @@ namespace KnoxumsChaosMode
                 catch { }
             }
             if (!active) return;
-            RefreshSpecialBaldiSprites();
+            RefreshBaldiSprites();
             refreshTimer -= Time.unscaledDeltaTime;
             if (refreshTimer <= 0f)
             {
