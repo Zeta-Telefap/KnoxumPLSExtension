@@ -1380,6 +1380,7 @@ namespace KnoxumsChaosMode
                 {
                     ChaosManager.Instance.StopFunSettings();
                     ElevatorUnlockService.KeepPitstopElevatorsOpen(__instance);
+                    PartyStyleManager.Instance?.ApplyPitstopCrazyMachine(__instance);
                     ChaosManager.Instance.ShowPitstopChaosReminder();
                 }
                 else
@@ -3123,12 +3124,17 @@ namespace KnoxumsChaosMode
         private List<ItemObject> presentPool;
         private Balloon[] partyBalloonPrefabs;
         private EnvironmentController balloonEnvironment;
+        private SodaMachine crazyMachinePrefab;
+        private SodaMachine pitstopCrazyMachine;
+        private EnvironmentController pitstopMachineEnvironment;
+        private Cell pitstopMachineCell;
         private float refreshTimer;
         private bool wasActive;
         private bool indexReported;
         private bool presentFailureReported;
         private bool balloonsApplied;
         private bool balloonFailureReported;
+        private bool crazyMachineFailureReported;
 
         private sealed class PresentPickupState
         {
@@ -3695,6 +3701,125 @@ namespace KnoxumsChaosMode
             balloonsApplied = false;
         }
 
+        private SodaMachine FindCrazyMachinePrefab()
+        {
+            if (crazyMachinePrefab != null) return crazyMachinePrefab;
+            SodaMachine[] machines = Resources.FindObjectsOfTypeAll<SodaMachine>();
+            int bestScore = int.MinValue;
+            for (int i = 0; i < machines.Length; i++)
+            {
+                SodaMachine machine = machines[i];
+                if (machine == null) continue;
+                Array potential = R.Get<Array>(machine, "potentialItems", null);
+                if (potential == null || potential.Length == 0) continue;
+                ItemObject required = R.Get<ItemObject>(machine, "requiredItem", null);
+                int score = 0;
+                if (required != null && required.itemType == Items.Quarter) score += 100;
+                if (!machine.gameObject.scene.IsValid()) score += 25;
+                string name = (machine.name + " " + machine.gameObject.name).ToLowerInvariant();
+                if (name.Contains("crazy")) score += 200;
+                if (name.Contains("random")) score += 50;
+                if (score <= bestScore) continue;
+                bestScore = score;
+                crazyMachinePrefab = machine;
+            }
+            return crazyMachinePrefab;
+        }
+
+        private static Cell PitstopCrazyMachineCell(EnvironmentController environment, bool requireFree)
+        {
+            if (environment == null) return null;
+            RoomController lobby = null;
+            try
+            {
+                PlayerManager player = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
+                Entity entity = player != null && player.plm != null ? player.plm.Entity : null;
+                lobby = entity != null ? entity.CurrentRoom : null;
+            }
+            catch { }
+            if (lobby == null && environment.rooms != null)
+                lobby = environment.rooms.Where(x => x != null && !x.offLimits)
+                    .OrderByDescending(x => x.cells != null ? x.cells.Count : 0).FirstOrDefault();
+            Cell best = null;
+            List<Cell> cells = environment.AllCells();
+            for (int i = 0; i < cells.Count; i++)
+            {
+                Cell cell = cells[i];
+                if (cell == null || cell.Null || cell.room == null || cell.room != lobby
+                    || cell.offLimits || cell.room.offLimits
+                    || !cell.HasWallInDirection(Direction.West)
+                    || requireFree && cell.HasAnyHardCoverage) continue;
+                if (best == null || cell.position.x < best.position.x
+                    || cell.position.x == best.position.x && cell.position.z < best.position.z)
+                    best = cell;
+            }
+            return best;
+        }
+
+        public void ApplyPitstopCrazyMachine(BaseGameManager manager)
+        {
+            if (!Active || manager == null || manager.Ec == null || !manager.InPitstop()) return;
+            if (pitstopMachineEnvironment != manager.Ec)
+                DestroyPitstopCrazyMachine();
+            if (pitstopCrazyMachine != null) return;
+            SodaMachine prefab = FindCrazyMachinePrefab();
+            Cell cell = PitstopCrazyMachineCell(manager.Ec, true)
+                ?? PitstopCrazyMachineCell(manager.Ec, false);
+            if (prefab == null || cell == null)
+            {
+                if (!crazyMachineFailureReported)
+                {
+                    crazyMachineFailureReported = true;
+                    KnoxumsChaosModePlugin.Log.LogWarning("Party Style: Crazy Item machine prefab or Pitstop corner is unavailable");
+                }
+                return;
+            }
+            try
+            {
+                Transform parent = cell.room.objectObject != null
+                    ? cell.room.objectObject.transform : cell.room.transform;
+                pitstopCrazyMachine = UnityEngine.Object.Instantiate(prefab, parent);
+                pitstopCrazyMachine.gameObject.name = "PartyStyle_CrazyItemMachine";
+                pitstopCrazyMachine.Ec = manager.Ec;
+                pitstopCrazyMachine.transform.position = cell.FloorWorldPosition;
+                pitstopCrazyMachine.transform.rotation = Direction.West.ToRotation();
+                ItemObject quarter = Resources.FindObjectsOfTypeAll<ItemObject>()
+                    .FirstOrDefault(x => x != null && x.itemType == Items.Quarter);
+                if (quarter != null) R.Set(pitstopCrazyMachine, "requiredItem", quarter);
+                Renderer[] renderers = pitstopCrazyMachine.GetComponentsInChildren<Renderer>(true);
+                for (int i = 0; i < renderers.Length; i++)
+                    if (renderers[i] != null && !cell.renderers.Contains(renderers[i]))
+                        cell.renderers.Add(renderers[i]);
+                pitstopCrazyMachine.gameObject.SetActive(true);
+                pitstopMachineEnvironment = manager.Ec;
+                pitstopMachineCell = cell;
+                crazyMachineFailureReported = false;
+                Physics.SyncTransforms();
+            }
+            catch (Exception ex)
+            {
+                DestroyPitstopCrazyMachine();
+                KnoxumsChaosModePlugin.Log.LogWarning("Party Style Crazy Item machine: " + ex.Message);
+            }
+        }
+
+        private void DestroyPitstopCrazyMachine()
+        {
+            if (pitstopCrazyMachine != null)
+            {
+                if (pitstopMachineCell != null && pitstopMachineCell.renderers != null)
+                {
+                    Renderer[] renderers = pitstopCrazyMachine.GetComponentsInChildren<Renderer>(true);
+                    for (int i = 0; i < renderers.Length; i++)
+                        pitstopMachineCell.renderers.Remove(renderers[i]);
+                }
+                UnityEngine.Object.Destroy(pitstopCrazyMachine.gameObject);
+            }
+            pitstopCrazyMachine = null;
+            pitstopMachineEnvironment = null;
+            pitstopMachineCell = null;
+        }
+
         private void RestoreClassicPresents()
         {
             foreach (PresentPickupState state in presentStates.Values)
@@ -3793,6 +3918,7 @@ namespace KnoxumsChaosMode
             RestoreClassicSprites();
             RestoreClassicPresents();
             DestroyPartyBalloons();
+            DestroyPitstopCrazyMachine();
         }
 
         public void RefreshNow()
@@ -3809,7 +3935,13 @@ namespace KnoxumsChaosMode
             wasActive = true;
             refreshTimer = 0f;
             TrackAndReplaceLiveSprites();
-            try { ApplyPresents(Singleton<BaseGameManager>.Instance); } catch { }
+            try
+            {
+                BaseGameManager manager = Singleton<BaseGameManager>.Instance;
+                ApplyPresents(manager);
+                ApplyPitstopCrazyMachine(manager);
+            }
+            catch { }
         }
 
         private void LateUpdate()
@@ -3824,7 +3956,13 @@ namespace KnoxumsChaosMode
                     return;
                 }
                 refreshTimer = 0f;
-                try { ApplyPresents(Singleton<BaseGameManager>.Instance); } catch { }
+                try
+                {
+                    BaseGameManager manager = Singleton<BaseGameManager>.Instance;
+                    ApplyPresents(manager);
+                    ApplyPitstopCrazyMachine(manager);
+                }
+                catch { }
             }
             if (!active) return;
             refreshTimer -= Time.unscaledDeltaTime;
