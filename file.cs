@@ -3505,6 +3505,12 @@ namespace KnoxumsChaosMode
             return true;
         }
 
+        private static bool IsNonDirectorKey(ItemObject item)
+        {
+            return item != null && item.itemType != Items.DetentionKey
+                && item.itemType.ToString().IndexOf("Key", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         private void RefreshPresentPool()
         {
             presentPool = new List<ItemObject>();
@@ -3515,8 +3521,7 @@ namespace KnoxumsChaosMode
                 if (item == null || item == presentItem || item.item == null
                     || item.itemType == Items.None || item.itemType == Items.StickerPack
                     || item.itemType == Items.Points || item.itemType == Items.Map) continue;
-                if (item.itemType != Items.DetentionKey
-                    && item.itemType.ToString().IndexOf("Key", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                if (IsNonDirectorKey(item)) continue;
                 string name = (item.name + " " + item.nameKey + " "
                     + item.itemType).ToLowerInvariant();
                 if (name.Contains("glue") || name.Contains("glue stick")
@@ -3576,7 +3581,8 @@ namespace KnoxumsChaosMode
                 }
             foreach (Pickup pickup in pickups)
             {
-                if (PickupInShop(pickup)) continue;
+                if (PickupInShop(pickup) || pickup.item != null
+                    && (pickup.item.itemType == Items.BusPass || IsNonDirectorKey(pickup.item))) continue;
                 int id = pickup.GetInstanceID();
                 if (presentStates.ContainsKey(id)) continue;
                 presentStates[id] = new PresentPickupState
