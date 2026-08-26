@@ -3116,14 +3116,19 @@ namespace KnoxumsChaosMode
         private readonly HashSet<int> trackedRendererIds = new HashSet<int>();
         private readonly HashSet<int> trackedImageIds = new HashSet<int>();
         private readonly Dictionary<int, PresentPickupState> presentStates = new Dictionary<int, PresentPickupState>();
+        private readonly List<Balloon> partyBalloons = new List<Balloon>();
         private AudioClip balHi;
         private ItemObject presentItem;
         private Sprite presentSprite;
         private List<ItemObject> presentPool;
+        private Balloon[] partyBalloonPrefabs;
+        private EnvironmentController balloonEnvironment;
         private float refreshTimer;
         private bool wasActive;
         private bool indexReported;
         private bool presentFailureReported;
+        private bool balloonsApplied;
+        private bool balloonFailureReported;
 
         private sealed class PresentPickupState
         {
@@ -3149,6 +3154,7 @@ namespace KnoxumsChaosMode
                 "Slap_Sheet",
                 "Slap_Broken_Sheet",
                 "BAL_Countdown_Sheet",
+                "Baldi_Talk_Standing_Sheet",
                 "Present"
             };
             for (int i = 0; i <= 99; i++)
@@ -3359,7 +3365,7 @@ namespace KnoxumsChaosMode
         private static bool PartyAudioTarget(string name)
         {
             string normalized = NormalizeAssetKey(name);
-            return normalized.Equals("balhideandseek", StringComparison.OrdinalIgnoreCase)
+            return normalized.Equals("balhideseek", StringComparison.OrdinalIgnoreCase)
                 || normalized.Equals("balintrokl2", StringComparison.OrdinalIgnoreCase)
                 || normalized.Equals("balintrokl3", StringComparison.OrdinalIgnoreCase);
         }
@@ -3542,6 +3548,7 @@ namespace KnoxumsChaosMode
         {
             if (!Active || manager == null || manager.Ec == null
                 || ElevatorUnlockService.IsPitstopManager(manager)) return;
+            ApplyBalloons(manager);
             if (!EnsurePresentItem())
             {
                 if (!presentFailureReported)
@@ -3593,6 +3600,90 @@ namespace KnoxumsChaosMode
                     || name.Contains("johnny") || name.Contains("pitstop")) return true;
             }
             return false;
+        }
+
+        private Balloon[] FindPartyBalloonPrefabs()
+        {
+            if (partyBalloonPrefabs != null && partyBalloonPrefabs.Length > 0)
+                return partyBalloonPrefabs;
+            List<Balloon> found = new List<Balloon>();
+            HashSet<int> ids = new HashSet<int>();
+            PartyEvent[] events = Resources.FindObjectsOfTypeAll<PartyEvent>();
+            for (int i = 0; i < events.Length; i++)
+            {
+                Balloon[] prefabs = R.Get<Balloon[]>(events[i], "balloon", null);
+                if (prefabs == null) continue;
+                for (int j = 0; j < prefabs.Length; j++)
+                    if (prefabs[j] != null && ids.Add(prefabs[j].GetInstanceID()))
+                        found.Add(prefabs[j]);
+            }
+            if (found.Count == 0)
+            {
+                Balloon[] all = Resources.FindObjectsOfTypeAll<Balloon>();
+                for (int i = 0; i < all.Length; i++)
+                    if (all[i] != null && !all[i].gameObject.scene.IsValid()
+                        && ids.Add(all[i].GetInstanceID())) found.Add(all[i]);
+            }
+            partyBalloonPrefabs = found.ToArray();
+            return partyBalloonPrefabs;
+        }
+
+        private void ApplyBalloons(BaseGameManager manager)
+        {
+            if (!Active || manager == null || manager.Ec == null
+                || ElevatorUnlockService.IsPitstopManager(manager)) return;
+            if (balloonEnvironment != manager.Ec)
+            {
+                DestroyPartyBalloons();
+                balloonEnvironment = manager.Ec;
+            }
+            if (balloonsApplied) return;
+            Balloon[] prefabs = FindPartyBalloonPrefabs();
+            if (prefabs == null || prefabs.Length == 0)
+            {
+                if (!balloonFailureReported)
+                {
+                    balloonFailureReported = true;
+                    KnoxumsChaosModePlugin.Log.LogWarning("Party Style: PartyEvent balloon prefabs are unavailable");
+                }
+                return;
+            }
+            List<RoomController> rooms = manager.Ec.rooms != null
+                ? manager.Ec.rooms.Where(x => x != null && x.cells != null && x.cells.Count > 0).ToList()
+                : new List<RoomController>();
+            if (rooms.Count == 0) return;
+            balloonFailureReported = false;
+            int count = UnityEngine.Random.Range(30, 51);
+            for (int i = 0; i < count; i++)
+            {
+                Balloon balloon = null;
+                try
+                {
+                    Cell cell = manager.Ec.RandomCell(false, false, true);
+                    RoomController room = cell != null && cell.room != null
+                        ? cell.room : rooms[UnityEngine.Random.Range(0, rooms.Count)];
+                    balloon = UnityEngine.Object.Instantiate(
+                        prefabs[UnityEngine.Random.Range(0, prefabs.Length)]);
+                    balloon.gameObject.name = "PartyStyle_Balloon";
+                    balloon.Initialize(room);
+                    partyBalloons.Add(balloon);
+                }
+                catch
+                {
+                    if (balloon != null) UnityEngine.Object.Destroy(balloon.gameObject);
+                }
+            }
+            balloonsApplied = true;
+        }
+
+        private void DestroyPartyBalloons()
+        {
+            for (int i = 0; i < partyBalloons.Count; i++)
+                if (partyBalloons[i] != null)
+                    UnityEngine.Object.Destroy(partyBalloons[i].gameObject);
+            partyBalloons.Clear();
+            balloonEnvironment = null;
+            balloonsApplied = false;
         }
 
         private void RestoreClassicPresents()
@@ -3692,6 +3783,7 @@ namespace KnoxumsChaosMode
         {
             RestoreClassicSprites();
             RestoreClassicPresents();
+            DestroyPartyBalloons();
         }
 
         public void RefreshNow()
