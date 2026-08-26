@@ -3118,6 +3118,7 @@ namespace KnoxumsChaosMode
         private readonly HashSet<int> trackedImageIds = new HashSet<int>();
         private readonly Dictionary<int, PresentPickupState> presentStates = new Dictionary<int, PresentPickupState>();
         private readonly List<Balloon> partyBalloons = new List<Balloon>();
+        private readonly List<PartyMachineReplacement> schoolCrazyMachines = new List<PartyMachineReplacement>();
         private AudioClip balHi;
         private ItemObject presentItem;
         private Sprite presentSprite;
@@ -3128,6 +3129,7 @@ namespace KnoxumsChaosMode
         private SodaMachine pitstopCrazyMachine;
         private EnvironmentController pitstopMachineEnvironment;
         private Cell pitstopMachineCell;
+        private EnvironmentController schoolMachineEnvironment;
         private float refreshTimer;
         private bool wasActive;
         private bool indexReported;
@@ -3135,6 +3137,7 @@ namespace KnoxumsChaosMode
         private bool balloonsApplied;
         private bool balloonFailureReported;
         private bool crazyMachineFailureReported;
+        private bool schoolMachinesApplied;
 
         private sealed class PresentPickupState
         {
@@ -3142,6 +3145,14 @@ namespace KnoxumsChaosMode
             public ItemObject item;
             public bool hidden;
             public string objectName;
+        }
+
+        private sealed class PartyMachineReplacement
+        {
+            public SodaMachine original;
+            public SodaMachine replacement;
+            public Cell cell;
+            public Renderer[] replacementRenderers;
         }
 
         public bool Active => KnoxumsChaosModePlugin.StyleConfig?.Value == ChaosStyle.Party;
@@ -3562,6 +3573,7 @@ namespace KnoxumsChaosMode
         {
             if (!Active || manager == null || manager.Ec == null
                 || ElevatorUnlockService.IsPitstopManager(manager)) return;
+            ApplySchoolCrazyMachines(manager);
             ApplyBalloons(manager);
             if (!EnsurePresentItem())
             {
@@ -3726,6 +3738,160 @@ namespace KnoxumsChaosMode
             return crazyMachinePrefab;
         }
 
+        private SodaMachine CreateCrazyMachine(SodaMachine prefab, Transform parent,
+            Vector3 position, Quaternion rotation, Vector3 scale, EnvironmentController environment,
+            Cell cell, string objectName)
+        {
+            SodaMachine machine = UnityEngine.Object.Instantiate(prefab, parent);
+            machine.gameObject.name = objectName;
+            machine.Ec = environment;
+            machine.transform.position = position;
+            machine.transform.rotation = rotation;
+            machine.transform.localScale = scale;
+            ItemObject quarter = Resources.FindObjectsOfTypeAll<ItemObject>()
+                .FirstOrDefault(x => x != null && x.itemType == Items.Quarter);
+            if (quarter != null) R.Set(machine, "requiredItem", quarter);
+            if (R.Get<int>(machine, "usesLeft", 1) <= 0) R.Set(machine, "usesLeft", 1);
+            Renderer[] renderers = machine.GetComponentsInChildren<Renderer>(true);
+            if (cell != null && cell.renderers != null)
+                for (int i = 0; i < renderers.Length; i++)
+                    if (renderers[i] != null && !cell.renderers.Contains(renderers[i]))
+                        cell.renderers.Add(renderers[i]);
+            machine.gameObject.SetActive(true);
+            return machine;
+        }
+
+        private void ApplySchoolCrazyMachines(BaseGameManager manager)
+        {
+            if (!Active || manager == null || manager.Ec == null
+                || ElevatorUnlockService.IsPitstopManager(manager)) return;
+            if (schoolMachineEnvironment != manager.Ec)
+                DestroySchoolCrazyMachines(true);
+            if (schoolMachinesApplied) return;
+            SodaMachine prefab = FindCrazyMachinePrefab();
+            if (prefab == null)
+            {
+                if (!crazyMachineFailureReported)
+                {
+                    crazyMachineFailureReported = true;
+                    KnoxumsChaosModePlugin.Log.LogWarning("Party Style: Crazy Item machine prefab is unavailable");
+                }
+                return;
+            }
+            SodaMachine[] machines = UnityEngine.Object.FindObjectsOfType<SodaMachine>(true);
+            for (int i = 0; i < machines.Length; i++)
+            {
+                SodaMachine original = machines[i];
+                if (original == null || original == pitstopCrazyMachine
+                    || original.gameObject.name.StartsWith("PartyStyle_", StringComparison.OrdinalIgnoreCase)
+                    || !original.gameObject.scene.IsValid()
+                    || original.gameObject.scene != manager.Ec.gameObject.scene) continue;
+                Cell cell = null;
+                try { cell = manager.Ec.CellFromPosition(original.transform.position); } catch { }
+                if (cell == null || cell.Null || cell.room == null) continue;
+                SodaMachine replacement = null;
+                try
+                {
+                    Transform parent = original.transform.parent != null
+                        ? original.transform.parent : cell.room.objectObject.transform;
+                    replacement = CreateCrazyMachine(prefab, parent, original.transform.position,
+                        original.transform.rotation, original.transform.localScale,
+                        manager.Ec, cell, "PartyStyle_CrazyItemMachine_School");
+                    Renderer[] renderers = replacement.GetComponentsInChildren<Renderer>(true);
+                    schoolCrazyMachines.Add(new PartyMachineReplacement
+                    {
+                        original = original,
+                        replacement = replacement,
+                        cell = cell,
+                        replacementRenderers = renderers
+                    });
+                    original.gameObject.SetActive(false);
+                }
+                catch
+                {
+                    if (replacement != null) UnityEngine.Object.Destroy(replacement.gameObject);
+                }
+            }
+            schoolMachineEnvironment = manager.Ec;
+            schoolMachinesApplied = true;
+            crazyMachineFailureReported = false;
+            Physics.SyncTransforms();
+        }
+
+        private void DestroySchoolCrazyMachines(bool restoreOriginals)
+        {
+            for (int i = 0; i < schoolCrazyMachines.Count; i++)
+            {
+                PartyMachineReplacement replacement = schoolCrazyMachines[i];
+                if (replacement == null) continue;
+                if (replacement.cell != null && replacement.cell.renderers != null
+                    && replacement.replacementRenderers != null)
+                    for (int j = 0; j < replacement.replacementRenderers.Length; j++)
+                        replacement.cell.renderers.Remove(replacement.replacementRenderers[j]);
+                if (replacement.replacement != null)
+                    UnityEngine.Object.Destroy(replacement.replacement.gameObject);
+                if (restoreOriginals && replacement.original != null)
+                    replacement.original.gameObject.SetActive(true);
+            }
+            schoolCrazyMachines.Clear();
+            schoolMachineEnvironment = null;
+            schoolMachinesApplied = false;
+        }
+
+        private bool IsManagedCrazyMachine(SodaMachine machine)
+        {
+            if (machine == null) return false;
+            if (machine == pitstopCrazyMachine) return true;
+            for (int i = 0; i < schoolCrazyMachines.Count; i++)
+                if (schoolCrazyMachines[i] != null
+                    && schoolCrazyMachines[i].replacement == machine) return true;
+            return false;
+        }
+
+        public bool TryUseCrazyMachine(SodaMachine machine, PlayerManager player)
+        {
+            if (!Active || !IsManagedCrazyMachine(machine)) return false;
+            ItemObject reward = RandomPresentReward();
+            if (reward == null)
+            {
+                KnoxumsChaosModePlugin.Log.LogWarning("Party Style: Crazy Item machine has no valid reward");
+                return true;
+            }
+            int uses = Mathf.Max(0, R.Get<int>(machine, "usesLeft", 1) - 1);
+            R.Set(machine, "usesLeft", uses);
+            if (uses <= 0)
+            {
+                MeshRenderer renderer = R.Get<MeshRenderer>(machine, "meshRenderer", null);
+                Material outOfStock = R.Get<Material>(machine, "outOfStockMat", null);
+                if (renderer != null && outOfStock != null)
+                {
+                    Material[] materials = renderer.sharedMaterials;
+                    if (materials != null && materials.Length > 1)
+                    {
+                        materials = (Material[])materials.Clone();
+                        materials[1] = outOfStock;
+                        renderer.sharedMaterials = materials;
+                    }
+                }
+            }
+            StartCoroutine(GiveCrazyMachineReward(player, reward));
+            return true;
+        }
+
+        private IEnumerator GiveCrazyMachineReward(PlayerManager player, ItemObject reward)
+        {
+            yield return null;
+            try
+            {
+                if (player != null && player.itm != null && reward != null)
+                    player.itm.AddItem(reward);
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("Party Style Crazy Item reward: " + ex.Message);
+            }
+        }
+
         private static Cell PitstopCrazyMachineCell(EnvironmentController environment, bool requireFree)
         {
             if (environment == null) return null;
@@ -3759,6 +3925,8 @@ namespace KnoxumsChaosMode
         public void ApplyPitstopCrazyMachine(BaseGameManager manager)
         {
             if (!Active || manager == null || manager.Ec == null || !manager.InPitstop()) return;
+            if (schoolMachineEnvironment != null && schoolMachineEnvironment != manager.Ec)
+                DestroySchoolCrazyMachines(true);
             if (pitstopMachineEnvironment != manager.Ec)
                 DestroyPitstopCrazyMachine();
             if (pitstopCrazyMachine != null) return;
@@ -3778,19 +3946,10 @@ namespace KnoxumsChaosMode
             {
                 Transform parent = cell.room.objectObject != null
                     ? cell.room.objectObject.transform : cell.room.transform;
-                pitstopCrazyMachine = UnityEngine.Object.Instantiate(prefab, parent);
-                pitstopCrazyMachine.gameObject.name = "PartyStyle_CrazyItemMachine";
-                pitstopCrazyMachine.Ec = manager.Ec;
-                pitstopCrazyMachine.transform.position = cell.FloorWorldPosition;
-                pitstopCrazyMachine.transform.rotation = Direction.West.ToRotation();
-                ItemObject quarter = Resources.FindObjectsOfTypeAll<ItemObject>()
-                    .FirstOrDefault(x => x != null && x.itemType == Items.Quarter);
-                if (quarter != null) R.Set(pitstopCrazyMachine, "requiredItem", quarter);
-                Renderer[] renderers = pitstopCrazyMachine.GetComponentsInChildren<Renderer>(true);
-                for (int i = 0; i < renderers.Length; i++)
-                    if (renderers[i] != null && !cell.renderers.Contains(renderers[i]))
-                        cell.renderers.Add(renderers[i]);
-                pitstopCrazyMachine.gameObject.SetActive(true);
+                pitstopCrazyMachine = CreateCrazyMachine(prefab, parent,
+                    cell.FloorWorldPosition, Direction.West.ToRotation(),
+                    prefab.transform.localScale, manager.Ec, cell,
+                    "PartyStyle_CrazyItemMachine_Pitstop");
                 pitstopMachineEnvironment = manager.Ec;
                 pitstopMachineCell = cell;
                 crazyMachineFailureReported = false;
@@ -3918,6 +4077,7 @@ namespace KnoxumsChaosMode
             RestoreClassicSprites();
             RestoreClassicPresents();
             DestroyPartyBalloons();
+            DestroySchoolCrazyMachines(true);
             DestroyPitstopCrazyMachine();
         }
 
@@ -4115,6 +4275,20 @@ namespace KnoxumsChaosMode
             if (__state.displaced != null && __instance.item == __state.displaced) return;
             if (__instance.item == __state.reward)
                 PartyStyleManager.Instance?.RestorePresentPickup(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(SodaMachine), "InsertItem", new Type[]
+    {
+        typeof(PlayerManager), typeof(EnvironmentController)
+    })]
+    public static class PartyStyleCrazyMachineUsePatch
+    {
+        [HarmonyPrefix]
+        static bool Prefix(SodaMachine __instance, PlayerManager pm)
+        {
+            PartyStyleManager manager = PartyStyleManager.Instance;
+            return manager == null || !manager.TryUseCrazyMachine(__instance, pm);
         }
     }
 
