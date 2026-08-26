@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Resources;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -3107,8 +3106,6 @@ namespace KnoxumsChaosMode
         private readonly Dictionary<string, string> audioResources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> imageFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> audioFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, byte[]> imageData = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, byte[]> audioData = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> assetNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, Texture2D> textures = new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<long, Sprite> sprites = new Dictionary<long, Sprite>();
@@ -3190,194 +3187,12 @@ namespace KnoxumsChaosMode
             return best;
         }
 
-        private static string StripAssetExtension(string value)
-        {
-            if (string.IsNullOrEmpty(value)) return "";
-            string lower = value.ToLowerInvariant();
-            string[] extensions = { ".png", ".jpg", ".jpeg", ".wav" };
-            for (int i = 0; i < extensions.Length; i++)
-                if (lower.EndsWith(extensions[i]))
-                    return value.Substring(0, value.Length - extensions[i].Length);
-            return value;
-        }
-
-        private void RegisterManifestResource(string resource, List<string> expected)
-        {
-            string stem = StripAssetExtension(resource);
-            string normalizedStem = NormalizeAssetKey(stem);
-            string lower = resource.ToLowerInvariant();
-            if (normalizedStem.EndsWith("balhi", StringComparison.OrdinalIgnoreCase)
-                && (lower.EndsWith(".wav") || !lower.EndsWith(".resources")))
-            {
-                audioResources["balhi"] = resource;
-                return;
-            }
-            if (lower.EndsWith(".resources")) return;
-            string key = MatchExpectedKey(stem, expected);
-            if (key == null) return;
-            string normalized = NormalizeAssetKey(key);
-            imageResources[normalized] = resource;
-            assetNames[normalized] = key;
-        }
-
-        private static byte[] ResourceValueBytes(object value)
-        {
-            if (value == null) return null;
-            if (value is byte[] bytes) return bytes;
-            if (value is Stream stream)
-            {
-                try { if (stream.CanSeek) stream.Position = 0; } catch { }
-                return ReadStream(stream);
-            }
-            try
-            {
-                PropertyInfo dataProperty = value.GetType().GetProperty("Data",
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                if (dataProperty != null && dataProperty.GetValue(value, null) is byte[] propertyBytes)
-                    return propertyBytes;
-            }
-            catch { }
-            try
-            {
-                MethodInfo toArray = value.GetType().GetMethod("ToArray",
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                    null, Type.EmptyTypes, null);
-                if (toArray != null && toArray.Invoke(value, null) is byte[] arrayBytes)
-                    return arrayBytes;
-            }
-            catch { }
-            try
-            {
-                using (MemoryStream output = new MemoryStream())
-                {
-                    MethodInfo oneArgument = value.GetType().GetMethod("Save",
-                        BindingFlags.Instance | BindingFlags.Public, null,
-                        new[] { typeof(Stream) }, null);
-                    if (oneArgument != null)
-                    {
-                        oneArgument.Invoke(value, new object[] { output });
-                        if (output.Length > 0) return output.ToArray();
-                    }
-                    PropertyInfo rawFormat = value.GetType().GetProperty("RawFormat",
-                        BindingFlags.Instance | BindingFlags.Public);
-                    object format = rawFormat != null ? rawFormat.GetValue(value, null) : null;
-                    if (format != null)
-                    {
-                        MethodInfo save = value.GetType().GetMethod("Save",
-                            BindingFlags.Instance | BindingFlags.Public, null,
-                            new[] { typeof(Stream), format.GetType() }, null);
-                        if (save != null)
-                        {
-                            save.Invoke(value, new[] { (object)output, format });
-                            if (output.Length > 0) return output.ToArray();
-                        }
-                    }
-                }
-            }
-            catch { }
-            return null;
-        }
-
-        private static byte[] RawResourceBytes(ResourceReader reader, string name)
-        {
-            try
-            {
-                reader.GetResourceData(name, out string type, out byte[] raw);
-                if (raw == null || raw.Length == 0) return null;
-                if ((type.IndexOf("ByteArray", StringComparison.OrdinalIgnoreCase) >= 0
-                    || type.IndexOf("Stream", StringComparison.OrdinalIgnoreCase) >= 0)
-                    && raw.Length >= 4)
-                {
-                    int length = BitConverter.ToInt32(raw, 0);
-                    if (length > 0 && length <= raw.Length - 4)
-                    {
-                        byte[] result = new byte[length];
-                        Buffer.BlockCopy(raw, 4, result, 0, length);
-                        return result;
-                    }
-                }
-                byte[][] signatures =
-                {
-                    new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 },
-                    new byte[] { 82, 73, 70, 70 },
-                    new byte[] { 255, 216, 255 }
-                };
-                for (int s = 0; s < signatures.Length; s++)
-                    for (int offset = 0; offset <= raw.Length - signatures[s].Length; offset++)
-                    {
-                        bool match = true;
-                        for (int b = 0; b < signatures[s].Length; b++)
-                            if (raw[offset + b] != signatures[s][b]) { match = false; break; }
-                        if (!match) continue;
-                        int length = raw.Length - offset;
-                        if (s == 1 && offset + 8 <= raw.Length)
-                        {
-                            int waveLength = BitConverter.ToInt32(raw, offset + 4) + 8;
-                            if (waveLength > 8 && waveLength <= length) length = waveLength;
-                        }
-                        byte[] result = new byte[length];
-                        Buffer.BlockCopy(raw, offset, result, 0, length);
-                        return result;
-                    }
-            }
-            catch { }
-            return null;
-        }
-
-        private void IndexCompiledResourceSets(Assembly assembly, string[] names, List<string> expected)
-        {
-            for (int i = 0; i < names.Length; i++)
-            {
-                string resource = names[i];
-                if (!resource.EndsWith(".resources", StringComparison.OrdinalIgnoreCase)) continue;
-                try
-                {
-                    using (Stream stream = assembly.GetManifestResourceStream(resource))
-                    using (ResourceReader reader = stream != null ? new ResourceReader(stream) : null)
-                    {
-                        if (reader == null) continue;
-                        IDictionaryEnumerator entries = reader.GetEnumerator();
-                        while (entries.MoveNext())
-                        {
-                            string entryName = entries.Key as string;
-                            if (string.IsNullOrEmpty(entryName)) continue;
-                            string stem = StripAssetExtension(entryName);
-                            string normalizedStem = NormalizeAssetKey(stem);
-                            bool audio = normalizedStem.EndsWith("balhi", StringComparison.OrdinalIgnoreCase);
-                            string key = audio ? null : MatchExpectedKey(stem, expected);
-                            if (!audio && key == null) continue;
-                            byte[] data = null;
-                            try { data = ResourceValueBytes(entries.Value); } catch { }
-                            if (data == null || data.Length == 0)
-                                data = RawResourceBytes(reader, entryName);
-                            if (data == null || data.Length == 0) continue;
-                            if (audio)
-                                audioData["balhi"] = data;
-                            else
-                            {
-                                string normalized = NormalizeAssetKey(key);
-                                imageData[normalized] = data;
-                                assetNames[normalized] = key;
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    KnoxumsChaosModePlugin.Log.LogWarning("Party Style resource container "
-                        + resource + ": " + ex.Message);
-                }
-            }
-        }
-
         private void IndexResources()
         {
             imageResources.Clear();
             audioResources.Clear();
             imageFiles.Clear();
             audioFiles.Clear();
-            imageData.Clear();
-            audioData.Clear();
             assetNames.Clear();
             List<string> expected = ExpectedImageKeys();
             try
@@ -3385,13 +3200,35 @@ namespace KnoxumsChaosMode
                 Assembly assembly = Assembly.GetExecutingAssembly();
                 string[] names = assembly.GetManifestResourceNames();
                 for (int i = 0; i < names.Length; i++)
-                    RegisterManifestResource(names[i], expected);
-                IndexCompiledResourceSets(assembly, names, expected);
+                {
+                    string resource = names[i];
+                    string lower = resource.ToLowerInvariant();
+                    if (lower.EndsWith(".png") || lower.EndsWith(".jpg") || lower.EndsWith(".jpeg"))
+                    {
+                        int extension = resource.LastIndexOf('.');
+                        string key = MatchExpectedKey(extension > 0 ? resource.Substring(0, extension) : resource, expected);
+                        if (key == null) continue;
+                        string normalized = NormalizeAssetKey(key);
+                        imageResources[normalized] = resource;
+                        assetNames[normalized] = key;
+                    }
+                    else if (lower.EndsWith(".wav"))
+                    {
+                        int extension = resource.LastIndexOf('.');
+                        string stem = extension > 0 ? resource.Substring(0, extension) : resource;
+                        if (!NormalizeAssetKey(stem).EndsWith("balhi", StringComparison.OrdinalIgnoreCase)) continue;
+                        audioResources["balhi"] = resource;
+                    }
+                }
                 string directory = null;
                 try { directory = Path.GetDirectoryName(assembly.Location); } catch { }
                 if (!string.IsNullOrEmpty(directory))
                 {
-                    string[] roots = { directory };
+                    string[] roots =
+                    {
+                        Path.Combine(directory, "PartyStyle"),
+                        Path.Combine(directory, "Resources", "PartyStyle")
+                    };
                     for (int r = 0; r < roots.Length; r++)
                     {
                         if (!Directory.Exists(roots[r])) continue;
@@ -3405,14 +3242,12 @@ namespace KnoxumsChaosMode
                                 string key = MatchExpectedKey(Path.GetFileNameWithoutExtension(file), expected);
                                 if (key == null) continue;
                                 string normalized = NormalizeAssetKey(key);
-                                if (!imageResources.ContainsKey(normalized)
-                                    && !imageData.ContainsKey(normalized)) imageFiles[normalized] = file;
+                                if (!imageResources.ContainsKey(normalized)) imageFiles[normalized] = file;
                                 assetNames[normalized] = key;
                             }
                             else if (extension == ".wav"
                                 && NormalizeAssetKey(Path.GetFileNameWithoutExtension(file)) == "balhi"
-                                && !audioResources.ContainsKey("balhi")
-                                && !audioData.ContainsKey("balhi"))
+                                && !audioResources.ContainsKey("balhi"))
                                 audioFiles["balhi"] = file;
                         }
                     }
@@ -3425,8 +3260,8 @@ namespace KnoxumsChaosMode
             if (!indexReported)
             {
                 indexReported = true;
-                int images = imageResources.Count + imageFiles.Count + imageData.Count;
-                int audio = audioResources.Count + audioFiles.Count + audioData.Count;
+                int images = imageResources.Count + imageFiles.Count;
+                int audio = audioResources.Count + audioFiles.Count;
                 if (images == 0 && audio == 0)
                     KnoxumsChaosModePlugin.Log.LogWarning("Party Style: no PartyStyle image or audio resources were found");
                 else
@@ -3448,11 +3283,10 @@ namespace KnoxumsChaosMode
         }
 
         private byte[] LoadBytes(string normalized, Dictionary<string, string> resources,
-            Dictionary<string, string> files, Dictionary<string, byte[]> data)
+            Dictionary<string, string> files)
         {
             try
             {
-                if (data.TryGetValue(normalized, out byte[] stored)) return stored;
                 if (resources.TryGetValue(normalized, out string resource))
                 {
                     using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resource))
@@ -3469,7 +3303,7 @@ namespace KnoxumsChaosMode
         {
             string normalized = NormalizeAssetKey(key);
             if (textures.TryGetValue(normalized, out Texture2D cached)) return cached;
-            byte[] data = LoadBytes(normalized, imageResources, imageFiles, imageData);
+            byte[] data = LoadBytes(normalized, imageResources, imageFiles);
             if (data == null) return null;
             try
             {
@@ -3526,7 +3360,7 @@ namespace KnoxumsChaosMode
         {
             if (!Active || original == null || NormalizeAssetKey(original.name) != "balhi") return original;
             if (balHi != null) return balHi;
-            byte[] data = LoadBytes("balhi", audioResources, audioFiles, audioData);
+            byte[] data = LoadBytes("balhi", audioResources, audioFiles);
             if (data == null) return original;
             try
             {
@@ -3833,8 +3667,7 @@ namespace KnoxumsChaosMode
                 wasActive = false;
                 return;
             }
-            if (imageResources.Count + imageFiles.Count + imageData.Count
-                + audioResources.Count + audioFiles.Count + audioData.Count == 0)
+            if (imageResources.Count + imageFiles.Count + audioResources.Count + audioFiles.Count == 0)
                 IndexResources();
             wasActive = true;
             refreshTimer = 0f;
