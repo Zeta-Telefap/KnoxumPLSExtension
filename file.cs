@@ -3748,7 +3748,7 @@ namespace KnoxumsChaosMode
             ItemObject quarter = Resources.FindObjectsOfTypeAll<ItemObject>()
                 .FirstOrDefault(x => x != null && x.itemType == Items.Quarter);
             if (quarter != null) R.Set(machine, "requiredItem", quarter);
-            if (R.Get<int>(machine, "usesLeft", 1) <= 0) R.Set(machine, "usesLeft", 1);
+            R.Set(machine, "usesLeft", int.MaxValue);
             Renderer[] renderers = machine.GetComponentsInChildren<Renderer>(true);
             if (cell != null && cell.renderers != null)
                 for (int i = 0; i < renderers.Length; i++)
