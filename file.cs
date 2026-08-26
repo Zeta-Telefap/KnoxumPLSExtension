@@ -4223,6 +4223,38 @@ namespace KnoxumsChaosMode
         }
     }
 
+    [HarmonyPatch(typeof(ITM_TutorialQuarter), "Use", new Type[] { typeof(PlayerManager) })]
+    public static class PartyStyleTutorialQuarterPatch
+    {
+        [HarmonyPrefix]
+        static bool Prefix(ITM_TutorialQuarter __instance, PlayerManager pm, ref bool __result)
+        {
+            PartyStyleManager style = PartyStyleManager.Instance;
+            BaseGameManager manager = Singleton<BaseGameManager>.Instance;
+            if (style == null || !style.Active || manager == null || !manager.InPitstop()
+                || __instance == null || pm == null || pm.pc == null) return true;
+            LayerMaskObject layerMask = R.Get<LayerMaskObject>(__instance, "layerMask", null);
+            LayerMask mask = layerMask != null ? layerMask.mask : pm.pc.ClickLayers;
+            if (Physics.Raycast(pm.transform.position,
+                Singleton<CoreGameManager>.Instance.GetCamera(pm.playerNumber).transform.forward,
+                out RaycastHit hit, pm.pc.Reach, mask))
+            {
+                IItemAcceptor[] acceptors = hit.transform.GetComponents<IItemAcceptor>();
+                R.Set(__instance, "_acceptors", acceptors);
+                Items acceptedItem = R.Get<Items>(__instance, "item", Items.Quarter);
+                for (int i = 0; i < acceptors.Length; i++)
+                    if (acceptors[i] != null && acceptors[i].ItemFits(acceptedItem))
+                    {
+                        __result = true;
+                        return false;
+                    }
+            }
+            UnityEngine.Object.Destroy(__instance.gameObject);
+            __result = false;
+            return false;
+        }
+    }
+
     [HarmonyPatch(typeof(ItemManager), "UseItem")]
     public static class PartyStylePitstopQuarterPatch
     {
