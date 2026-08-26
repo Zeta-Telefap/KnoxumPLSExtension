@@ -3356,9 +3356,18 @@ namespace KnoxumsChaosMode
             catch { return original; }
         }
 
+        private static bool PartyAudioTarget(string name)
+        {
+            string normalized = NormalizeAssetKey(name);
+            return normalized.Equals("balhi", StringComparison.OrdinalIgnoreCase)
+                || normalized.Equals("balhideandseek", StringComparison.OrdinalIgnoreCase)
+                || normalized.Equals("balintrokl2", StringComparison.OrdinalIgnoreCase)
+                || normalized.Equals("balintrokl3", StringComparison.OrdinalIgnoreCase);
+        }
+
         public AudioClip ReplaceAudio(AudioClip original)
         {
-            if (!Active || original == null || NormalizeAssetKey(original.name) != "balhi") return original;
+            if (!Active || original == null || !PartyAudioTarget(original.name)) return original;
             if (balHi != null) return balHi;
             byte[] data = LoadBytes("balhi", audioResources, audioFiles);
             if (data == null) return original;
@@ -3431,16 +3440,44 @@ namespace KnoxumsChaosMode
             }
         }
 
+        private static Texture2D PresentTexture64(Texture2D source)
+        {
+            if (source == null || (source.width == 64 && source.height == 64)) return source;
+            try
+            {
+                Color32[] original = source.GetPixels32();
+                Color32[] resized = new Color32[64 * 64];
+                for (int y = 0; y < 64; y++)
+                {
+                    int sourceY = Mathf.Clamp(y * source.height / 64, 0, source.height - 1);
+                    for (int x = 0; x < 64; x++)
+                    {
+                        int sourceX = Mathf.Clamp(x * source.width / 64, 0, source.width - 1);
+                        resized[x + y * 64] = original[sourceX + sourceY * source.width];
+                    }
+                }
+                Texture2D texture = new Texture2D(64, 64, TextureFormat.RGBA32, false);
+                texture.SetPixels32(resized);
+                texture.Apply(false, false);
+                texture.filterMode = FilterMode.Point;
+                texture.wrapMode = TextureWrapMode.Clamp;
+                texture.anisoLevel = 0;
+                texture.name = "Present";
+                return texture;
+            }
+            catch { return source; }
+        }
+
         private bool EnsurePresentItem()
         {
             if (presentItem != null && presentSprite != null) return true;
-            Texture2D texture = LoadTexture("Present");
+            Texture2D texture = PresentTexture64(LoadTexture("Present"));
             if (texture == null) return false;
             if (presentSprite == null)
             {
                 presentSprite = Sprite.Create(texture,
                     new Rect(0f, 0f, texture.width, texture.height),
-                    new Vector2(.5f, .5f), 100f);
+                    new Vector2(.5f, .5f), 64f);
                 presentSprite.name = "Present";
                 generatedSprites.Add(presentSprite.GetInstanceID());
             }
