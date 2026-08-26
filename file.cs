@@ -3515,6 +3515,8 @@ namespace KnoxumsChaosMode
                 if (item == null || item == presentItem || item.item == null
                     || item.itemType == Items.None || item.itemType == Items.StickerPack
                     || item.itemType == Items.Points || item.itemType == Items.Map) continue;
+                if (item.itemType != Items.DetentionKey
+                    && item.itemType.ToString().IndexOf("Key", StringComparison.OrdinalIgnoreCase) >= 0) continue;
                 string name = (item.name + " " + item.nameKey + " "
                     + item.itemType).ToLowerInvariant();
                 if (name.Contains("glue") || name.Contains("glue stick")
@@ -3914,23 +3916,59 @@ namespace KnoxumsChaosMode
     [HarmonyPatch(typeof(Pickup), "Collect", new Type[] { typeof(int) })]
     public static class PartyStylePresentPickupPatch
     {
+        private sealed class PresentCollectState
+        {
+            public ItemObject reward;
+            public ItemObject displaced;
+        }
+
+        private static ItemObject FindDisplacedItem(int player)
+        {
+            try
+            {
+                PlayerManager playerManager = Singleton<CoreGameManager>.Instance?.GetPlayer(player);
+                ItemManager inventory = playerManager != null ? playerManager.itm : null;
+                if (inventory == null || inventory.items == null || inventory.maxItem < 0
+                    || !inventory.InventoryFull()) return null;
+                int slot = Mathf.Clamp(inventory.selectedItem, 0, inventory.maxItem);
+                bool[] locked = R.Get<bool[]>(inventory, "slotLocked", null);
+                int attempts = 0;
+                while (locked != null && slot < locked.Length && locked[slot]
+                    && attempts <= inventory.maxItem)
+                {
+                    slot++;
+                    if (slot > inventory.maxItem) slot = 0;
+                    attempts++;
+                }
+                if (slot < 0 || slot >= inventory.items.Length
+                    || (locked != null && slot < locked.Length && locked[slot])) return null;
+                return inventory.items[slot];
+            }
+            catch { return null; }
+        }
+
         [HarmonyPrefix]
-        static void Prefix(Pickup __instance, out ItemObject __state)
+        static void Prefix(Pickup __instance, int player, out PresentCollectState __state)
         {
             __state = null;
             PartyStyleManager manager = PartyStyleManager.Instance;
             if (manager == null || __instance == null || !manager.IsPresent(__instance.item)) return;
             ItemObject reward = manager.RandomPresentReward();
             if (reward == null) return;
-            __state = __instance.item;
+            __state = new PresentCollectState
+            {
+                reward = reward,
+                displaced = FindDisplacedItem(player)
+            };
             __instance.item = reward;
         }
 
         [HarmonyPostfix]
-        static void Postfix(Pickup __instance, ItemObject __state)
+        static void Postfix(Pickup __instance, PresentCollectState __state)
         {
             if (__state == null || __instance == null || !__instance.gameObject.activeSelf) return;
-            if (__instance.item != null && __instance.item.itemType != Items.None)
+            if (__state.displaced != null && __instance.item == __state.displaced) return;
+            if (__instance.item == __state.reward)
                 PartyStyleManager.Instance?.RestorePresentPickup(__instance);
         }
     }
