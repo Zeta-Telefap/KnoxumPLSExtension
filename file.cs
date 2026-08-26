@@ -3172,6 +3172,7 @@ namespace KnoxumsChaosMode
                 "Slap_Broken_Sheet",
                 "BAL_Countdown_Sheet",
                 "Baldi_Talk_Standing_Sheet",
+                "BaldiApple",
                 "Present"
             };
             for (int i = 0; i <= 99; i++)
