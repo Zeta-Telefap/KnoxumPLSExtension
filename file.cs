@@ -3110,9 +3110,11 @@ namespace KnoxumsChaosMode
         private readonly Dictionary<string, string> assetNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, Texture2D> textures = new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<long, Sprite> sprites = new Dictionary<long, Sprite>();
+        private readonly Dictionary<Sprite, Sprite> resolvedSprites = new Dictionary<Sprite, Sprite>();
         private readonly HashSet<int> generatedSprites = new HashSet<int>();
         private readonly Dictionary<int, Sprite> generatedOriginals = new Dictionary<int, Sprite>();
         private readonly List<SpriteRenderer> trackedRenderers = new List<SpriteRenderer>();
+        private readonly List<BaldiVisualCache> baldiVisuals = new List<BaldiVisualCache>();
         private readonly List<Image> trackedImages = new List<Image>();
         private readonly HashSet<int> trackedRendererIds = new HashSet<int>();
         private readonly HashSet<int> trackedImageIds = new HashSet<int>();
@@ -3131,6 +3133,7 @@ namespace KnoxumsChaosMode
         private Cell pitstopMachineCell;
         private EnvironmentController schoolMachineEnvironment;
         private float refreshTimer;
+        private float baldiRefreshTimer;
         private bool wasActive;
         private bool indexReported;
         private bool presentFailureReported;
@@ -3153,6 +3156,12 @@ namespace KnoxumsChaosMode
             public SodaMachine replacement;
             public Cell cell;
             public Renderer[] replacementRenderers;
+        }
+
+        private sealed class BaldiVisualCache
+        {
+            public Baldi baldi;
+            public readonly List<SpriteRenderer> renderers = new List<SpriteRenderer>();
         }
 
         public bool Active => KnoxumsChaosModePlugin.StyleConfig?.Value == ChaosStyle.Party;
@@ -3218,6 +3227,7 @@ namespace KnoxumsChaosMode
             imageFiles.Clear();
             audioFiles.Clear();
             assetNames.Clear();
+            resolvedSprites.Clear();
             List<string> expected = ExpectedImageKeys();
             try
             {
@@ -3395,9 +3405,14 @@ namespace KnoxumsChaosMode
         public Sprite ReplaceSprite(Sprite original)
         {
             if (!Active || original == null || generatedSprites.Contains(original.GetInstanceID())) return original;
+            if (resolvedSprites.TryGetValue(original, out Sprite resolved)) return resolved;
             string direct = DirectBaldiTextureKey(original);
             if (direct != null)
-                return BuildPartySprite(original, LoadTexture(direct), true);
+            {
+                resolved = BuildPartySprite(original, LoadTexture(direct), true);
+                resolvedSprites[original] = resolved;
+                return resolved;
+            }
             Texture2D texture = null;
             bool sheet = false;
             if (original.texture != null)
@@ -3410,7 +3425,9 @@ namespace KnoxumsChaosMode
                 texture = LoadTexture(original.name);
                 sheet = UsesSheetRect(texture);
             }
-            return texture != null ? BuildPartySprite(original, texture, sheet) : original;
+            resolved = texture != null ? BuildPartySprite(original, texture, sheet) : original;
+            resolvedSprites[original] = resolved;
+            return resolved;
         }
 
         private static bool PartyAudioTarget(string name)
@@ -3619,7 +3636,7 @@ namespace KnoxumsChaosMode
                 return;
             }
             presentFailureReported = false;
-            RefreshPresentPool();
+            if (presentPool == null || presentPool.Count == 0) RefreshPresentPool();
             HashSet<Pickup> pickups = new HashSet<Pickup>();
             if (manager.Ec.items != null)
                 for (int i = 0; i < manager.Ec.items.Count; i++)
@@ -4034,35 +4051,59 @@ namespace KnoxumsChaosMode
             }
         }
 
-        private void RefreshBaldiSprites()
+        private void RebuildBaldiVisuals()
         {
+            baldiVisuals.Clear();
             Baldi[] baldis = UnityEngine.Object.FindObjectsOfType<Baldi>(true);
             for (int i = 0; i < baldis.Length; i++)
             {
                 Baldi baldi = baldis[i];
-                if (baldi == null || !baldi.gameObject.activeInHierarchy) continue;
-                HashSet<SpriteRenderer> renderers = new HashSet<SpriteRenderer>();
+                if (baldi == null) continue;
+                HashSet<SpriteRenderer> found = new HashSet<SpriteRenderer>();
                 foreach (SpriteRenderer renderer in baldi.GetComponentsInChildren<SpriteRenderer>(true))
-                    if (renderer != null) renderers.Add(renderer);
+                    if (renderer != null) found.Add(renderer);
                 Animator animator = R.Get<Animator>(baldi, "animator", null);
                 if (animator != null)
                 {
                     foreach (SpriteRenderer renderer in animator.GetComponentsInChildren<SpriteRenderer>(true))
-                        if (renderer != null) renderers.Add(renderer);
+                        if (renderer != null) found.Add(renderer);
                     foreach (SpriteRenderer renderer in animator.GetComponentsInParent<SpriteRenderer>(true))
-                        if (renderer != null) renderers.Add(renderer);
+                        if (renderer != null) found.Add(renderer);
                 }
                 try
                 {
                     Entity entity = baldi.Navigator != null ? baldi.Navigator.Entity : null;
                     if (entity != null)
                         foreach (SpriteRenderer renderer in entity.GetComponentsInChildren<SpriteRenderer>(true))
-                            if (renderer != null) renderers.Add(renderer);
+                            if (renderer != null) found.Add(renderer);
                 }
                 catch { }
-                foreach (SpriteRenderer renderer in renderers)
+                BaldiVisualCache cache = new BaldiVisualCache { baldi = baldi };
+                cache.renderers.AddRange(found);
+                baldiVisuals.Add(cache);
+            }
+        }
+
+        private void RefreshBaldiSprites()
+        {
+            for (int i = baldiVisuals.Count - 1; i >= 0; i--)
+            {
+                BaldiVisualCache cache = baldiVisuals[i];
+                if (cache == null || cache.baldi == null)
                 {
-                    if (renderer == null || !renderer.gameObject.activeInHierarchy || renderer.sprite == null) continue;
+                    baldiVisuals.RemoveAt(i);
+                    continue;
+                }
+                if (!cache.baldi.gameObject.activeInHierarchy) continue;
+                for (int j = cache.renderers.Count - 1; j >= 0; j--)
+                {
+                    SpriteRenderer renderer = cache.renderers[j];
+                    if (renderer == null)
+                    {
+                        cache.renderers.RemoveAt(j);
+                        continue;
+                    }
+                    if (!renderer.gameObject.activeInHierarchy || renderer.sprite == null) continue;
                     Sprite replacement = ReplaceSprite(renderer.sprite);
                     if (replacement == renderer.sprite) continue;
                     if (trackedRendererIds.Add(renderer.GetInstanceID())) trackedRenderers.Add(renderer);
@@ -4091,6 +4132,8 @@ namespace KnoxumsChaosMode
             trackedImages.Clear();
             trackedRendererIds.Clear();
             trackedImageIds.Clear();
+            baldiVisuals.Clear();
+            baldiRefreshTimer = 0f;
         }
 
         private void RestoreClassic()
@@ -4114,7 +4157,10 @@ namespace KnoxumsChaosMode
             if (imageResources.Count + imageFiles.Count + audioResources.Count + audioFiles.Count == 0)
                 IndexResources();
             wasActive = true;
-            refreshTimer = 0f;
+            refreshTimer = 2f;
+            baldiRefreshTimer = 1f;
+            RebuildBaldiVisuals();
+            RefreshBaldiSprites();
             TrackAndReplaceLiveSprites();
             try
             {
@@ -4136,7 +4182,11 @@ namespace KnoxumsChaosMode
                     RestoreClassic();
                     return;
                 }
-                refreshTimer = 0f;
+                refreshTimer = 2f;
+                baldiRefreshTimer = 1f;
+                RebuildBaldiVisuals();
+                RefreshBaldiSprites();
+                TrackAndReplaceLiveSprites();
                 try
                 {
                     BaseGameManager manager = Singleton<BaseGameManager>.Instance;
@@ -4146,11 +4196,17 @@ namespace KnoxumsChaosMode
                 catch { }
             }
             if (!active) return;
+            baldiRefreshTimer -= Time.unscaledDeltaTime;
+            if (baldiRefreshTimer <= 0f)
+            {
+                baldiRefreshTimer = 1f;
+                RebuildBaldiVisuals();
+            }
             RefreshBaldiSprites();
             refreshTimer -= Time.unscaledDeltaTime;
             if (refreshTimer <= 0f)
             {
-                refreshTimer = .5f;
+                refreshTimer = 2f;
                 TrackAndReplaceLiveSprites();
             }
             RefreshTrackedSprites();
