@@ -4297,32 +4297,34 @@ namespace KnoxumsChaosMode
     {
         [HarmonyPrefix]
         [HarmonyPriority(Priority.First)]
-        static void Prefix(ItemManager __instance, out ItemObject __state)
+        static bool Prefix(ItemManager __instance)
         {
-            __state = null;
             PartyStyleManager style = PartyStyleManager.Instance;
             BaseGameManager manager = Singleton<BaseGameManager>.Instance;
             if (style == null || !style.Active || manager == null || !manager.InPitstop()
-                || __instance == null || __instance.items == null) return;
+                || __instance == null || __instance.items == null || __instance.pm == null) return true;
             int slot = __instance.selectedItem;
-            if (slot < 0 || slot >= __instance.items.Length) return;
+            if (slot < 0 || slot >= __instance.items.Length) return true;
             ItemObject item = __instance.items[slot];
-            if (item == null || item.itemType != Items.Quarter || item.overrideDisabled) return;
-            __state = item;
-            item.overrideDisabled = true;
-        }
-
-        [HarmonyPostfix]
-        static void Postfix(ItemObject __state)
-        {
-            if (__state != null) __state.overrideDisabled = false;
-        }
-
-        [HarmonyFinalizer]
-        static Exception Finalizer(Exception __exception, ItemObject __state)
-        {
-            if (__state != null) __state.overrideDisabled = false;
-            return __exception;
+            if (item == null || item.itemType != Items.Quarter) return true;
+            try
+            {
+                GameCamera camera = Singleton<CoreGameManager>.Instance.GetCamera(__instance.pm.playerNumber);
+                if (camera == null || !Physics.Raycast(__instance.pm.transform.position,
+                    camera.transform.forward, out RaycastHit hit, __instance.pm.pc.reach,
+                    __instance.pm.pc.ClickLayers)) return false;
+                SodaMachine machine = hit.transform.GetComponent<SodaMachine>()
+                    ?? hit.transform.GetComponentInParent<SodaMachine>();
+                if (machine == null || !machine.ItemFits(Items.Quarter)
+                    || !style.TryUseCrazyMachine(machine, __instance.pm)) return false;
+                __instance.RemoveItem(slot);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                KnoxumsChaosModePlugin.Log.LogError("Party Style Pitstop quarter: " + ex.Message);
+                return false;
+            }
         }
     }
 
