@@ -3323,9 +3323,44 @@ namespace KnoxumsChaosMode
             return null;
         }
 
-        private Texture2D LoadTexture(string key)
+        private string ResolveTextureKey(string key)
         {
             string normalized = NormalizeAssetKey(key);
+            if (imageResources.ContainsKey(normalized) || imageFiles.ContainsKey(normalized))
+                return normalized;
+            string target = null;
+            if (normalized.Contains("apple")
+                && (normalized.Contains("baldi") || normalized.StartsWith("bal")))
+                target = "baldiapple";
+            else if (normalized.Contains("broken")
+                && (normalized.Contains("slap") || normalized.StartsWith("bal")))
+                target = "slapbrokensheet";
+            else if (normalized.Contains("talk")
+                && (normalized.Contains("standing") || normalized.StartsWith("bal")))
+                target = "balditalkstandingsheet";
+            if (target != null
+                && (imageResources.ContainsKey(target) || imageFiles.ContainsKey(target)))
+                return target;
+            return normalized;
+        }
+
+        private static bool UsesSheetRect(Texture2D texture)
+        {
+            if (texture == null) return false;
+            string normalized = NormalizeAssetKey(texture.name);
+            return normalized.Contains("sheet") || normalized == "baldiapple";
+        }
+
+        private static bool IsSpecialBaldiTexture(string key)
+        {
+            string normalized = NormalizeAssetKey(key);
+            return normalized == "baldiapple" || normalized == "slapbrokensheet"
+                || normalized == "balditalkstandingsheet";
+        }
+
+        private Texture2D LoadTexture(string key)
+        {
+            string normalized = ResolveTextureKey(key);
             if (textures.TryGetValue(normalized, out Texture2D cached)) return cached;
             byte[] data = LoadBytes(normalized, imageResources, imageFiles);
             if (data == null) return null;
@@ -3352,12 +3387,22 @@ namespace KnoxumsChaosMode
             if (!Active || original == null || generatedSprites.Contains(original.GetInstanceID())) return original;
             Texture2D texture = null;
             bool sheet = false;
-            if (original.texture != null)
+            string spriteTextureKey = ResolveTextureKey(original.name);
+            if (IsSpecialBaldiTexture(spriteTextureKey))
+            {
+                texture = LoadTexture(original.name);
+                sheet = texture != null;
+            }
+            if (texture == null && original.texture != null)
             {
                 texture = LoadTexture(original.texture.name);
                 sheet = texture != null;
             }
-            if (texture == null) texture = LoadTexture(original.name);
+            if (texture == null)
+            {
+                texture = LoadTexture(original.name);
+                sheet = UsesSheetRect(texture);
+            }
             if (texture == null) return original;
             long key = ((long)original.GetInstanceID() << 32) | (uint)texture.GetInstanceID();
             if (sprites.TryGetValue(key, out Sprite cached)) return cached;
