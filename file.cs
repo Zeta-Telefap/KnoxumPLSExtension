@@ -3520,7 +3520,8 @@ namespace KnoxumsChaosMode
                 ItemObject item = all[i];
                 if (item == null || item == presentItem || item.item == null
                     || item.itemType == Items.None || item.itemType == Items.StickerPack
-                    || item.itemType == Items.Points || item.itemType == Items.Map) continue;
+                    || item.itemType == Items.Points || item.itemType == Items.Map
+                    || item.itemType == Items.BusPass) continue;
                 if (IsNonDirectorKey(item)) continue;
                 string name = (item.name + " " + item.nameKey + " "
                     + item.itemType).ToLowerInvariant();
@@ -3976,6 +3977,40 @@ namespace KnoxumsChaosMode
             if (__state.displaced != null && __instance.item == __state.displaced) return;
             if (__instance.item == __state.reward)
                 PartyStyleManager.Instance?.RestorePresentPickup(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(ItemManager), "UseItem")]
+    public static class PartyStylePitstopQuarterPatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        static void Prefix(ItemManager __instance, out ItemObject __state)
+        {
+            __state = null;
+            PartyStyleManager style = PartyStyleManager.Instance;
+            BaseGameManager manager = Singleton<BaseGameManager>.Instance;
+            if (style == null || !style.Active || manager == null || !manager.InPitstop()
+                || __instance == null || __instance.items == null) return;
+            int slot = __instance.selectedItem;
+            if (slot < 0 || slot >= __instance.items.Length) return;
+            ItemObject item = __instance.items[slot];
+            if (item == null || item.itemType != Items.Quarter || item.overrideDisabled) return;
+            __state = item;
+            item.overrideDisabled = true;
+        }
+
+        [HarmonyPostfix]
+        static void Postfix(ItemObject __state)
+        {
+            if (__state != null) __state.overrideDisabled = false;
+        }
+
+        [HarmonyFinalizer]
+        static Exception Finalizer(Exception __exception, ItemObject __state)
+        {
+            if (__state != null) __state.overrideDisabled = false;
+            return __exception;
         }
     }
 
