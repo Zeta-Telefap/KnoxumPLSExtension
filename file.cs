@@ -3755,6 +3755,11 @@ namespace KnoxumsChaosMode
                 for (int i = 0; i < renderers.Length; i++)
                     if (renderers[i] != null && !cell.renderers.Contains(renderers[i]))
                         cell.renderers.Add(renderers[i]);
+            Collider[] colliders = machine.GetComponentsInChildren<Collider>(true);
+            for (int i = 0; i < colliders.Length; i++)
+                if (colliders[i] != null
+                    && colliders[i].GetComponent<IClickable<int>>() == null)
+                    colliders[i].gameObject.AddComponent<ClickableEventTrigger>();
             machine.gameObject.SetActive(true);
             return machine;
         }
