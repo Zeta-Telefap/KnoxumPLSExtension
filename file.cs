@@ -3838,60 +3838,6 @@ namespace KnoxumsChaosMode
             schoolMachinesApplied = false;
         }
 
-        private bool IsManagedCrazyMachine(SodaMachine machine)
-        {
-            if (machine == null) return false;
-            if (machine == pitstopCrazyMachine) return true;
-            for (int i = 0; i < schoolCrazyMachines.Count; i++)
-                if (schoolCrazyMachines[i] != null
-                    && schoolCrazyMachines[i].replacement == machine) return true;
-            return false;
-        }
-
-        public bool TryUseCrazyMachine(SodaMachine machine, PlayerManager player)
-        {
-            if (!Active || !IsManagedCrazyMachine(machine)) return false;
-            ItemObject reward = RandomPresentReward();
-            if (reward == null)
-            {
-                KnoxumsChaosModePlugin.Log.LogWarning("Party Style: Crazy Item machine has no valid reward");
-                return true;
-            }
-            int uses = Mathf.Max(0, R.Get<int>(machine, "usesLeft", 1) - 1);
-            R.Set(machine, "usesLeft", uses);
-            if (uses <= 0)
-            {
-                MeshRenderer renderer = R.Get<MeshRenderer>(machine, "meshRenderer", null);
-                Material outOfStock = R.Get<Material>(machine, "outOfStockMat", null);
-                if (renderer != null && outOfStock != null)
-                {
-                    Material[] materials = renderer.sharedMaterials;
-                    if (materials != null && materials.Length > 1)
-                    {
-                        materials = (Material[])materials.Clone();
-                        materials[1] = outOfStock;
-                        renderer.sharedMaterials = materials;
-                    }
-                }
-            }
-            StartCoroutine(GiveCrazyMachineReward(player, reward));
-            return true;
-        }
-
-        private IEnumerator GiveCrazyMachineReward(PlayerManager player, ItemObject reward)
-        {
-            yield return null;
-            try
-            {
-                if (player != null && player.itm != null && reward != null)
-                    player.itm.AddItem(reward);
-            }
-            catch (Exception ex)
-            {
-                KnoxumsChaosModePlugin.Log.LogError("Party Style Crazy Item reward: " + ex.Message);
-            }
-        }
-
         private static Cell PitstopCrazyMachineCell(EnvironmentController environment, bool requireFree)
         {
             if (environment == null) return null;
@@ -4278,53 +4224,37 @@ namespace KnoxumsChaosMode
         }
     }
 
-    [HarmonyPatch(typeof(SodaMachine), "InsertItem", new Type[]
-    {
-        typeof(PlayerManager), typeof(EnvironmentController)
-    })]
-    public static class PartyStyleCrazyMachineUsePatch
-    {
-        [HarmonyPrefix]
-        static bool Prefix(SodaMachine __instance, PlayerManager pm)
-        {
-            PartyStyleManager manager = PartyStyleManager.Instance;
-            return manager == null || !manager.TryUseCrazyMachine(__instance, pm);
-        }
-    }
-
     [HarmonyPatch(typeof(ItemManager), "UseItem")]
     public static class PartyStylePitstopQuarterPatch
     {
         [HarmonyPrefix]
         [HarmonyPriority(Priority.First)]
-        static bool Prefix(ItemManager __instance)
+        static void Prefix(ItemManager __instance, out ItemObject __state)
         {
+            __state = null;
             PartyStyleManager style = PartyStyleManager.Instance;
             BaseGameManager manager = Singleton<BaseGameManager>.Instance;
             if (style == null || !style.Active || manager == null || !manager.InPitstop()
-                || __instance == null || __instance.items == null || __instance.pm == null) return true;
+                || __instance == null || __instance.items == null) return;
             int slot = __instance.selectedItem;
-            if (slot < 0 || slot >= __instance.items.Length) return true;
+            if (slot < 0 || slot >= __instance.items.Length) return;
             ItemObject item = __instance.items[slot];
-            if (item == null || item.itemType != Items.Quarter) return true;
-            try
-            {
-                GameCamera camera = Singleton<CoreGameManager>.Instance.GetCamera(__instance.pm.playerNumber);
-                if (camera == null || !Physics.Raycast(__instance.pm.transform.position,
-                    camera.transform.forward, out RaycastHit hit, __instance.pm.pc.reach,
-                    __instance.pm.pc.ClickLayers)) return false;
-                SodaMachine machine = hit.transform.GetComponent<SodaMachine>()
-                    ?? hit.transform.GetComponentInParent<SodaMachine>();
-                if (machine == null || !machine.ItemFits(Items.Quarter)
-                    || !style.TryUseCrazyMachine(machine, __instance.pm)) return false;
-                __instance.RemoveItem(slot);
-                return false;
-            }
-            catch (Exception ex)
-            {
-                KnoxumsChaosModePlugin.Log.LogError("Party Style Pitstop quarter: " + ex.Message);
-                return false;
-            }
+            if (item == null || item.itemType != Items.Quarter || item.overrideDisabled) return;
+            __state = item;
+            item.overrideDisabled = true;
+        }
+
+        [HarmonyPostfix]
+        static void Postfix(ItemObject __state)
+        {
+            if (__state != null) __state.overrideDisabled = false;
+        }
+
+        [HarmonyFinalizer]
+        static Exception Finalizer(Exception __exception, ItemObject __state)
+        {
+            if (__state != null) __state.overrideDisabled = false;
+            return __exception;
         }
     }
 
