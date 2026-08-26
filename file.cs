@@ -3325,7 +3325,9 @@ namespace KnoxumsChaosMode
 
         private static bool UsesSheetRect(Texture2D texture)
         {
-            return texture != null && NormalizeAssetKey(texture.name).Contains("sheet");
+            if (texture == null) return false;
+            string normalized = NormalizeAssetKey(texture.name);
+            return normalized.Contains("sheet") || normalized == "baldiapple";
         }
 
         private Texture2D LoadTexture(string key)
@@ -4044,7 +4046,10 @@ namespace KnoxumsChaosMode
                 bool sheet = false;
                 if (clipName.Contains("apple") || state.IsName("BAL_AppleIntro")
                     || state.IsName("BAL_AppleLoop"))
+                {
                     resource = "BaldiApple";
+                    sheet = true;
+                }
                 else if (clipName.Contains("slapbroken")
                     || state.IsName("BAL_Slap_Broken"))
                 {
