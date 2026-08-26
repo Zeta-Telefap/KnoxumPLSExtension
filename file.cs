@@ -3125,7 +3125,7 @@ namespace KnoxumsChaosMode
         private List<ItemObject> presentPool;
         private Balloon[] partyBalloonPrefabs;
         private EnvironmentController balloonEnvironment;
-        private SodaMachine crazyMachinePrefab;
+        private SodaMachine[] crazyMachinePrefabs;
         private SodaMachine pitstopCrazyMachine;
         private EnvironmentController pitstopMachineEnvironment;
         private Cell pitstopMachineCell;
@@ -3713,29 +3713,26 @@ namespace KnoxumsChaosMode
             balloonsApplied = false;
         }
 
-        private SodaMachine FindCrazyMachinePrefab()
+        private SodaMachine[] FindCrazyMachinePrefabs()
         {
-            if (crazyMachinePrefab != null) return crazyMachinePrefab;
+            if (crazyMachinePrefabs != null)
+            {
+                crazyMachinePrefabs = crazyMachinePrefabs.Where(x => x != null).ToArray();
+                if (crazyMachinePrefabs.Length > 0) return crazyMachinePrefabs;
+            }
+            List<SodaMachine> candidates = new List<SodaMachine>();
             SodaMachine[] machines = Resources.FindObjectsOfTypeAll<SodaMachine>();
-            int bestScore = int.MinValue;
             for (int i = 0; i < machines.Length; i++)
             {
                 SodaMachine machine = machines[i];
                 if (machine == null) continue;
                 Array potential = R.Get<Array>(machine, "potentialItems", null);
-                if (potential == null || potential.Length == 0) continue;
-                ItemObject required = R.Get<ItemObject>(machine, "requiredItem", null);
-                int score = 0;
-                if (required != null && required.itemType == Items.Quarter) score += 100;
-                if (!machine.gameObject.scene.IsValid()) score += 25;
-                string name = (machine.name + " " + machine.gameObject.name).ToLowerInvariant();
-                if (name.Contains("crazy")) score += 200;
-                if (name.Contains("random")) score += 50;
-                if (score <= bestScore) continue;
-                bestScore = score;
-                crazyMachinePrefab = machine;
+                if (potential != null && potential.Length > 0) candidates.Add(machine);
             }
-            return crazyMachinePrefab;
+            List<SodaMachine> assets = candidates.Where(x => !x.gameObject.scene.IsValid()).ToList();
+            if (assets.Count > 0) candidates = assets;
+            crazyMachinePrefabs = candidates.Distinct().ToArray();
+            return crazyMachinePrefabs;
         }
 
         private SodaMachine CreateCrazyMachine(SodaMachine prefab, Transform parent,
@@ -3768,8 +3765,8 @@ namespace KnoxumsChaosMode
             if (schoolMachineEnvironment != manager.Ec)
                 DestroySchoolCrazyMachines(true);
             if (schoolMachinesApplied) return;
-            SodaMachine prefab = FindCrazyMachinePrefab();
-            if (prefab == null)
+            SodaMachine[] prefabs = FindCrazyMachinePrefabs();
+            if (prefabs == null || prefabs.Length == 0)
             {
                 if (!crazyMachineFailureReported)
                 {
@@ -3792,6 +3789,7 @@ namespace KnoxumsChaosMode
                 SodaMachine replacement = null;
                 try
                 {
+                    SodaMachine prefab = prefabs[UnityEngine.Random.Range(0, prefabs.Length)];
                     Transform parent = original.transform.parent != null
                         ? original.transform.parent : cell.room.objectObject.transform;
                     replacement = CreateCrazyMachine(prefab, parent, original.transform.position,
@@ -3876,10 +3874,10 @@ namespace KnoxumsChaosMode
             if (pitstopMachineEnvironment != manager.Ec)
                 DestroyPitstopCrazyMachine();
             if (pitstopCrazyMachine != null) return;
-            SodaMachine prefab = FindCrazyMachinePrefab();
+            SodaMachine[] prefabs = FindCrazyMachinePrefabs();
             Cell cell = PitstopCrazyMachineCell(manager.Ec, true)
                 ?? PitstopCrazyMachineCell(manager.Ec, false);
-            if (prefab == null || cell == null)
+            if (prefabs == null || prefabs.Length == 0 || cell == null)
             {
                 if (!crazyMachineFailureReported)
                 {
@@ -3890,6 +3888,7 @@ namespace KnoxumsChaosMode
             }
             try
             {
+                SodaMachine prefab = prefabs[UnityEngine.Random.Range(0, prefabs.Length)];
                 Transform parent = cell.room.objectObject != null
                     ? cell.room.objectObject.transform : cell.room.transform;
                 pitstopCrazyMachine = CreateCrazyMachine(prefab, parent,
@@ -4229,9 +4228,9 @@ namespace KnoxumsChaosMode
     {
         [HarmonyPrefix]
         [HarmonyPriority(Priority.First)]
-        static void Prefix(ItemManager __instance, out ItemObject __state)
+        static void Prefix(ItemManager __instance, out bool __state)
         {
-            __state = null;
+            __state = false;
             PartyStyleManager style = PartyStyleManager.Instance;
             BaseGameManager manager = Singleton<BaseGameManager>.Instance;
             if (style == null || !style.Active || manager == null || !manager.InPitstop()
@@ -4239,21 +4238,22 @@ namespace KnoxumsChaosMode
             int slot = __instance.selectedItem;
             if (slot < 0 || slot >= __instance.items.Length) return;
             ItemObject item = __instance.items[slot];
-            if (item == null || item.itemType != Items.Quarter || item.overrideDisabled) return;
-            __state = item;
-            item.overrideDisabled = true;
+            if (item == null || item.itemType != Items.Quarter
+                || !R.Get<bool>(__instance, "disabled", false)) return;
+            R.Set(__instance, "disabled", false);
+            __state = true;
         }
 
         [HarmonyPostfix]
-        static void Postfix(ItemObject __state)
+        static void Postfix(ItemManager __instance, bool __state)
         {
-            if (__state != null) __state.overrideDisabled = false;
+            if (__state) R.Set(__instance, "disabled", true);
         }
 
         [HarmonyFinalizer]
-        static Exception Finalizer(Exception __exception, ItemObject __state)
+        static Exception Finalizer(Exception __exception, ItemManager __instance, bool __state)
         {
-            if (__state != null) __state.overrideDisabled = false;
+            if (__state) R.Set(__instance, "disabled", true);
             return __exception;
         }
     }
