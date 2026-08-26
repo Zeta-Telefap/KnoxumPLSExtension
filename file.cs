@@ -2467,8 +2467,8 @@ namespace KnoxumsChaosMode
     public class KnoxumsChaosModePlugin : BaseUnityPlugin
     {
         public const string PluginGuid = "com.knoxum.chaosmode";
-        public const string PluginName = "Knoxum's Chaos Mode PUBLIC BETA";
-        public const string PluginVersion = "1.0";
+        public const string PluginName = "Knoxum's Chaos Mode";
+        public const string PluginVersion = "1.1";
 
         public static KnoxumsChaosModePlugin Instance { get; private set; }
         public static ManualLogSource Log => Instance.Logger;
@@ -3359,8 +3359,7 @@ namespace KnoxumsChaosMode
         private static bool PartyAudioTarget(string name)
         {
             string normalized = NormalizeAssetKey(name);
-            return normalized.Equals("balhi", StringComparison.OrdinalIgnoreCase)
-                || normalized.Equals("balhideandseek", StringComparison.OrdinalIgnoreCase)
+            return normalized.Equals("balhideandseek", StringComparison.OrdinalIgnoreCase)
                 || normalized.Equals("balintrokl2", StringComparison.OrdinalIgnoreCase)
                 || normalized.Equals("balintrokl3", StringComparison.OrdinalIgnoreCase);
         }
@@ -7018,7 +7017,7 @@ namespace KnoxumsChaosMode
                 betaWatermarkObj = new GameObject("BetaWatermarkHUD", typeof(RectTransform)); betaWatermarkObj.transform.SetParent(canvas.transform, false);
                 RectTransform r = betaWatermarkObj.GetComponent<RectTransform>(); r.anchorMin = r.anchorMax = new Vector2(1, 0); r.pivot = new Vector2(1, 0);
                 r.anchoredPosition = new Vector2(-4, 4); r.sizeDelta = new Vector2(400, 50);
-                string body = "<line-height=100%>Knoxum's Chaos Mode\nPUBLIC BETA</line-height>"; TMP_FontAsset font = GetComicSansFont(hud);
+                string body = "<line-height=100%>Knoxum's Chaos Mode\nv1.1</line-height>"; TMP_FontAsset font = GetComicSansFont(hud);
                 Vector2[] o = { new Vector2(-1, 0), new Vector2(1, 0), new Vector2(0, -1), new Vector2(0, 1), new Vector2(-1, -1), new Vector2(1, -1), new Vector2(-1, 1), new Vector2(1, 1) };
                 foreach (Vector2 x in o) MkWatermarkLayer(betaWatermarkObj.transform, font, body, Color.black, x);
                 betaWatermarkText = MkWatermarkLayer(betaWatermarkObj.transform, font, body, Color.white, Vector2.zero);
