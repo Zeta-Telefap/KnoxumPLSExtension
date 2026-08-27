@@ -1997,13 +1997,6 @@ namespace KnoxumsChaosMode
 
         static bool Prepare()
         {
-            try
-            {
-                KnoxumsChaosModePlugin.Log.LogInfo(
-                    "Sound Shuffle no-wait: hooked " + waitGetters.Count
-                    + " AudioManager playing getters.");
-            }
-            catch { }
             return waitGetters.Count > 0;
         }
 
@@ -2291,7 +2284,6 @@ namespace KnoxumsChaosMode
                     try { harmony.Patch(m, postfix: new HarmonyMethod(pf)); n++; } catch { }
                 }
                 analogHooked = n > 0;
-                KnoxumsChaosModePlugin.Log.LogInfo("Mirrored: camera-look analog only, hooked " + n);
             }
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("FunLookInvertPatch: " + ex.Message); }
         }
@@ -2561,6 +2553,10 @@ namespace KnoxumsChaosMode
             GameplayModifierForcedRollsConfig = Config.Bind("GameplayModifiers", "ForcedRolls", "",
                 "Testing only. Comma-separated modifier IDs; duplicates create stacks. Empty means random. ");
 
+            IsLapsEnabledConfig.Value = false;
+            GameplayModifiersEnabledConfig.Value = false;
+            StyleConfig.Value = ChaosStyle.Classic;
+
             BaldiRampageConfig.Init(Config);
 
             if (!(DisableWarningConfig?.Value ?? false))
@@ -2587,8 +2583,6 @@ namespace KnoxumsChaosMode
 
             chaosManagerObject = new GameObject("KnoxumsChaosManager");
             chaosManagerObject.AddComponent<ChaosManager>();
-            chaosManagerObject.AddComponent<GameplayModifierManager>();
-            chaosManagerObject.AddComponent<PartyStyleManager>();
             DontDestroyOnLoad(chaosManagerObject);
         }
 
@@ -2704,16 +2698,11 @@ namespace KnoxumsChaosMode
         private int spawnI;
         private MenuToggle inclT;
         private StandardMenuButton spawnLA, spawnRA;
-        private GameObject p5s1, p5s2;
+        private GameObject p5s1, p5s2, p5s3;
         private int p5page;
-        private const int P5PAGES = 2;
+        private const int P5PAGES = 3;
         private StandardMenuButton p5LA, p5RA;
         private MenuToggle warningT;
-        private TextMeshProUGUI styleT;
-        private StandardMenuButton styleLA, styleRA;
-        private int styleI;
-        private GameObject cowardLapsCover;
-        private bool lastLapsVisual;
         private MenuToggle lightsOutT, mirroredT, gooshoesT, lbTestT;
 
         public override void Build()
@@ -2762,25 +2751,6 @@ namespace KnoxumsChaosMode
             p3s2.transform.localPosition = Vector3.zero;
             discoT = MkT(p3s2, "Disco Shuffle", KnoxumsChaosModePlugin.IsDiscoShuffleEnabledConfig.Value, 0f);
             baldiCowardT = MkT(p3s2, "Baldi-coward", KnoxumsChaosModePlugin.IsBaldiCowardEnabledConfig.Value, -30f);
-            try
-            {
-                cowardLapsCover = MkCover(baldiCowardT.transform, -65f);
-                if (cowardLapsCover != null)
-                {
-                    StandardMenuButton coverBtn = cowardLapsCover.ConvertToButton<StandardMenuButton>(true);
-                    coverBtn.audConfirmOverride = silence;
-                    AddTooltip(coverBtn,
-                        "Incompatible with the hidden Laps feature. Disable Laps in the config file to use Baldi-coward.");
-                    Image cim = cowardLapsCover.GetComponent<Image>();
-                    if (cim != null) cim.enabled = true;
-                }
-                bool savedLapsActive = KnoxumsChaosModePlugin.IsLapsEnabledConfig.Value;
-                if (savedLapsActive) SetToggle(baldiCowardT, false);
-                lastLapsVisual = savedLapsActive;
-                RefreshCowardLapsCover();
-            }
-            catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("Coward/Laps cover: " + ex.Message); }
-
             p3LA = CreateButton(OnP3L, menuArrowLeft, menuArrowLeftHighlight, "P3L", new Vector3(-50f, -140f, 0f));
             p3LA.transform.SetParent(p3.transform, false);
             p3pageT = CreateText("P3PT", "", new Vector3(0f, -140f, 0f), BaldiFonts.ComicSans24,
@@ -2817,13 +2787,13 @@ namespace KnoxumsChaosMode
 
             warningT = MkT(p5s2, "Warning",
                 !KnoxumsChaosModePlugin.DisableWarningConfig.Value, 0f);
-            MkL(p5s2, "Style:", -40f);
-            styleLA = MkB(p5s2, OnStyleL, -105f, -75f, true);
-            styleT = MkTxt(p5s2, -75f);
-            styleRA = MkB(p5s2, OnStyleR, 105f, -75f, false);
-            styleI = Mathf.Clamp((int)KnoxumsChaosModePlugin.StyleConfig.Value, 0, 1);
-            UpdStyle();
 
+            p5s3 = new GameObject("P5S3", typeof(RectTransform));
+            p5s3.transform.SetParent(p5.transform, false);
+            p5s3.transform.localPosition = Vector3.zero;
+            MkTextButton(p5s3, "Disable All", DisableAll, 5f);
+            MkTextButton(p5s3, "Enable All", EnableAll, -45f);
+            MkTextButton(p5s3, "Randomize", RandomizeAll, -95f);
 
             p5LA = CreateButton(OnP5L, menuArrowLeft, menuArrowLeftHighlight,
                 "P5L", new Vector3(-150f, -55f, 0f));
@@ -2856,8 +2826,6 @@ namespace KnoxumsChaosMode
             AddTooltip(inclT, "Characters' clones spawn on broken exit lock.");
             AddTooltip(warningT,
                 "Show this mod's photosensitivity warning on startup.");
-            AddTooltip(styleLA, "Classic uses the original Baldi style. Party uses embedded PartyStyle resources.");
-            AddTooltip(styleRA, "Classic uses the original Baldi style. Party uses embedded PartyStyle resources.");
             AddTooltip(lightsOutT, "Dark school with local lantern lighting.");
             AddTooltip(mirroredT, "Mirror the camera and look controls.");
             AddTooltip(gooshoesT, "USE THESE TO STICK TO THE CEILING!");
@@ -2911,6 +2879,22 @@ namespace KnoxumsChaosMode
                 left ? menuArrowLeftHighlight : menuArrowRightHighlight, "b", new Vector3(x, y, 0f));
             b.transform.SetParent(p.transform, false);
             return b;
+        }
+
+        private StandardMenuButton MkTextButton(GameObject parent, string label, UnityAction action, float y)
+        {
+            TextMeshProUGUI text = CreateText("Bulk_" + label.Replace(" ", ""), label,
+                new Vector3(0f, y, 0f), BaldiFonts.ComicSans24,
+                TextAlignmentOptions.Center, new Vector2(220f, 36f), Color.black, false);
+            text.transform.SetParent(parent.transform, false);
+            text.raycastTarget = true;
+            StandardMenuButton button = text.gameObject.ConvertToButton<StandardMenuButton>(true);
+            if (button.OnPress == null) button.OnPress = new UnityEvent();
+            button.OnPress.AddListener(action);
+            button.text = text;
+            button.underlineOnHigh = true;
+            button.unhighlightOnEnable = true;
+            return button;
         }
 
         private static Sprite coverSpr;
@@ -2992,29 +2976,6 @@ namespace KnoxumsChaosMode
             catch { }
         }
 
-        private void RefreshCowardLapsCover()
-        {
-
-            bool lapsOn = KnoxumsChaosModePlugin.IsLapsEnabledConfig?.Value ?? false;
-            if (lapsOn) SetToggle(baldiCowardT, false);
-            if (cowardLapsCover != null)
-            {
-                cowardLapsCover.SetActive(lapsOn);
-                cowardLapsCover.transform.SetAsLastSibling();
-                Image im = cowardLapsCover.GetComponent<Image>();
-                if (im != null) im.enabled = true;
-            }
-            if (!lapsOn) EnsureToggleClickable(baldiCowardT);
-        }
-
-        private void LateUpdate()
-        {
-            bool lapsVisual = KnoxumsChaosModePlugin.IsLapsEnabledConfig?.Value ?? false;
-            if (lapsVisual && !lastLapsVisual) SetToggle(baldiCowardT, false);
-            lastLapsVisual = lapsVisual;
-            RefreshCowardLapsCover();
-        }
-
         private void OnPP() { activePage = (activePage - 1 + PAGES) % PAGES; UpdPage(); }
         private void OnNP() { activePage = (activePage + 1) % PAGES; UpdPage(); }
 
@@ -3030,11 +2991,43 @@ namespace KnoxumsChaosMode
         private void OnML() { modeI = (modeI - 1 + 3) % 3; UpdMode(); }
         private void OnMR() { modeI = (modeI + 1) % 3; UpdMode(); }
         private void UpdMode() { modeI = Mathf.Clamp(modeI, 0, 2); if (modeT != null) modeT.text = new[] { "Chaos", "Chaos+1", "Double Chaos" }[modeI]; }
-        private void OnStyleL() { styleI = (styleI + 1) % 2; UpdStyle(); }
-        private void OnStyleR() { styleI = (styleI + 1) % 2; UpdStyle(); }
-        private void UpdStyle()
+        private MenuToggle[] BulkToggles()
         {
-            if (styleT != null) styleT.text = styleI == 0 ? "Classic" : "Party";
+            return new[]
+            {
+                chaosT, evtPT, chrPT, itmPT, chrST, itmST, strT, sndT, mischiefT,
+                iplT, cplT, beT, deT, discoT, baldiCowardT, inclT, warningT,
+                lightsOutT, mirroredT, gooshoesT, lbTestT
+            };
+        }
+        private void SetTemperature(int value)
+        {
+            if (tempB == null) return;
+            value = Mathf.Clamp(value, 1, 15);
+            tempB.Adjust(value - tempB.GetRaw());
+        }
+        private void SetAll(bool enabled)
+        {
+            MenuToggle[] toggles = BulkToggles();
+            for (int i = 0; i < toggles.Length; i++) SetToggle(toggles[i], enabled);
+            modeI = enabled ? 2 : 0;
+            spawnI = enabled ? 1 : 0;
+            SetTemperature(enabled ? 15 : 5);
+            UpdMode();
+            UpdSpawn();
+        }
+        private void DisableAll() { SetAll(false); }
+        private void EnableAll() { SetAll(true); }
+        private void RandomizeAll()
+        {
+            MenuToggle[] toggles = BulkToggles();
+            for (int i = 0; i < toggles.Length; i++)
+                SetToggle(toggles[i], Random.Range(0, 2) > 0);
+            modeI = Random.Range(0, 3);
+            spawnI = Random.Range(0, 2);
+            SetTemperature(Random.Range(1, 16));
+            UpdMode();
+            UpdSpawn();
         }
         private void OnSL() { spawnI = (spawnI - 1 + 2) % 2; UpdSpawn(); }
         private void OnSR() { spawnI = (spawnI + 1) % 2; UpdSpawn(); }
@@ -3050,10 +3043,11 @@ namespace KnoxumsChaosMode
         private void OnP5R() { p5page = (p5page + 1) % P5PAGES; UpdP5(); }
         private void UpdP5()
         {
-            if (p5s1 == null || p5s2 == null) return;
+            if (p5s1 == null || p5s2 == null || p5s3 == null) return;
             p5page = Mathf.Clamp(p5page, 0, P5PAGES - 1);
             p5s1.SetActive(p5page == 0);
             p5s2.SetActive(p5page == 1);
+            p5s3.SetActive(p5page == 2);
         }
         private void OnApply()
         {
@@ -3079,9 +3073,8 @@ namespace KnoxumsChaosMode
                     KnoxumsChaosModePlugin.IsBuildersErrorEnabledConfig.Value = (bool)vf.GetValue(beT);
                     KnoxumsChaosModePlugin.IsDoubleEventsEnabledConfig.Value = (bool)vf.GetValue(deT);
                     KnoxumsChaosModePlugin.IsDiscoShuffleEnabledConfig.Value = (bool)vf.GetValue(discoT);
-                    bool hiddenLapsOn = KnoxumsChaosModePlugin.IsLapsEnabledConfig.Value;
-                    KnoxumsChaosModePlugin.IsBaldiCowardEnabledConfig.Value = hiddenLapsOn
-                        ? false : (bool)vf.GetValue(baldiCowardT);
+                    KnoxumsChaosModePlugin.IsBaldiCowardEnabledConfig.Value =
+                        (bool)vf.GetValue(baldiCowardT);
                     KnoxumsChaosModePlugin.IncludeExitsConfig.Value = (bool)vf.GetValue(inclT);
                     KnoxumsChaosModePlugin.IsLightsOutEnabledConfig.Value = (bool)vf.GetValue(lightsOutT);
                     KnoxumsChaosModePlugin.IsMirroredEnabledConfig.Value = (bool)vf.GetValue(mirroredT);
@@ -3091,9 +3084,10 @@ namespace KnoxumsChaosMode
                 }
                 KnoxumsChaosModePlugin.PropShuffleTemperatureConfig.Value = Mathf.Clamp(tempB.GetRaw(), 1, 15);
                 KnoxumsChaosModePlugin.CloneSpawnPointConfig.Value = (CloneSpawnPoint)Mathf.Clamp(spawnI, 0, 1);
-                KnoxumsChaosModePlugin.StyleConfig.Value = (ChaosStyle)Mathf.Clamp(styleI, 0, 1);
+                KnoxumsChaosModePlugin.IsLapsEnabledConfig.Value = false;
+                KnoxumsChaosModePlugin.GameplayModifiersEnabledConfig.Value = false;
+                KnoxumsChaosModePlugin.StyleConfig.Value = ChaosStyle.Classic;
                 KnoxumsChaosModePlugin.Instance.Config.Save();
-                PartyStyleManager.Instance?.RefreshNow();
             }
             catch (Exception ex) { KnoxumsChaosModePlugin.Log.LogError("Apply: " + ex.Message); }
         }
@@ -3164,7 +3158,7 @@ namespace KnoxumsChaosMode
             public readonly List<SpriteRenderer> renderers = new List<SpriteRenderer>();
         }
 
-        public bool Active => KnoxumsChaosModePlugin.StyleConfig?.Value == ChaosStyle.Party;
+        public bool Active => false;
 
         private void Awake()
         {
@@ -5150,8 +5144,7 @@ namespace KnoxumsChaosMode
         }
 
         public IReadOnlyList<GameplayModifierId> ActiveRolls => activeRolls;
-        public bool Enabled =>
-            KnoxumsChaosModePlugin.GameplayModifiersEnabledConfig?.Value ?? false;
+        public bool Enabled => false;
 
         public static void CaptureOptionsClipboardVisual(OptionsMenu menu)
         {
@@ -6287,7 +6280,7 @@ namespace KnoxumsChaosMode
         public bool IsDiscoShuffleActive => KnoxumsChaosModePlugin.IsDiscoShuffleEnabledConfig?.Value ?? false;
         public bool IsBaldiCowardActive => (KnoxumsChaosModePlugin.IsBaldiCowardEnabledConfig?.Value ?? false)
             && !(KnoxumsChaosModePlugin.IsLapsEnabledConfig?.Value ?? false);
-        public bool IsLapsActive => KnoxumsChaosModePlugin.IsLapsEnabledConfig?.Value ?? false;
+        public bool IsLapsActive => false;
         public bool IsLightsOutActive => KnoxumsChaosModePlugin.IsLightsOutEnabledConfig?.Value ?? false;
         public bool IsMirroredActive => KnoxumsChaosModePlugin.IsMirroredEnabledConfig?.Value ?? false;
         public bool IsGooshoesActive => KnoxumsChaosModePlugin.IsGooshoesEnabledConfig?.Value ?? false;
