@@ -1690,7 +1690,8 @@ namespace KnoxumsChaosMode
                     || n.Contains("loading") || n.Contains("load") || n.Contains("notebook")
                     || n.Contains("timer") || n.Contains("pitstop") || n.Contains("pit_stop")
                     || n.Contains("johnny") || n.Contains("store") || n.Contains("shop")
-                    || n.Contains("fieldtrip") || n.Contains("field_trip") || n.Contains("ytp")) return true;
+                    || n.Contains("fieldtrip") || n.Contains("field_trip") || n.Contains("ytp")
+                    || n.Contains("watermark") || n.Contains("knoxumwashere")) return true;
                 c = c.parent;
             }
             return false;
