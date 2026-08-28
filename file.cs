@@ -1828,10 +1828,10 @@ namespace KnoxumsChaosMode
         {
             try
             {
-                if (ChaosManager.Instance == null || !ChaosManager.Instance.IsLevelReady) return;
-                if (ChaosManager.Instance.IsLapsActive) ChaosManager.Instance.InjectLapsIntoHud(__instance);
-
-
+                if (ChaosManager.Instance == null) return;
+                ChaosManager.Instance.InjectBetaWatermarkIntoHud(__instance);
+                if (ChaosManager.Instance.IsLevelReady && ChaosManager.Instance.IsLapsActive)
+                    ChaosManager.Instance.InjectLapsIntoHud(__instance);
             }
             catch { }
         }
@@ -3010,11 +3010,7 @@ namespace KnoxumsChaosMode
         {
             MenuToggle[] toggles = BulkToggles();
             for (int i = 0; i < toggles.Length; i++) SetToggle(toggles[i], enabled);
-            modeI = enabled ? 2 : 0;
-            spawnI = enabled ? 1 : 0;
             SetTemperature(enabled ? 15 : 5);
-            UpdMode();
-            UpdSpawn();
         }
         private void DisableAll() { SetAll(false); }
         private void EnableAll() { SetAll(true); }
@@ -3023,11 +3019,7 @@ namespace KnoxumsChaosMode
             MenuToggle[] toggles = BulkToggles();
             for (int i = 0; i < toggles.Length; i++)
                 SetToggle(toggles[i], Random.Range(0, 2) > 0);
-            modeI = Random.Range(0, 3);
-            spawnI = Random.Range(0, 2);
             SetTemperature(Random.Range(1, 16));
-            UpdMode();
-            UpdSpawn();
         }
         private void OnSL() { spawnI = (spawnI - 1 + 2) % 2; UpdSpawn(); }
         private void OnSR() { spawnI = (spawnI + 1) % 2; UpdSpawn(); }
@@ -6448,9 +6440,8 @@ namespace KnoxumsChaosMode
             if (IsPitstopActive() && !ElevatorUnlockService.PitstopExitArmed) TickPitstopElevators();
             else if (IsGameActive() && !generationBusy) TickClosedElevatorBarriers();
             EnforcePitstopYtp();
+            SyncBetaWatermarkWithHud();
             if (IsLapsActive) SyncLapsHudWithNotebooks();
-
-
         }
 
         private void HandleCode()
@@ -7576,25 +7567,24 @@ namespace KnoxumsChaosMode
         }
         private static TMP_Text MkWatermarkLayer(Transform parent, TMP_FontAsset font, string body, Color color, Vector2 offset)
         {
-            GameObject go = new GameObject(color.r > .5f ? "WatermarkText" : "WatermarkOutline", typeof(RectTransform)); go.transform.SetParent(parent, false);
-            TextMeshProUGUI t = go.AddComponent<TextMeshProUGUI>(); t.fontSize = 9.5f; t.lineSpacing = -8; t.alignment = TextAlignmentOptions.BottomRight;
+            GameObject go = new GameObject("WatermarkText", typeof(RectTransform)); go.transform.SetParent(parent, false);
+            TextMeshProUGUI t = go.AddComponent<TextMeshProUGUI>(); t.fontSize = 8f; t.lineSpacing = -4f; t.alignment = TextAlignmentOptions.BottomRight;
             t.enableWordWrapping = false; t.raycastTarget = false; t.color = color; t.text = body; if (font != null) t.font = font;
             RectTransform r = go.GetComponent<RectTransform>(); r.anchorMin = Vector2.zero; r.anchorMax = Vector2.one; r.offsetMin = r.offsetMax = offset; return t;
         }
         public void CreateBetaWatermarkHud()
         {
-            if (betaWatermarkObj != null || IsPitstopActive()) return;
+            if (betaWatermarkObj != null) return;
             try
             {
                 HudManager hud = Singleton<CoreGameManager>.Instance?.GetHud(0); Canvas canvas = hud?.Canvas(); if (canvas == null) return;
-                betaWatermarkObj = new GameObject("BetaWatermarkHUD", typeof(RectTransform)); betaWatermarkObj.transform.SetParent(canvas.transform, false);
+                betaWatermarkObj = new GameObject("KnoxumWatermarkHUD", typeof(RectTransform)); betaWatermarkObj.transform.SetParent(canvas.transform, false);
                 RectTransform r = betaWatermarkObj.GetComponent<RectTransform>(); r.anchorMin = r.anchorMax = new Vector2(1, 0); r.pivot = new Vector2(1, 0);
-                r.anchoredPosition = new Vector2(-4, 4); r.sizeDelta = new Vector2(400, 50);
-                string body = "<line-height=100%>Knoxum's Chaos Mode\nv1.1</line-height>"; TMP_FontAsset font = GetComicSansFont(hud);
-                Vector2[] o = { new Vector2(-1, 0), new Vector2(1, 0), new Vector2(0, -1), new Vector2(0, 1), new Vector2(-1, -1), new Vector2(1, -1), new Vector2(-1, 1), new Vector2(1, 1) };
-                foreach (Vector2 x in o) MkWatermarkLayer(betaWatermarkObj.transform, font, body, Color.black, x);
-                betaWatermarkText = MkWatermarkLayer(betaWatermarkObj.transform, font, body, Color.white, Vector2.zero);
-                betaWatermarkObj.SetActive(IsAnyChaosOptionActive()); EnsureWatermarkBehindTV(hud, canvas);
+                r.anchoredPosition = new Vector2(-4, 4); r.sizeDelta = new Vector2(180, 28);
+                string body = "<line-height=80%>Knoxum was here\nver. 1.1</line-height>"; TMP_FontAsset font = GetComicSansFont(hud);
+                betaWatermarkText = MkWatermarkLayer(betaWatermarkObj.transform, font, body,
+                    new Color(.035f, .08f, .22f, 1f), Vector2.zero);
+                betaWatermarkObj.SetActive(true); EnsureWatermarkBehindTV(hud, canvas);
             }
             catch { }
         }
@@ -7606,9 +7596,9 @@ namespace KnoxumsChaosMode
         private void EnsureLapsHudBehindTV(HudManager hud, Canvas canvas) { if (lapsHudObj != null) lapsHudObj.transform.SetAsFirstSibling(); }
         public void SyncBetaWatermarkWithHud()
         {
-            if (!IsLevelReady || !IsInGame()) return;
+            if (!IsInGame()) return;
             if (betaWatermarkObj == null && (watermarkRetryTimer -= Time.deltaTime) <= 0f) { watermarkRetryTimer = 1f; CreateBetaWatermarkHud(); }
-            if (betaWatermarkObj != null) betaWatermarkObj.SetActive(!IsPitstopActive() && IsAnyChaosOptionActive());
+            if (betaWatermarkObj != null) betaWatermarkObj.SetActive(true);
         }
         public void DestroyBetaWatermarkHud() { if (betaWatermarkObj != null) Destroy(betaWatermarkObj); betaWatermarkObj = null; betaWatermarkText = null; }
         public void SyncLapsHudWithNotebooks()
