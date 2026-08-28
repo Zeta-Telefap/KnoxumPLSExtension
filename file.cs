@@ -1380,6 +1380,7 @@ namespace KnoxumsChaosMode
                 {
                     ChaosManager.Instance.StopFunSettings();
                     ElevatorUnlockService.KeepPitstopElevatorsOpen(__instance);
+                    ChaosManager.Instance.CreateBetaWatermarkHud();
                     PartyStyleManager.Instance?.ApplyPitstopCrazyMachine(__instance);
                     ChaosManager.Instance.ShowPitstopChaosReminder();
                 }
@@ -6917,11 +6918,14 @@ namespace KnoxumsChaosMode
             if ((bgm != null && ElevatorUnlockService.IsPitstopManager(bgm)) || IsPitstopActive())
             {
                 StopFunSettings(); ElevatorUnlockService.KeepPitstopElevatorsOpen(bgm);
-                ElevatorUnlockService.ClearClosedElevatorFrontBarriers(bgm); return;
+                ElevatorUnlockService.ClearClosedElevatorFrontBarriers(bgm);
+                CreateBetaWatermarkHud();
+                return;
             }
             if (!PlayerAndCameraReady()) { StartFunAfterGeneration(); return; }
             IsLevelReady = true;
             try { ElevatorUnlockService.ClearClosedElevatorFrontBarriers(bgm ?? Singleton<BaseGameManager>.Instance); } catch { }
+            CreateBetaWatermarkHud();
             AllowFunSettings();
             PartyStyleManager.Instance?.ApplyPresents(bgm);
             CreateLapsHud();
@@ -7061,6 +7065,7 @@ namespace KnoxumsChaosMode
             if (IsPitstopActive()) { StopFunSettings(); funWaitRoutine = null; yield break; }
             IsLevelReady = true;
             ElevatorUnlockService.ClearClosedElevatorFrontBarriers(Singleton<BaseGameManager>.Instance);
+            CreateBetaWatermarkHud();
             AllowFunSettings();
             PartyStyleManager.Instance?.ApplyPresents(Singleton<BaseGameManager>.Instance);
             CreateLapsHud();
@@ -9004,8 +9009,10 @@ namespace KnoxumsChaosMode
         [HarmonyPrefix]
         static bool Prefix(Elevator __instance, out bool __state)
         {
-            __state = ElevatorUnlockService.IsPitstopManager(
-                Singleton<BaseGameManager>.Instance);
+            BaseGameManager manager = Singleton<BaseGameManager>.Instance;
+            PlayerManager player = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
+            __state = ElevatorUnlockService.IsPitstopManager(manager)
+                && ElevatorUnlockService.PlayerInside(__instance, player);
             try { return ElevatorUnlockService.OnElevatorButtonPressed(__instance); }
             catch (Exception ex)
             {
@@ -9017,9 +9024,7 @@ namespace KnoxumsChaosMode
         [HarmonyPostfix]
         static void Postfix(Elevator __instance, bool __state)
         {
-            if (!__state || __instance == null) return;
-
-
+            if (!__state || __instance == null || !ElevatorUnlockService.PitstopExitArmed) return;
             ElevatorUnlockService.CloseElevatorDoors(__instance);
             try { Physics.SyncTransforms(); } catch { }
         }
@@ -9124,6 +9129,8 @@ namespace KnoxumsChaosMode
 
             if (IsPitstopManager(b))
             {
+                PlayerManager player = Singleton<CoreGameManager>.Instance?.GetPlayer(0);
+                if (!PlayerInside(e, player)) return false;
                 BeginPitstopDeparture(b, e);
                 return false;
             }
@@ -9211,7 +9218,12 @@ namespace KnoxumsChaosMode
         private static IEnumerator ConfirmExit(BaseGameManager b, float wait) { while (wait > 0 && !loadNextStarted) { wait -= Time.unscaledDeltaTime; yield return null; } if (!loadNextStarted) ForceLoadNext(b); }
         public static void CloseElevatorDoors(Elevator e) { if (e == null) return; try { e.OpenDoor(false); } catch { } R.Set(e, "open", false); R.Set(e, "doorIsOpen", false); Collider c = R.Get<Collider>(e, "gateCollider", null); if (c != null) c.enabled = true; }
         public static bool IsLastOpenElevator(BaseGameManager b, Elevator candidate) { List<Elevator> open = GetElevators(b?.Ec).Where(e => e != null && R.Get<bool>(e, "open", false)).ToList(); return open.Count <= 1 || open[0] == candidate; }
-        public static bool PlayerInside(Elevator e, PlayerManager p) { if (e == null || p == null) return false; Vector3 a = e.transform.position, b = p.transform.position; a.y = b.y = 0; return Vector3.Distance(a, b) <= 14f; }
+        public static bool PlayerInside(Elevator e, PlayerManager p)
+        {
+            if (e == null || p == null) return false;
+            ColliderGroup inside = GetInsideCollider(e);
+            return inside != null && inside.HasPlayer;
+        }
         public static bool IsAlreadyLeaving(BaseGameManager b) { return b == null || loadNextStarted || (ChaosManager.Instance?.IsLapTransitionInProgress ?? false) || R.Get<bool>(b, "ending", false) || R.Get<bool>(b, "exiting", false); }
         public static void ForceLoadNext(BaseGameManager b) { if (b == null || loadNextStarted) return; loadNextStarted = true; try { b.LoadNextLevel(); } catch (Exception ex) { loadNextStarted = false; KnoxumsChaosModePlugin.Log.LogError("ForceLoadNext: " + ex); } }
         public static ColliderGroup GetInsideCollider(Elevator e) { if (e == null) return null; try { PropertyInfo p = e.GetType().GetProperty("InsideCollider", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic); return p?.GetValue(e, null) as ColliderGroup ?? R.Get<ColliderGroup>(e, "insideCollider", null); } catch { return null; } }
