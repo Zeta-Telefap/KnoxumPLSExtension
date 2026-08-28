@@ -3019,7 +3019,11 @@ namespace KnoxumsChaosMode
             MenuToggle[] toggles = BulkToggles();
             for (int i = 0; i < toggles.Length; i++)
                 SetToggle(toggles[i], Random.Range(0, 2) > 0);
+            modeI = Random.Range(0, 3);
+            spawnI = Random.Range(0, 2);
             SetTemperature(Random.Range(1, 16));
+            UpdMode();
+            UpdSpawn();
         }
         private void OnSL() { spawnI = (spawnI - 1 + 2) % 2; UpdSpawn(); }
         private void OnSR() { spawnI = (spawnI + 1) % 2; UpdSpawn(); }
@@ -7465,8 +7469,8 @@ namespace KnoxumsChaosMode
             pitstopReminderObject.transform.SetParent(canvas.transform, false);
             RectTransform rect = pitstopReminderObject.GetComponent<RectTransform>();
 
-            rect.anchorMin = new Vector2(.06f, .28f);
-            rect.anchorMax = new Vector2(.94f, .50f);
+            rect.anchorMin = new Vector2(.06f, .15f);
+            rect.anchorMax = new Vector2(.94f, .37f);
             rect.offsetMin = rect.offsetMax = Vector2.zero;
 
             HudManager reminderHud = null;
@@ -7474,28 +7478,21 @@ namespace KnoxumsChaosMode
 
             TMP_FontAsset font = GetComicSansFont(reminderHud);
             string reminder = "<b>JUST A REMINDER!</b> All applied chaos features are intended to disable in the pitstop, they are only working in the school!";
-            Color[] layerColors = { Color.black, Color.yellow };
-            Vector2[] layerOffsets = { new Vector2(2f, -2f), Vector2.zero };
-            string[] layerNames = { "ReminderShadow", "ReminderText" };
-            for (int i = 0; i < layerColors.Length; i++)
-            {
-                GameObject layer = new GameObject(layerNames[i], typeof(RectTransform));
-                layer.transform.SetParent(pitstopReminderObject.transform, false);
-                RectTransform layerRect = layer.GetComponent<RectTransform>();
-                layerRect.anchorMin = Vector2.zero;
-                layerRect.anchorMax = Vector2.one;
-                layerRect.offsetMin = layerOffsets[i];
-                layerRect.offsetMax = layerOffsets[i];
-                TextMeshProUGUI text = layer.AddComponent<TextMeshProUGUI>();
-                if (font != null) text.font = font;
-                text.text = reminder;
-                text.fontSize = 12f;
-                text.color = layerColors[i];
-                text.alignment = TextAlignmentOptions.Center;
-                text.enableWordWrapping = true;
-                text.overflowMode = TextOverflowModes.Overflow;
-                text.raycastTarget = false;
-            }
+            GameObject layer = new GameObject("ReminderText", typeof(RectTransform));
+            layer.transform.SetParent(pitstopReminderObject.transform, false);
+            RectTransform layerRect = layer.GetComponent<RectTransform>();
+            layerRect.anchorMin = Vector2.zero;
+            layerRect.anchorMax = Vector2.one;
+            layerRect.offsetMin = layerRect.offsetMax = Vector2.zero;
+            TextMeshProUGUI text = layer.AddComponent<TextMeshProUGUI>();
+            if (font != null) text.font = font;
+            text.text = reminder;
+            text.fontSize = 9.5f;
+            text.color = new Color(.82f, .3f, .035f, 1f);
+            text.alignment = TextAlignmentOptions.Center;
+            text.enableWordWrapping = true;
+            text.overflowMode = TextOverflowModes.Overflow;
+            text.raycastTarget = false;
             CanvasGroup group = pitstopReminderObject.GetComponent<CanvasGroup>();
             group.interactable = false;
             group.blocksRaycasts = false;
