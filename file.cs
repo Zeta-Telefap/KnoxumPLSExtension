@@ -2997,7 +2997,7 @@ namespace KnoxumsChaosMode
             return new[]
             {
                 chaosT, evtPT, chrPT, itmPT, chrST, itmST, strT, sndT, mischiefT,
-                iplT, cplT, beT, deT, discoT, baldiCowardT, inclT, warningT,
+                iplT, cplT, beT, deT, discoT, baldiCowardT, inclT,
                 lightsOutT, mirroredT, gooshoesT, lbTestT
             };
         }
