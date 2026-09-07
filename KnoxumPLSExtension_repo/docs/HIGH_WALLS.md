@@ -87,6 +87,25 @@ int32  count
   галка **Юбка под полом**, кнопка пересборки геометрии.
 - Изменения пишутся в undo (`EditorController.AddUndo`) и сохраняются в `.ebpl`.
 
+## Проверка API (что именно све́рено, а не «должно работать»)
+
+Файл **не собирался** — в песочнице нет компилятора (см. ниже). Вместо этого каждый
+внешний вызов све́рен с первоисточником:
+
+| Источник | Что проверено | Результат |
+|---|---|---|
+| `ultimate_dev_mods_decompile.cs` | 37 типов/членов игры, PLS и формата уровня (полный список в `docs/DECOMPILE_ANALYSIS.md`) | все 37 найдены с подходящими сигнатурами |
+| `ultimate_dev_mods_decompile.cs` | `EditorController.Compile()` объявлен ровно 1 раз (стр. 133792) | нет «ambiguous match» в Harmony |
+| `ultimate_dev_mods_decompile.cs` | `RoomSettingsExchangeHandler.UpdateTextures()` — без аргументов | патч корректен |
+| BepInEx 5.4.21 (исходники) | `BepInPlugin(string, string, string)`, `ConfigFile.Bind<T>(section, key, default, string description)` (стр. 312), `BaseUnityPlugin.Config`, `.Logger` | совпадает |
+| Harmony 2 (исходники) | `HarmonyPatch(Type, string)` и `HarmonyPatch(Type, string, params Type[])`, `Harmony.PatchAll()` | совпадает |
+
+**Почему нет компиляции.** В песочнице только частичный доступ в сеть: отвечают
+`github.com`, `codeload.github.com`, `pypi.org`; заблокированы `nuget.org`,
+все CDN Microsoft (`builds.dotnet.microsoft.com`, `download.visualstudio.microsoft.com`),
+`deb.debian.org`. То есть ни .NET SDK, ни Mono, ни пакеты NuGet скачать нельзя —
+референсные сборки Unity тем более. Проверка компиляцией возможна только на машине с игрой.
+
 ## Известные ограничения
 
 1. `yOffset` не поднимает игрока/NPC (см. выше) — только геометрию.
