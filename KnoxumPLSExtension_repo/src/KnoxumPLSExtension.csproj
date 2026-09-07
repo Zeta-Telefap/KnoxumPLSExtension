@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- =====================================================================
+       Сборка KnoxumPLSExtension.
+
+       Использование:
+         dotnet build KnoxumPLSExtension.csproj -p:GameDir="C:\Program Files (x86)\Steam\steamapps\common\Baldi's Basics Plus"
+
+       GameDir — папка игры (там лежат BepInEx и папка *_Data).
+       Готовая DLL уезжает в BepInEx\plugins.
+       ===================================================================== -->
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>KnoxumPLSExtension</AssemblyName>
+    <RootNamespace>KnoxumPLSExtension</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <DebugType>portable</DebugType>
+
+    <!-- Референсы не копируются в выход — они уже есть в игре -->
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+
+    <!-- Путь по умолчанию можешь поменять под себя один раз -->
+    <GameDir Condition="'$(GameDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Baldi's Basics Plus</GameDir>
+    <PluginOut Condition="'$(PluginOut)' == ''">$(GameDir)\BepInEx\plugins</PluginOut>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Только актуальные исходники. Архив WIP (.txt) сюда не попадает. -->
+    <Compile Include="Features\**\*.cs" />
+  </ItemGroup>
+
+  <!-- Ссылки подбираются по маске, поэтому не нужно знать точные имена сборок -->
+  <ItemGroup>
+    <GameManaged Include="$(GameDir)\*_Data\Managed\*.dll" />
+    <BepInCore Include="$(GameDir)\BepInEx\core\*.dll" />
+    <BepInPlugins Include="$(GameDir)\BepInEx\plugins\**\*.dll" />
+    <BepInPatchers Include="$(GameDir)\BepInEx\patchers\*.dll" />
+    <BepInUnhollowed Include="$(GameDir)\BepInEx\unhollowed\*.dll" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="@(GameManaged)" Private="false" />
+    <Reference Include="@(BepInCore)" Private="false" />
+    <Reference Include="@(BepInPlugins)" Private="false" />
+    <Reference Include="@(BepInPatchers)" Private="false" />
+    <Reference Include="@(BepInUnhollowed)" Private="false" />
+  </ItemGroup>
+
+  <Target Name="CheckGameDir" BeforeTargets="BeforeBuild">
+    <Error Condition="'$(GameDir)' == '' or !Exists('$(GameDir)')"
+           Text="Укажи путь к игре: -p:GameDir=&quot;путь&quot;. Сейчас: '$(GameDir)'" />
+  </Target>
+
+  <Target Name="CopyPlugin" AfterTargets="Build" Condition="Exists('$(PluginOut)')">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PluginOut)" />
+    <Message Importance="high" Text="Готово: $(PluginOut)\$(TargetFileName)" />
+  </Target>
+
+</Project>
