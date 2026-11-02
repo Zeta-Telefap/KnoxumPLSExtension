@@ -32,13 +32,22 @@ UI — минимализм + Comic Sans, русский язык.
 - `../KnoxumPLSExtension_repo/docs/BB_SIMPLE_MODDER_PROMPT.md` — гигантский промпт.
 - `../KnoxumPLSExtension_repo/docs/UI_XAML_WINDOWS.md` — все окна с XAML/C#.
 
-## Сборка
+## Сборка и запуск
 
 ```
 dotnet restore
 dotnet build -c Release
 tests: dotnet run --project tests/BBPlusSimpleModder.Core.Tests
 ```
+
+**В Visual Studio: запускаемый проект — `BBPlusSimpleModder` (WPF-приложение).**
+Solution Explorer → правый клик на проект `BBPlusSimpleModder` →
+**«Назначить запускаемым проектом» (Set as Startup Project)** → F5.
+(Или: свойства решения → Common Properties → Startup Project → Single startup project → BBPlusSimpleModder.)
+
+Если F5 ругается «библиотека классов … нельзя запустить напрямую» — значит выделен
+Core/Compiler/Tests; переключите startup project на приложение, и появится окно
+(StartupWindow).
 
 Референсы для компиляции модов берутся из папки игры пользователя
 (`BALDI_Data/Managed`, `BepInEx/core`, `BepInEx/plugins`) — сам код игры не распространяется.
