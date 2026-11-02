@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Emit;
@@ -59,9 +60,10 @@ public static class RoslynCompiler
         using var pdbStream = new MemoryStream();
         using var xmlStream = new MemoryStream();
 
+        // XML-документация пишется через xmlDocumentationStream в Emit(...) ниже;
+        // отдельного documentationFilePath у EmitOptions в Roslyn 4.x нет.
         var emitOptions = new EmitOptions(
-            debugInformationFormat: DebugInformationFormat.PortablePdb,
-            documentationFilePath: assemblyName + ".xml");
+            debugInformationFormat: DebugInformationFormat.PortablePdb);
 
         var emit = compilation.Emit(
             peStream: peStream,
