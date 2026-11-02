@@ -5,6 +5,9 @@ using System.Windows.Media.Imaging;
 using BBPlusSimpleModder.Core.Models;
 using BBPlusSimpleModder.Services;
 using Microsoft.Win32;
+using System.IO;
+using System.Linq;
+using System.Windows.Input;
 
 namespace BBPlusSimpleModder.Views.Controls;
 

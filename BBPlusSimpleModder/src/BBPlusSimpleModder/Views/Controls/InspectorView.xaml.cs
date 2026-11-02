@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using BBPlusSimpleModder.Core.Models;
+using System.Linq;
 
 namespace BBPlusSimpleModder.Views.Controls;
 
@@ -97,7 +98,7 @@ public partial class InspectorView : UserControl
                 var preview = new Border
                 {
                     Width = 24, Height = 24, Margin = new Thickness(0, 4, 0, 0),
-                    BorderBrush = Brushes.Gray, BorderThickness = 1
+                    BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1)
                 };
                 try { preview.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(s)); } catch { }
                 tb.TextChanged += (_, _) =>

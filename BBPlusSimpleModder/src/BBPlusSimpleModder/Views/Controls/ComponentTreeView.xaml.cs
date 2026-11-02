@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using BBPlusSimpleModder.Core.Models;
 using BBPlusSimpleModder.Services;
 using BBPlusSimpleModder.Views.Dialogs;
+using System.Windows.Input;
 
 namespace BBPlusSimpleModder.Views.Controls;
 

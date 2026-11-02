@@ -3,6 +3,8 @@ using System.Windows.Input;
 using BBPlusSimpleModder.Core.Models;
 using BBPlusSimpleModder.Services;
 using Microsoft.Win32;
+using System.IO;
+using System.Threading.Tasks;
 
 namespace BBPlusSimpleModder.Views;
 

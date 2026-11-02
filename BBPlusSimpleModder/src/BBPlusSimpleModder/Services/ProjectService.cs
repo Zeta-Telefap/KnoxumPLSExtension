@@ -1,14 +1,15 @@
 using BBPlusSimpleModder.Core.Models;
+using System.IO;
 
 namespace BBPlusSimpleModder.Services;
 
 /// <summary>Создание/загрузка/сохранение проекта мода (*.bbmod.json + папки).</summary>
 public class ProjectService
 {
-    private readonly SettingsModel _settings;
+    private readonly SettingsService _settings;
     private readonly Logger _logger;
 
-    public ProjectService(SettingsModel settings, Logger logger)
+    public ProjectService(SettingsService settings, Logger logger)
     {
         _settings = settings;
         _logger = logger;
@@ -36,8 +37,8 @@ public class ProjectService
         project.Root.Name = name;
         project.Save(dir);
 
-        _settings.AddRecent(Path.Combine(dir, ModProject.ProjectFileName), name, guid);
-        _settings.LastGamePath = gamePath;
+        _settings.Model.AddRecent(Path.Combine(dir, ModProject.ProjectFileName), name, guid);
+        _settings.Model.LastGamePath = gamePath;
         _settings.Save();
         _logger.Info($"Создан проект {name} ({guid}) в {dir}");
         return Path.Combine(dir, ModProject.ProjectFileName);
@@ -46,7 +47,7 @@ public class ProjectService
     public ModProject Load(string projectPath)
     {
         var p = ModProject.Load(projectPath);
-        _settings.AddRecent(projectPath, p.Name, p.Guid);
+        _settings.Model.AddRecent(projectPath, p.Name, p.Guid);
         _settings.Save();
         return p;
     }

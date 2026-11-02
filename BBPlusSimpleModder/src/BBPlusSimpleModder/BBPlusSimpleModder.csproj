@@ -11,6 +11,17 @@
     <AssemblyName>BBPlusSimpleModder</AssemblyName>
   </PropertyGroup>
 
+  <!-- глобальные using: страховка, чтобы System.IO и Ко были видны всегда -->
+  <ItemGroup>
+    <Using Include="System" />
+    <Using Include="System.Collections.Generic" />
+    <Using Include="System.IO" />
+    <Using Include="System.Linq" />
+    <Using Include="System.Net.Http" />
+    <Using Include="System.Threading" />
+    <Using Include="System.Threading.Tasks" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\BBPlusSimpleModder.Core\BBPlusSimpleModder.Core.csproj" />
     <ProjectReference Include="..\BBPlusSimpleModder.Compiler\BBPlusSimpleModder.Compiler.csproj" />

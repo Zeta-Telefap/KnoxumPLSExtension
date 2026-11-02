@@ -7,6 +7,8 @@ using BBPlusSimpleModder.Core.LvlFormat;
 using BBPlusSimpleModder.Core.Models;
 using BBPlusSimpleModder.Services;
 using Microsoft.Win32;
+using System.IO;
+using System.Linq;
 
 namespace BBPlusSimpleModder.Views.Controls;
 
@@ -28,8 +30,8 @@ public partial class LevelEditorView : UserControl
     public void Bind(ModProject p)
     {
         _project = p;
-        var existing = Directory.Exists(Path.Combine(p.ProjectDir, "levels"))
-            ? Directory.GetFiles(Path.Combine(p.ProjectDir, "levels"), "*.lvl").FirstOrDefault()
+        var existing = Directory.Exists(System.IO.Path.Combine(p.ProjectDir, "levels"))
+            ? Directory.GetFiles(System.IO.Path.Combine(p.ProjectDir, "levels"), "*.lvl").FirstOrDefault()
             : null;
         if (existing != null)
         {
@@ -146,8 +148,8 @@ public partial class LevelEditorView : UserControl
         {
             Filter = "Уровень BB+ (*.lvl)|*.lvl",
             FileName = "level1.lvl",
-            InitialDirectory = Directory.Exists(Path.Combine(_project.ProjectDir, "levels"))
-                ? Path.Combine(_project.ProjectDir, "levels")
+            InitialDirectory = Directory.Exists(System.IO.Path.Combine(_project.ProjectDir, "levels"))
+                ? System.IO.Path.Combine(_project.ProjectDir, "levels")
                 : _project.ProjectDir
         };
         if (sfd.ShowDialog() == true) _lvl.Write(sfd.FileName, _level);

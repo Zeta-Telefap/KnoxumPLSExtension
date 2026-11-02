@@ -2,6 +2,8 @@ using System.Windows;
 using BBPlusSimpleModder.Core.Models;
 using BBPlusSimpleModder.Services;
 using Microsoft.Win32;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace BBPlusSimpleModder.Views;
 

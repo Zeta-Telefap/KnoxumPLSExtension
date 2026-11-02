@@ -1,3 +1,4 @@
+using System.IO;
 namespace BBPlusSimpleModder.Services;
 
 /// <summary>Простой логгер: событие для UI + файл в папке приложения.</summary>

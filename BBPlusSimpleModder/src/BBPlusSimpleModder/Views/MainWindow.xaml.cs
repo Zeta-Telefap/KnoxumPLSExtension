@@ -29,7 +29,7 @@ public partial class MainWindow : Window
         Closing += (_, _) => _logTimer.Stop();
     }
 
-    private void OnLoaded()
+    private void OnLoaded(object sender, RoutedEventArgs e)
     {
         Project = _projects.Load(ProjectPath);
         Title = $"BB+ Simple Modder — {Project.Name} ({Project.Guid})";

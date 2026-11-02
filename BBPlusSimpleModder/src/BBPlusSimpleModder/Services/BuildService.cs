@@ -3,6 +3,10 @@ using System.Text.Json;
 using BBPlusSimpleModder.Compiler;
 using BBPlusSimpleModder.Core.Codegen;
 using BBPlusSimpleModder.Core.Models;
+using System.IO;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace BBPlusSimpleModder.Services;
 

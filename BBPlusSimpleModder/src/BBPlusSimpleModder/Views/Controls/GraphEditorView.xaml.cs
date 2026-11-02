@@ -6,6 +6,9 @@ using System.Windows.Shapes;
 using BBPlusSimpleModder.Core.BlockEngine;
 using BBPlusSimpleModder.Core.Codegen;
 using BBPlusSimpleModder.Services;
+using System.IO;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace BBPlusSimpleModder.Views.Controls;
 
@@ -106,7 +109,7 @@ public partial class GraphEditorView : UserControl
             Width = 200,
             Background = Brushes.White,
             BorderBrush = new SolidColorBrush(Color.FromRgb(0x5C, 0x44, 0x00)),
-            BorderThickness = 2,
+            BorderThickness = new Thickness(2),
             CornerRadius = new CornerRadius(8),
             Tag = node
         };
@@ -180,8 +183,11 @@ public partial class GraphEditorView : UserControl
         }
 
         border.Child = panel;
-        border.MouseLeftButtonDown += (s, e) => Select(node);
-        border.MouseDoubleClick += (s, e) => EditNodeValues(node);
+        border.MouseLeftButtonDown += (s, e) =>
+        {
+            Select(node);
+            if (e.ClickCount == 2) EditNodeValues(node);   // у Border нет MouseDoubleClick — считаем клики сами
+        };
         Canvas.SetLeft(border, node.X);
         Canvas.SetTop(border, node.Y);
         NodesCanvas.Children.Add(border);

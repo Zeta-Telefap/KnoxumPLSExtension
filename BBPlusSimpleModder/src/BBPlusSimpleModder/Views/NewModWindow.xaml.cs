@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using BBPlusSimpleModder.Services;
+using System.IO;
 
 namespace BBPlusSimpleModder.Views;
 

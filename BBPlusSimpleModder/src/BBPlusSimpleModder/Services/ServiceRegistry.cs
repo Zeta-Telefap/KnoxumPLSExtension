@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 namespace BBPlusSimpleModder.Services;
 
 /// <summary>DI-lite: реестр сервисов приложения (App.Services).</summary>
@@ -18,7 +19,7 @@ public class ServiceRegistry
         Register<SettingsService>(settings);
         Register(settings.Model);   // SettingsModel как сервис
         Register(new GameEnvironmentService(settings.Model, logger));
-        Register(new ProjectService(settings.Model, logger));
+        Register(new ProjectService(settings, logger));
         Register(new AssetImportService(logger));
         Register(new BlockCatalogService(logger));
         Register(new LvlFormatService(logger));
