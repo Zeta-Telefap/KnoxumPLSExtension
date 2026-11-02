@@ -1,0 +1,31 @@
+<Window x:Class="BBPlusSimpleModder.Views.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="⚙ Настройки" SizeToContent="WidthAndHeight" WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
+    <StackPanel Margin="14" Width="540">
+        <TextBlock Style="{StaticResource HeaderLabel}" Text="⚙ Настройки мода"/>
+
+        <TextBlock Text="Папка игры BB+:"/>
+        <TextBox x:Name="GamePathBox"/>
+
+        <GroupBox Header="Куда класть собранный плагин">
+            <StackPanel>
+                <RadioButton x:Name="PluginFlat" Content="Плоско: BepInEx/plugins/{GUID}.dll (+ .pdb/.xml рядом)" IsChecked="True" Margin="0,2"/>
+                <RadioButton x:Name="PluginFolder" Content="Папкой: BepInEx/plugins/{GUID}/ (dll+pdb+xml внутри)" Margin="0,2"/>
+            </StackPanel>
+        </GroupBox>
+
+        <GroupBox Header="Автоустановка при отсутствии (URL — в downloads.json / settings.json)">
+            <StackPanel>
+                <CheckBox x:Name="AutoBepInEx" Content="BepInEx 5.x (win x64, с GitHub releases)" IsChecked="True" Margin="0,2"/>
+                <CheckBox x:Name="AutoDevApi" Content="MTM101BaldAPI в BepInEx/plugins" IsChecked="True" Margin="0,2"/>
+                <CheckBox x:Name="AutoPls" Content="Plus Level Studio + Loader (опционально)" Margin="0,2"/>
+            </StackPanel>
+        </GroupBox>
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+            <Button Content="Отмена" Click="Cancel_Click"/>
+            <Button Content="Сохранить ✔" Click="Save_Click" IsDefault="True"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

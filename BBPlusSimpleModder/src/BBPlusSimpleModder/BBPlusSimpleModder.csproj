@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>BBPlusSimpleModder</RootNamespace>
+    <AssemblyName>BBPlusSimpleModder</AssemblyName>
+    <ApplicationManifest></ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BBPlusSimpleModder.Core\BBPlusSimpleModder.Core.csproj" />
+    <ProjectReference Include="..\BBPlusSimpleModder.Compiler\BBPlusSimpleModder.Compiler.csproj" />
+  </ItemGroup>
+
+  <!-- System.Windows.Forms нужен только для FolderBrowserDialog в StartupWindow -->
+  <ItemGroup>
+    <UseWindowsForms>true</UseWindowsForms>
+  </ItemGroup>
+
+</Project>

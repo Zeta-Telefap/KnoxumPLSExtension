@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>BBPlusSimpleModder.Compiler</RootNamespace>
+    <AssemblyName>BBPlusSimpleModder.Compiler</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- компиляция модов in-memory: DLL + портативный PDB + XML-док -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+    <!-- метаданные сборок игры (каталог блоков, импорт чужих модов) -->
+    <PackageReference Include="Mono.Cecil" Version="0.11.5" />
+    <!-- декомпиляция чужих модов обратно в кирпичики/raw-блоки -->
+    <PackageReference Include="ICSharpCode.Decompiler" Version="8.2.0.7535" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BBPlusSimpleModder.Core\BBPlusSimpleModder.Core.csproj" />
+  </ItemGroup>
+
+</Project>

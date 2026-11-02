@@ -1,0 +1,53 @@
+<UserControl x:Class="BBPlusSimpleModder.Views.Controls.GraphEditorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:engine="clr-namespace:BBPlusSimpleModder.Core.BlockEngine;assembly=BBPlusSimpleModder.Core"
+             xmlns:svc="clr-namespace:BBPlusSimpleModder.Services">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="280" MinWidth="180"/>
+            <ColumnDefinition Width="5"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Палитра блоков -->
+        <DockPanel Grid.Column="0">
+            <TextBox x:Name="PaletteSearch" DockPanel.Dock="Top" Margin="4"
+                     TextChanged="PaletteSearch_Changed" ToolTip="Поиск блока… (Ctrl+F)"/>
+            <TreeView x:Name="Palette" MouseDoubleClick="Palette_DoubleClick" BorderThickness="0">
+                <TreeView.Resources>
+                    <HierarchicalDataTemplate DataType="{x:Type svc:BlockCatalogService+BlockCategory}"
+                                              ItemsSource="{Binding Blocks}">
+                        <TextBlock Text="{Binding Category}" FontWeight="Bold" Margin="0,4"/>
+                    </HierarchicalDataTemplate>
+                    <DataTemplate DataType="{x:Type engine:BlockDefinition}">
+                        <TextBlock Text="{Binding Title}" ToolTip="{Binding Description}"/>
+                    </DataTemplate>
+                </TreeView.Resources>
+            </TreeView>
+        </DockPanel>
+
+        <GridSplitter Grid.Column="1" HorizontalAlignment="Stretch" Background="#E0A800"/>
+
+        <!-- Канвас графа -->
+        <Grid Grid.Column="2" Background="#FFFBEA">
+            <ScrollViewer x:Name="Scroller" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                          CanContentScroll="False" PreviewMouseWheel="Scroller_PreviewMouseWheel">
+                <Grid x:Name="ZoomLayer" Width="4000" Height="3000">
+                    <Grid.RenderTransform>
+                        <ScaleTransform x:Name="Zoom"/>
+                    </Grid.RenderTransform>
+                    <Canvas x:Name="WiresCanvas" IsHitTestVisible="False"/>
+                    <Canvas x:Name="NodesCanvas" Background="Transparent" Focusable="True"
+                            MouseLeftButtonDown="Canvas_MouseLeftButtonDown"
+                            MouseMove="Canvas_MouseMove"
+                            MouseLeftButtonUp="Canvas_MouseLeftButtonUp"
+                            MouseRightButtonDown="Canvas_MouseRightButtonDown"/>
+                </Grid>
+            </ScrollViewer>
+            <TextBlock HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="8" Opacity="0.6"
+                       TextWrapping="Wrap" MaxWidth="700"
+                       Text="🖱️ Колесо — масштаб • ЛКМ за шапку блока — двигать • ЛКМ на кружке-порте — провод • ПКМ — добавить блок • Del — удалить • Ctrl+Z / Ctrl+Y — отмена / повтор • Ctrl+F — поиск блока"/>
+        </Grid>
+    </Grid>
+</UserControl>

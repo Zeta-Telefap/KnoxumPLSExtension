@@ -1,0 +1,12 @@
+<UserControl x:Class="BBPlusSimpleModder.Views.Controls.InspectorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <DockPanel>
+        <TextBlock DockPanel.Dock="Top" Style="{StaticResource HeaderLabel}" Text="🔍 Инспектор"/>
+        <Button DockPanel.Dock="Bottom" x:Name="OpenGraphBtn" Content="🧩 Открыть логику (кирпичики)"
+                Click="OpenGraph_Click" Visibility="Collapsed" Margin="4"/>
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="PropsPanel" Margin="6"/>
+        </ScrollViewer>
+    </DockPanel>
+</UserControl>
