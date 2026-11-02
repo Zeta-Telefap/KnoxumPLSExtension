@@ -11,7 +11,6 @@ public partial class StartupWindow : Window
 {
     private readonly GameEnvironmentService _env = App.Services.Get<GameEnvironmentService>();
     private readonly SettingsService _settings = App.Services.Get<SettingsService>();
-    private readonly ProjectService _projects = App.Services.Get<ProjectService>();
 
     public StartupWindow()
     {

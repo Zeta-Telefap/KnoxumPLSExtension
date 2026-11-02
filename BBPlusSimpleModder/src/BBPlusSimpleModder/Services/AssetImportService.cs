@@ -15,7 +15,7 @@ public class AssetImportService
 
     public List<AssetEntry> ImportFiles(IEnumerable<string> files, ModComponent parent, ModProject? project = null)
     {
-        project ??= FindProject(parent);
+        ArgumentNullException.ThrowIfNull(project);
         var result = new List<AssetEntry>();
         foreach (var file in files)
         {
@@ -23,7 +23,7 @@ public class AssetImportService
             {
                 var kind = AssetKindUtil.FromExtension(file);
                 var sub = AssetKindUtil.SubFolder(kind);
-                var assetsRoot = Path.Combine(project!.ProjectDir, "assets", sub);
+                var assetsRoot = Path.Combine(project.ProjectDir, "assets", sub);
                 Directory.CreateDirectory(assetsRoot);
 
                 var fileName = Path.GetFileName(file);
@@ -72,12 +72,6 @@ public class AssetImportService
         var abs = Path.Combine(project.ProjectDir, entry.RelativePath);
         try { if (File.Exists(abs)) File.Delete(abs); } catch { }
         project.Assets.Remove(entry);
-    }
-
-    private static ModProject? FindProject(ModComponent c)
-    {
-        // поднимаемся к root — проект на стороне вызывающего кода; здесь просто null
-        return null;
     }
 
     /// <summary>Абсолютный путь к файлу ассета внутри папки проекта.</summary>

@@ -205,7 +205,34 @@ public class GraphToCSharp
         return slug;
     }
 
-    private static string Sanitize(string name) => Regex.Replace(name ?? "x", "[^A-Za-z0-9_]", "_");
+    /// <summary>Имя переменной → валидный C#-идентификатор (кириллица → _).</summary>
+    public static string Sanitize(string name) => Regex.Replace(string.IsNullOrEmpty(name) ? "x" : name, "[^A-Za-z0-9_]", "_");
+
+    /// <summary>
+    /// Имя класса для компонента (с защитой от коллизий через usedNames):
+    /// «Куст» (Character) → KustNPC, при занятости → KustNPC_ab12.
+    /// </summary>
+    public static string ClassNameFor(ModComponent c, HashSet<string>? used = null)
+    {
+        var slug = Slug(c.Name);
+        var baseName = c.Kind switch
+        {
+            ComponentKind.Character => slug + "NPC",
+            ComponentKind.Item => slug + "Item",
+            ComponentKind.Event => slug + "Event",
+            ComponentKind.Patch => slug + "Patch",
+            _ => slug + "Component"
+        };
+        if (used == null) return baseName;
+        var name = baseName;
+        int k = 0;
+        while (!used.Add(name))
+        {
+            k++;
+            name = baseName + "_" + c.Id[..4] + (k > 1 ? k.ToString() : "");
+        }
+        return name;
+    }
 
     /// <summary>Базовый класс генерируемого компонента.</summary>
     public static string BaseClass(ComponentKind kind) => kind switch
@@ -217,17 +244,11 @@ public class GraphToCSharp
         _ => "MonoBehaviour"
     };
 
-    /// <summary>Полный C# файл класса компонента (его граф → метод).</summary>
-    public string GenerateClassFile(ModComponent c)
+    /// <summary>Полный C# файл класса компонента (его граф → метод). usedNames — для уникальности имён классов.</summary>
+    public string GenerateClassFile(ModComponent c, HashSet<string>? usedNames = null)
     {
         var slug = Slug(c.Name);
-        var className = c.Kind switch
-        {
-            ComponentKind.Character => slug + "NPC",
-            ComponentKind.Item => slug + "Item",
-            ComponentKind.Event => slug + "Event",
-            _ => slug + "Component"
-        };
+        var className = ClassNameFor(c, usedNames);
         var sb = new StringBuilder();
         sb.AppendLine("// Сгенерировано BB+ Simple Modder из кирпичиков. Не редактируйте руками.");
         sb.AppendLine("using System;");
@@ -238,7 +259,7 @@ public class GraphToCSharp
         sb.AppendLine("{");
         if (c.Kind == ComponentKind.Patch)
         {
-            sb.AppendLine(GeneratePatchClass(c, slug));
+            sb.AppendLine(GeneratePatchClass(c, usedNames));
         }
         else
         {
@@ -255,8 +276,9 @@ public class GraphToCSharp
     }
 
     /// <summary>Статический Harmony-патч-класс из компонента Patch (цель/метод — в свойствах).</summary>
-    public string GeneratePatchClass(ModComponent c, string slug)
+    public string GeneratePatchClass(ModComponent c, HashSet<string>? usedNames = null)
     {
+        var slug = ClassNameFor(c, usedNames);
         var target = c.Properties.TryGetValue("Цель (класс)", out var t) ? t?.ToString() ?? "Baldi" : "Baldi";
         var method = c.Properties.TryGetValue("Метод", out var m) ? m?.ToString() ?? "Method" : "Method";
         var kind = c.Properties.TryGetValue("Тип патча", out var k) && k?.ToString() == "Postfix"
@@ -281,7 +303,7 @@ public class GraphToCSharp
     }
 
     /// <summary>Главный класс плагина (BepInPlugin + зависимости + регистрация сущностей).</summary>
-    public string GeneratePluginFile(ModProject p)
+    public string GeneratePluginFile(ModProject p, HashSet<string>? usedNames = null)
     {
         var slug = Slug(p.Name);
         var sb = new StringBuilder();
@@ -310,7 +332,7 @@ public class GraphToCSharp
         foreach (var c in p.AllComponents())
         {
             if (c.Kind == ComponentKind.Character && c.Graph != null)
-                sb.AppendLine($"            var npc_{Slug(c.Name)} = new NPCBuilder<{Slug(c.Name)}Mod.Generated.{Slug(c.Name)}NPC>(Info).Build();");
+                sb.AppendLine($"            var npc_{Slug(c.Name)} = new NPCBuilder<{Slug(c.Name)}Mod.Generated.{ClassNameFor(c, usedNames)}>(Info).Build();");
             if (c.Kind == ComponentKind.Item)
                 sb.AppendLine($"            // TODO: ItemBuilder для {c.Name}");
             if (c.Kind == ComponentKind.Event)

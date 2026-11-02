@@ -50,6 +50,8 @@ public class EmitContext
         {
             var srcNode = Graph.FindNode(wire.From.NodeId);
             var srcDef = srcNode == null ? null : Resolve(srcNode.BlockId);
+            if (srcNode != null && srcDef != null && srcNode.BlockId == "flow.for" && wire.From.PortName == "i")
+                return "i";   // счётчик цикла for
             if (srcNode != null && srcDef?.IsExpression == true && srcDef.EmitExpr != null)
                 return srcDef.EmitExpr(srcNode, new EmitContext(Graph, srcNode, Resolve));
             return $"/* нет выражения: {wire.From} */ null";

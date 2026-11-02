@@ -13,11 +13,12 @@ public partial class NewModWindow : Window
 
     private static readonly Regex GuidRx = new(@"^[a-z0-9]+(\.[a-z0-9_]+)+$", RegexOptions.Compiled);
     private bool _guidTouched;
+    private bool _settingGuid;
 
     public NewModWindow()
     {
         InitializeComponent();
-        GuidBox.TextChanged += (_, _) => _guidTouched = true;
+        GuidBox.TextChanged += (_, _) => { if (!_settingGuid) _guidTouched = true; };
     }
 
     private void Name_Changed(object sender, TextChangedEventArgs e)
@@ -25,7 +26,11 @@ public partial class NewModWindow : Window
         if (_guidTouched) return;
         var slug = Slugify(NameBox.Text);
         if (slug.Length > 0)
-            GuidBox.Text = $"com.knoxum.baldiplus.simplemodder.{slug}";
+        {
+            _settingGuid = true;
+            try { GuidBox.Text = $"com.knoxum.baldiplus.simplemodder.{slug}"; }
+            finally { _settingGuid = false; }
+        }
     }
 
     /// <summary>«Chaos School» → «chaos_school» (для GUID и имени сборки).</summary>

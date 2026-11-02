@@ -1,3 +1,5 @@
+using BBPlusSimpleModder.Core.Codegen;
+
 namespace BBPlusSimpleModder.Core.BlockEngine;
 
 /// <summary>
@@ -60,7 +62,7 @@ public static class BlockCatalog
             expr: (n, c) => c.Input("value", DataType.Vector3), isExpr: true),
         Def("var.get", "Получить переменную", "Данные", "📥", "Значение переменной графа",
             d => { d.Ports.Add(BlockPort.DataOut("value", DataType.Any)); },
-            expr: (n, c) => n.Values.TryGetValue("имя", out var v) ? v?.ToString() ?? "x" : "x", isExpr: true),
+            expr: (n, c) => GraphToCSharp.Sanitize(n.Values.TryGetValue("имя", out var v) && v != null ? v.ToString()! : "x"), isExpr: true),
         Def("math.op", "Математика (+ − × ÷)", "Данные", "➕", "a op b",
             d => { d.Ports.Add(BlockPort.DataIn("a", DataType.Float)); d.Ports.Add(BlockPort.DataIn("b", DataType.Float));
                    d.Ports.Add(BlockPort.DataOut("result", DataType.Float)); },
@@ -108,7 +110,7 @@ public static class BlockCatalog
             emit: (n, c) => c.Input("expr", DataType.Any) + ";"),
         Def("stmt.setvar", "Задать переменную", "Поток", "📤", "переменная = значение",
             d => { d.Ports.Add(BlockPort.ExecIn()); d.Ports.Add(BlockPort.DataIn("value", DataType.Any)); d.Ports.Add(BlockPort.ExecOut()); },
-            emit: (n, c) => (n.Values.TryGetValue("имя", out var v) ? v?.ToString() : "x") + " = " + c.Input("value", DataType.Any) + ";"),
+            emit: (n, c) => GraphToCSharp.Sanitize(n.Values.TryGetValue("имя", out var v) && v != null ? v.ToString()! : "x") + " = " + c.Input("value", DataType.Any) + ";"),
         Def("stmt.raw", "Свой C# код", "Поток", "📝", "Сырой C# (вставляется как есть)",
             d => { d.Ports.Add(BlockPort.ExecIn()); d.Ports.Add(BlockPort.ExecOut()); },
             emit: (n, c) => n.Values.TryGetValue("code", out var v) ? v?.ToString() ?? "// код" : "// код"),

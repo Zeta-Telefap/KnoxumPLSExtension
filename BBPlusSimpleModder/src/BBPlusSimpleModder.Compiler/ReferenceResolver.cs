@@ -49,6 +49,6 @@ public static class ReferenceResolver
     {
         if (!Directory.Exists(gamePath)) return null;
         return Directory.GetFiles(gamePath, "*.exe")
-            .FirstOrDefault(f => !Path.GetFileName(f).Equals("UnityCrashHandler64.exe", StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(f => !Path.GetFileName(f).StartsWith("UnityCrashHandler", StringComparison.OrdinalIgnoreCase));
     }
 }

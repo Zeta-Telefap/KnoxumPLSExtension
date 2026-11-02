@@ -40,8 +40,8 @@ public static class RoslynCompiler
             .ToList();
 
         // netstandard / mscorlib для таргета мода
-        var trustedAssemblies = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!)
-            .Split(Path.PathSeparator)
+        var trustedAssemblies = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") ?? "")
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
             .Where(p => Path.GetFileName(p) is "netstandard.dll" or "mscorlib.dll" or "System.Runtime.dll")
             .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p));
         references.AddRange(trustedAssemblies);

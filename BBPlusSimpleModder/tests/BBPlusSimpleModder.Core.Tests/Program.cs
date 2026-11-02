@@ -26,6 +26,8 @@ public static class Program
         Test("Project: save/load .bbmod.json", ProjectRoundtrip);
         Test("AssetKind: расширения и подпапки", AssetKinds);
         Test("Slug", Slugs);
+        Test("Sanitize переменных", SanitizeVar);
+        Test("ClassNameFor: коллизии имён", ClassNameCollision);
 
         Console.WriteLine();
         Console.WriteLine($"ИТОГО: {_passed} пройдено, {_failed} упало");
@@ -228,6 +230,25 @@ public static class Program
         Assert(AssetKindUtil.FromExtension("s.wav") == AssetKind.Audio, "wav→audio");
         Assert(AssetKindUtil.SubFolder(AssetKind.Sprite) == "sprites", "subfolder sprites");
         Assert(AssetKindUtil.SubFolder(AssetKind.Model) == "models", "subfolder models");
+    }
+
+    private static void SanitizeVar()
+    {
+        Assert(GraphToCSharp.Sanitize("счётчик") == "_", "кириллица → _: " + GraphToCSharp.Sanitize("счётчик"));
+        Assert(GraphToCSharp.Sanitize("speed") == "speed", "латиница как есть");
+        Assert(GraphToCSharp.Sanitize("") == "x", "пусто → x");
+    }
+
+    private static void ClassNameCollision()
+    {
+        var root = new ModComponent { Kind = ComponentKind.Root, Name = "Мод" };
+        var a = ModComponent.Create(ComponentKind.Character, root); a.Name = "Куст";
+        var b = ModComponent.Create(ComponentKind.Character, root); b.Name = "Куст";
+        var used = new HashSet<string>();
+        var n1 = GraphToCSharp.ClassNameFor(a, used);
+        var n2 = GraphToCSharp.ClassNameFor(b, used);
+        Assert(n1 == "KustNPC", "первый: " + n1);
+        Assert(n2 != n1 && n2.StartsWith("KustNPC_"), "второй уникален: " + n2);
     }
 
     private static void Slugs()

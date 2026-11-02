@@ -54,14 +54,20 @@ public class BuildService
             steps[1].Running();
             var sources = new Dictionary<string, string>();
             var codeAll = new System.Text.StringBuilder();
-            sources["Plugin.cs"] = gen.GeneratePluginFile(project);
-            codeAll.AppendLine(sources["Plugin.cs"]);
+            var usedClassNames = new HashSet<string>();
+            // сначала классы компонентов (имена классов уникальны, файлы — тоже)
             foreach (var c in project.AllComponents().Where(c => c.Graph != null && c.Kind != ComponentKind.Root))
             {
-                var file = GraphToCSharp.Slug(c.Name) + ".cs";
-                sources[file] = gen.GenerateClassFile(c);
+                var fileBase = GraphToCSharp.Slug(c.Name);
+                var file = fileBase + ".cs";
+                int k = 0;
+                while (sources.ContainsKey(file)) { k++; file = fileBase + "_" + c.Id[..4] + (k > 1 ? k.ToString() : "") + ".cs"; }
+                sources[file] = gen.GenerateClassFile(c, usedClassNames);
                 codeAll.AppendLine(sources[file]);
             }
+            // затем плагин (видит те же имена классов для регистрации)
+            sources["Plugin.cs"] = gen.GeneratePluginFile(project, usedClassNames);
+            codeAll.AppendLine(sources["Plugin.cs"]);
             LastGeneratedCode = codeAll.ToString();
             foreach (var w in gen.Warnings) { log("WARN: " + w); }
             log($"Сгенерировано файлов: {sources.Count}");
