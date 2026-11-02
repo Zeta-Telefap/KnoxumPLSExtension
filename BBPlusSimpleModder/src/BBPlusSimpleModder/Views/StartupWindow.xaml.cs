@@ -29,9 +29,17 @@ public partial class StartupWindow : Window
 
     private async void Browse_Click(object sender, RoutedEventArgs e)
     {
-        using var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = "Папка игры Baldi's Basics Plus" };
-        if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
-            await SetGamePath(dlg.SelectedPath);
+        // выбор папки чисто на WPF: OpenFileDialog с отключенной проверкой файла
+        var ofd = new OpenFileDialog
+        {
+            Title = "Папка игры Baldi's Basics Plus",
+            CheckFileExists = false,
+            CheckPathExists = true,
+            ValidateNames = false,
+            FileName = "Выберите папку игры"
+        };
+        if (ofd.ShowDialog() == true)
+            await SetGamePath(Path.GetDirectoryName(ofd.FileName)!);
     }
 
     private void Window_DragEnter(object sender, DragEventArgs e)

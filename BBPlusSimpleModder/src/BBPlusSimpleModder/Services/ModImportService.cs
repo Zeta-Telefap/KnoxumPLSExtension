@@ -1,5 +1,6 @@
 using BBPlusSimpleModder.Compiler;
 using BBPlusSimpleModder.Core.BlockEngine;
+using BBPlusSimpleModder.Core.LvlFormat;
 using BBPlusSimpleModder.Core.Models;
 
 namespace BBPlusSimpleModder.Services;
@@ -59,7 +60,7 @@ public class ModImportService
         }
     }
 
-    public BaldiLevelModel ImportLvl(string path) => Core.LvlFormat.BaldiLevelModel.Load(path);
+    public BaldiLevelModel ImportLvl(string path) => BaldiLevelModel.Load(path);
 
     public void ImportLvlIntoProject(string path, ModProject project)
     {
