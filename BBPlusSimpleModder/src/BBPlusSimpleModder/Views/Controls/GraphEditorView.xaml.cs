@@ -6,9 +6,9 @@ using System.Windows.Shapes;
 using BBPlusSimpleModder.Core.BlockEngine;
 using BBPlusSimpleModder.Core.Codegen;
 using BBPlusSimpleModder.Services;
-using System.IO;
 using System.Collections.Generic;
 using System.Linq;
+using Path = System.Windows.Shapes.Path;   // alias: WPF-фигура Path, чтобы не путать с System.IO.Path
 
 namespace BBPlusSimpleModder.Views.Controls;
 
