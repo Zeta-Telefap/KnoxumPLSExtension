@@ -338,7 +338,7 @@ public class GraphToCSharp
             if (c.Kind == ComponentKind.Event)
                 sb.AppendLine($"            // TODO: RandomEventBuilder для {c.Name}");
         }
-        sb.AppendLine("            // ассеты лежат в StreamingAssets/Modded/" + ModGuid + "/ (sprites/, models/, audio/, data/)");
+        sb.AppendLine("            // ассеты лежат в StreamingAssets/Modded/" + p.Guid + "/ (sprites/, models/, audio/, data/)");
         sb.AppendLine("        }");
         sb.AppendLine("    }");
         sb.AppendLine("}");
