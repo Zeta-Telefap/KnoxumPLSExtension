@@ -164,6 +164,8 @@ namespace RebuildTheSchool
             public bool SinkRising;
             public bool HasExit;
             public Vector3 ExitFloor;
+            // Only the new whirlpool that was formed for this prop (no other whirlpool was left): it is closed again
+            // when the prop is out. The other whirlpools of the flood that a prop comes out of are not touched.
             public Whirlpool ExitPool;
 
             // Student Shuffle.
@@ -1392,10 +1394,12 @@ namespace RebuildTheSchool
 
         /// <summary>
         /// What Whirlpool.Update does when it catches an entity, for a prop: the pool takes this one prop and
-        /// closes (layer 19, Close(): it shrinks and is destroyed), so a pool takes one prop; and, as
-        /// Whirlpool.Teleport starts, a new whirlpool forms at the place the prop will come out.
+        /// closes (layer 19, Close(): it shrinks and is destroyed), so a pool takes one prop. The prop comes out of
+        /// another whirlpool of the flood, picked at random; that pool stays open. Only when no other whirlpool is
+        /// left does it happen as in Whirlpool.Teleport: a new whirlpool forms at a random cell and closes again
+        /// when the prop is out.
         /// </summary>
-        private static void FxBeginSink(CarryState state, EventFx fx, Whirlpool pool, Vector3 centre)
+        private void FxBeginSink(CarryState state, EventFx fx, Whirlpool pool, Vector3 centre)
         {
             fx.Sinking = true;
             fx.SinkRising = false;
@@ -1408,16 +1412,61 @@ namespace RebuildTheSchool
             StopFlightSound(state);
             CloseWhirlpool(pool);
 
+            string exitKind = null;
+            Vector3 otherFloor;
             Cell exit;
-            if (TryPickWhirlpoolExit(state.Environment, out exit))
+            if (TryPickOtherWhirlpool(state.Environment, pool, out otherFloor))
+            {
+                fx.HasExit = true;
+                fx.ExitFloor = otherFloor;
+                exitKind = "another whirlpool";
+            }
+            else if (TryPickWhirlpoolExit(state.Environment, out exit))
             {
                 fx.HasExit = true;
                 fx.ExitFloor = exit.FloorWorldPosition;
                 fx.ExitPool = CreateExitWhirlpool(pool, fx.ExitFloor);
+                exitKind = "a new whirlpool (no other one is left)";
             }
 
             Debug.Log("[Rebuild the School] A whirlpool took " + state.Root.name + (fx.HasExit
-                ? "; it comes out of a new whirlpool at " + fx.ExitFloor + "." : "; there is no other place to come out."));
+                ? "; it comes out of " + exitKind + " at " + fx.ExitFloor + "." : "; there is no place to come out."));
+        }
+
+        /// <summary>
+        /// One of the other whirlpools of the flood, at random: not the one that took the prop, none that is
+        /// closing (layer 19: used up, or the exit of a character) and none in an event spawner room.
+        /// </summary>
+        private bool TryPickOtherWhirlpool(EnvironmentController environment, Whirlpool taken, out Vector3 floor)
+        {
+            floor = Vector3.zero;
+            List<Vector3> options = new List<Vector3>();
+            for (int i = 0; i < _whirlpools.Length; i++)
+            {
+                Whirlpool other = _whirlpools[i];
+                if (other == null || other == taken || !other.isActiveAndEnabled
+                    || other.gameObject.layer == WhirlpoolClosingLayer)
+                {
+                    continue;
+                }
+
+                Vector3 position = other.transform.position;
+                Cell cell;
+                if (TryGetCell(environment, position, out cell) && IsEventSpawnerCell(cell))
+                {
+                    continue;
+                }
+
+                options.Add(position);
+            }
+
+            if (options.Count == 0)
+            {
+                return false;
+            }
+
+            floor = options[UnityEngine.Random.Range(0, options.Count)];
+            return true;
         }
 
         /// <summary>A whirlpool that has caught something: no more catching (layer 19) and it shrinks away.</summary>
@@ -1489,8 +1538,8 @@ namespace RebuildTheSchool
 
         /// <summary>
         /// The prop slides to the middle of the pool and sinks (0.4 s, the sink speed of Whirlpool.Teleport; it
-        /// goes down by its own height, the floor hides it), jumps to the new whirlpool and rises out of it (0.4 s),
-        /// which then closes. It lands there like any thrown prop. Vanilla lowers the entity's height the same way.
+        /// goes down by its own height, the floor hides it), jumps to the other whirlpool and rises out of it (0.4 s).
+        /// It lands there like any thrown prop. Vanilla lowers the entity's height the same way.
         /// </summary>
         private bool FxStepSink(CarryState state, EventFx fx, float dt)
         {
@@ -1535,7 +1584,7 @@ namespace RebuildTheSchool
                 return true;
             }
 
-            // Out: the exit whirlpool closes (newPool.StartClose()) and the prop lands where it stands.
+            // Out: a whirlpool that was formed for this prop closes (newPool.StartClose()); the prop lands where it stands.
             Whirlpool exit = fx.ExitPool;
             fx.ExitPool = null;
             fx.Sinking = false;
