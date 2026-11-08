@@ -42,7 +42,6 @@ namespace RebuildTheSchool
         private const float PlacementPreviewRefreshInterval = 0.25f;
         private const float ReleaseTimeout = 8f;
         private const float WorldTileWidth = 10f;
-        private const float RotationSwitchAngle = 50f;
         private const float DoorLookAhead = 7f;
         private const float DoorLateralTolerance = 3f;
         private const float DoorOpenDuration = 2.5f;
@@ -323,8 +322,10 @@ namespace RebuildTheSchool
 
         private void UpdateHeldFacing(CarryState state, Ray ray)
         {
-            // Unlike pickup, continuous camera movement must not snap through four cardinal directions.
-            Quaternion desiredCameraRotation = CameraFacingRotation(-ray.direction, state.CameraRotation);
+            // Continuous camera movement turns the prop smoothly; the aimed side stays the one toward the player.
+            Quaternion side = Quaternion.AngleAxis(state.SideYaw, Vector3.up);
+            Quaternion desiredCameraRotation = CameraFacingRotation(
+                -ray.direction, state.CameraRotation * Quaternion.Inverse(side)) * side;
             if (Quaternion.Angle(state.CameraRotation, desiredCameraRotation) >= 0.1f)
             {
                 state.CameraRotation = desiredCameraRotation;
@@ -1087,6 +1088,7 @@ namespace RebuildTheSchool
                 {
                     physical.AimDistance = solidDistance;
                     physical.AimSource = "collider";
+                    physical.AimNormal = RayHits[i].normal;
                 }
                 else
                 {
@@ -1104,6 +1106,7 @@ namespace RebuildTheSchool
             {
                 assisted.AimDistance = assistedDistance;
                 assisted.AimSource = "mesh box";
+                assisted.AimNormal = Vector3.zero;
                 blocker = null;
                 return assisted;
             }
@@ -1123,7 +1126,7 @@ namespace RebuildTheSchool
             for (int i = 0; i < _airborne.Count; i++)
             {
                 CarryState state = _airborne[i];
-                if (state != null && state.Root != null
+                if (state != null && state.Root != null && !FxResumable(state)
                     && (hit == state.Root || hit.IsChildOf(state.Root)))
                 {
                     return true;
@@ -1140,7 +1143,8 @@ namespace RebuildTheSchool
                 CarryState state = _airborne[i];
                 if (state != null && state.Root == root)
                 {
-                    return true;
+                    // A prop pinned to the ceiling or riding a student is not flying: it can be picked up again.
+                    return !FxResumable(state);
                 }
             }
 
@@ -1646,6 +1650,16 @@ namespace RebuildTheSchool
                 return false;
             }
 
+            // A prop pinned to the ceiling (or riding a student) is a released prop with a state of its own:
+            // carrying it again goes on with that state (g.Events.cs).
+            bool resumable;
+            CarryState resumed = TryResumeCarry(candidate, player, ray, keepRotation, out resumable);
+            if (resumable)
+            {
+                state = resumed;
+                return resumed != null;
+            }
+
             Rigidbody[] childBodies = candidate.Root.GetComponentsInChildren<Rigidbody>(true);
             for (int i = 0; i < childBodies.Length; i++)
             {
@@ -1663,10 +1677,12 @@ namespace RebuildTheSchool
 
             Quaternion originalRotation = candidate.Root.rotation;
             Quaternion cardinalFallback = DirectionFromRotation(originalRotation).ToRotation();
-            // Quantize camera facing once on pickup; while carried, facing follows camera yaw continuously.
+            // The side under the crosshair turns toward the player (the front of a locker or a vending machine
+            // when it is aimed at) and stays toward the player while the prop is carried.
+            float sideYaw = 0f;
             Quaternion carryRotation = keepRotation
                 ? originalRotation
-                : CameraCardinalRotation(-ray.direction, cardinalFallback);
+                : AimedSideRotation(originalRotation, -ray.direction, candidate.AimNormal, cardinalFallback, out sideYaw);
             Direction originDirection = DirectionFromRotation(originalRotation);
             Direction carryDirection = DirectionFromRotation(carryRotation);
             bool isLocker = candidate.EnvironmentObject == null && IsLocker(candidate.Root);
@@ -1778,6 +1794,7 @@ namespace RebuildTheSchool
             state.CameraRotation = carryRotation;
             state.CarryRotation = carryRotation;
             state.TargetRotation = carryRotation;
+            state.SideYaw = sideYaw;
             state.LocalGrabPoint = Vector3.zero;
             state.Coverage = coverage;
             state.UsesCoverage = usesCoverage;
@@ -1786,7 +1803,7 @@ namespace RebuildTheSchool
             state.RemovedSoftCoverage = removedSoft;
             state.ParentKind = candidate.ParentKind;
             state.Renderers = candidate.Renderers;
-            state.RegisteredRenderers = RegisteredRenderers(candidate.Cell, candidate.Renderers);
+            state.RegisteredRenderers = RegisteredRenderers(player.ec, candidate.Renderers);
             state.Body = body;
             state.AddedBody = addedBody;
             state.AddedCollider = generatedCollider;
@@ -1820,7 +1837,7 @@ namespace RebuildTheSchool
                 state.Glow.SetColor(CarryHighlightColor);
                 IgnorePlayerCollisions(state);
 
-                RemoveRendererReferences(candidate.Cell, state.RegisteredRenderers);
+                RemoveRendererReferencesEverywhere(player.ec, state.RegisteredRenderers);
                 if (usesCoverage)
                 {
                     WriteCoverage(candidate.Cell,
@@ -2233,8 +2250,9 @@ namespace RebuildTheSchool
                 v *= FlightMaxSpeed / speed;
             }
 
-            // Flood: the pull of a whirlpool is a drift on top of the velocity, taken off again after the step.
-            Vector3 drift = FxDrift(state, c, half, dt);
+            // Flood: a whirlpool catches the prop's own speed (v) and pulls it in; the pull is a drift on top of
+            // the velocity, taken off again after the step.
+            Vector3 drift = FxDrift(state, c, half, dt, ref v);
             v += drift;
             Vector3 impactVelocity = v;
             float remaining = 1f;
@@ -2264,13 +2282,13 @@ namespace RebuildTheSchool
                     c.y = state.FlightFloorY + half.y;
                     if (FxHoldsOnFloor(state))
                     {
-                        // In a whirlpool the prop slides to the middle instead of settling.
+                        // In a whirlpool the prop slides along the floor to the middle instead of settling: only
+                        // the vertical speed ends here, the rest of the step goes on (a prop that already lies on
+                        // the floor touches it at once, so ending the step here would hold it in place).
+                        FxFloorContact(state, c);
                         v.y = 0f;
-                        float keep = Mathf.Max(0f, 1f - WhirlpoolSlideFriction * dt);
-                        v.x *= keep;
-                        v.z *= keep;
-                        settled = true;
-                        break;
+                        remaining *= 1f - hit.T;
+                        continue;
                     }
 
                     landed = true;
@@ -4616,17 +4634,33 @@ namespace RebuildTheSchool
             return Mathf.Clamp(volume * 0.08f, 1f, 30f);
         }
 
-        private static List<Renderer> RegisteredRenderers(Cell cell, Renderer[] renderers)
+        /// <summary>
+        /// The renderers of the prop that some cell lists: the game's culling shows and hides the listed
+        /// renderers with their chunk. The level builder and CullingManager.PrepareOcclusionCalculations both
+        /// list an object's renderers, so one renderer can be listed twice, or in the list of another cell.
+        /// </summary>
+        private static List<Renderer> RegisteredRenderers(EnvironmentController environment, Renderer[] renderers)
         {
             List<Renderer> registered = new List<Renderer>();
-            if (cell == null || cell.renderers == null || renderers == null)
+            if (renderers == null)
             {
                 return registered;
             }
 
+            HashSet<Renderer> wanted = new HashSet<Renderer>();
             for (int i = 0; i < renderers.Length; i++)
             {
-                if (renderers[i] != null && cell.renderers.Contains(renderers[i]))
+                if (renderers[i] != null)
+                {
+                    wanted.Add(renderers[i]);
+                }
+            }
+
+            HashSet<Renderer> found = new HashSet<Renderer>();
+            ScanRendererLists(environment, wanted, found, false);
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                if (renderers[i] != null && found.Contains(renderers[i]) && !registered.Contains(renderers[i]))
                 {
                     registered.Add(renderers[i]);
                 }
@@ -4641,22 +4675,36 @@ namespace RebuildTheSchool
             AddRendererReferences(to, renderers);
         }
 
+        /// <summary>Takes every listing of these renderers out of one cell's list (not just the first).</summary>
         private static void RemoveRendererReferences(Cell cell, List<Renderer> renderers)
         {
-            if (cell == null || cell.renderers == null || renderers == null)
+            if (renderers == null || renderers.Count == 0)
             {
                 return;
             }
 
-            for (int i = 0; i < renderers.Count; i++)
-            {
-                if (renderers[i] != null)
-                {
-                    cell.renderers.Remove(renderers[i]);
-                }
-            }
+            ScanRendererList(cell, new HashSet<Renderer>(renderers), null, true);
         }
 
+        /// <summary>
+        /// Takes every listing of these renderers out of every cell. A listing left behind in the cell the prop
+        /// came from would let that chunk's culling hide the model wherever the prop stands now.
+        /// </summary>
+        private static void RemoveRendererReferencesEverywhere(
+            EnvironmentController environment, List<Renderer> renderers)
+        {
+            if (renderers == null || renderers.Count == 0)
+            {
+                return;
+            }
+
+            ScanRendererLists(environment, new HashSet<Renderer>(renderers), null, true);
+        }
+
+        /// <summary>
+        /// Lists the renderers in the cell again. The culling only touches a listed renderer when its chunk
+        /// changes between shown and hidden, so a prop put into a chunk takes that chunk's state at once.
+        /// </summary>
         private static void AddRendererReferences(Cell cell, List<Renderer> renderers)
         {
             if (cell == null || cell.renderers == null || renderers == null)
@@ -4664,11 +4712,84 @@ namespace RebuildTheSchool
                 return;
             }
 
+            bool chunkShown = !cell.HasChunk || cell.Chunk == null || cell.Chunk.Rendering;
             for (int i = 0; i < renderers.Count; i++)
             {
-                if (renderers[i] != null && !cell.renderers.Contains(renderers[i]))
+                Renderer renderer = renderers[i];
+                if (renderer == null)
                 {
-                    cell.renderers.Add(renderers[i]);
+                    continue;
+                }
+
+                if (!cell.renderers.Contains(renderer))
+                {
+                    cell.renderers.Add(renderer);
+                }
+
+                renderer.enabled = chunkShown;
+            }
+        }
+
+        /// <summary>
+        /// Walks the renderer list of every cell: the renderers in `wanted` are reported in `found` and, with
+        /// `remove`, taken out of the list (every occurrence; destroyed renderers go with them).
+        /// </summary>
+        private static void ScanRendererLists(
+            EnvironmentController environment, HashSet<Renderer> wanted, HashSet<Renderer> found, bool remove)
+        {
+            if (environment == null || environment.cells == null || wanted.Count == 0)
+            {
+                return;
+            }
+
+            Cell[,] cells = environment.cells;
+            int width = cells.GetLength(0);
+            int depth = cells.GetLength(1);
+            for (int x = 0; x < width; x++)
+            {
+                for (int z = 0; z < depth; z++)
+                {
+                    ScanRendererList(cells[x, z], wanted, found, remove);
+                }
+            }
+        }
+
+        private static void ScanRendererList(
+            Cell cell, HashSet<Renderer> wanted, HashSet<Renderer> found, bool remove)
+        {
+            if (cell == null || cell.renderers == null)
+            {
+                return;
+            }
+
+            List<Renderer> listed = cell.renderers;
+            for (int i = listed.Count - 1; i >= 0; i--)
+            {
+                Renderer renderer = listed[i];
+                if (renderer == null)
+                {
+                    if (remove)
+                    {
+                        // Chunk.Render would throw on it and skip the rest of the list.
+                        listed.RemoveAt(i);
+                    }
+
+                    continue;
+                }
+
+                if (!wanted.Contains(renderer))
+                {
+                    continue;
+                }
+
+                if (found != null)
+                {
+                    found.Add(renderer);
+                }
+
+                if (remove)
+                {
+                    listed.RemoveAt(i);
                 }
             }
         }
@@ -4749,24 +4870,48 @@ namespace RebuildTheSchool
             return Quaternion.LookRotation(flatFacing.normalized, Vector3.up);
         }
 
-        private static Quaternion CameraCardinalRotation(Vector3 cameraForward, Quaternion fallback)
+        /// <summary>
+        /// The pickup orientation. The side of the prop the crosshair is on is the horizontal local side (+Z, +X,
+        /// -Z or -X) that best matches the surface under the crosshair (its normal; a surface that faces up or
+        /// down says nothing, then the viewing direction decides). That side is turned toward the camera, so a
+        /// locker or a vending machine aimed at from the front is carried with its front toward the player.
+        /// sideYaw is the turn of that side against "local +Z faces the camera"; the carry keeps it
+        /// (UpdateHeldFacing).
+        /// </summary>
+        private static Quaternion AimedSideRotation(
+            Quaternion rotation, Vector3 towardCamera, Vector3 aimNormal, Quaternion fallback, out float sideYaw)
         {
-            Vector3 flatForward = Vector3.ProjectOnPlane(cameraForward, Vector3.up);
-            if (flatForward.sqrMagnitude < 0.001f)
+            sideYaw = 0f;
+            Vector3 flatView = Vector3.ProjectOnPlane(towardCamera, Vector3.up);
+            if (flatView.sqrMagnitude < 0.001f)
             {
                 return fallback;
             }
 
-            flatForward.Normalize();
-            Vector3 currentForward = Vector3.ProjectOnPlane(fallback * Vector3.forward, Vector3.up);
-            if (currentForward.sqrMagnitude > 0.001f
-                && Vector3.Angle(currentForward.normalized, flatForward) < RotationSwitchAngle)
+            flatView.Normalize();
+            Vector3 flatNormal = Vector3.ProjectOnPlane(aimNormal, Vector3.up);
+            Vector3 judged = flatNormal.sqrMagnitude >= 0.25f ? flatNormal.normalized : flatView;
+            float bestFacing = -2f;
+            int bestSide = 0;
+            for (int side = 0; side < 4; side++)
             {
-                return fallback;
+                Vector3 axis = rotation * (Quaternion.AngleAxis(side * 90f, Vector3.up) * Vector3.forward);
+                axis.y = 0f;
+                if (axis.sqrMagnitude < 0.001f)
+                {
+                    continue;
+                }
+
+                float facing = Vector3.Dot(axis.normalized, judged);
+                if (facing > bestFacing)
+                {
+                    bestFacing = facing;
+                    bestSide = side;
+                }
             }
 
-            Direction direction = Directions.DirFromVector3(flatForward, 45f);
-            return direction == Direction.Null ? fallback : direction.ToRotation();
+            sideYaw = -90f * bestSide;
+            return CameraFacingRotation(towardCamera, fallback) * Quaternion.AngleAxis(sideYaw, Vector3.up);
         }
 
         private static Direction DirectionFromRotation(Quaternion rotation)
@@ -4802,6 +4947,8 @@ namespace RebuildTheSchool
             public ParentKind ParentKind;
             public float AimDistance;
             public string AimSource;
+            // The surface normal at the crosshair (zero when the aim came from a mesh box, not a collider).
+            public Vector3 AimNormal;
         }
 
         /// <summary>A movable prop in the aim-assist registry, matched by the boxes of its meshes.</summary>
@@ -5095,6 +5242,8 @@ namespace RebuildTheSchool
             public Quaternion CarryRotation;
             public Quaternion TargetRotation;
             public int ManualRotationSteps;
+            // The turn that puts the side the player aimed at toward the camera (see AimedSideRotation).
+            public float SideYaw;
             public Quaternion OriginalRotation;
             public CellCoverage Coverage;
             public CellCoverage RemovedHardCoverage;

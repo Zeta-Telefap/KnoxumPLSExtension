@@ -52,8 +52,17 @@ namespace RebuildTheSchool
         private const float WhirlpoolGlideSpeed = 12f;
         private const float WhirlpoolFloorTolerance = 0.3f;
         private const float WhirlpoolMinHoldPull = 0.3f;
-        private const float WhirlpoolSlideFriction = 6f;
         private const int WhirlpoolClosingLayer = 19;
+        // The magnet for props. The vanilla pull is zero at the edge of the sphere and a prop that is thrown past
+        // a pool has its own speed, so a prop within this far of the sphere is caught: it is pulled at least this
+        // fast (units per second), a bit stronger than an entity, and its own sideways speed dies out (rate per
+        // second, stronger toward the middle).
+        private const float WhirlpoolMagnetExtra = 4f;
+        // A prop that is pulled this long without reaching the middle (something in the way) is let go.
+        private const float WhirlpoolMaxPullSeconds = 10f;
+        private const float WhirlpoolMinSlide = 5f;
+        private const float WhirlpoolPropBoost = 1.5f;
+        private const float WhirlpoolCatchDamp = 6f;
 
         // Student Shuffle.
         private const float CrowdCatchRadius = 3.5f;
@@ -132,6 +141,9 @@ namespace RebuildTheSchool
 
             // Flood.
             public bool Pulled;
+            public bool PullGaveUp;
+            public float PulledSeconds;
+            public bool FloorTouched;
             public bool Sinking;
             public Whirlpool SinkPool;
             public Vector3 SinkCentre;
@@ -828,6 +840,12 @@ namespace RebuildTheSchool
         {
             try
             {
+                if (state != null && state.Fx != null)
+                {
+                    // Back at full size: no rise from 20% follows.
+                    state.Fx.PlayRise = false;
+                }
+
                 PropFx scale = state != null && state.Root != null ? state.Root.GetComponent<PropFx>() : null;
                 if (scale != null && scale.enabled)
                 {
@@ -941,11 +959,153 @@ namespace RebuildTheSchool
                 fx.KeepLanding = true;
                 StopFlightSound(state);
                 PlaySoundAt(c, FloorSoundName, FloorSoundVolume);
+                // A prop on the ceiling is as solid as one on the floor (the player cannot walk through it) ...
+                FxSetSolid(state, true);
             }
             else if (!pinned && fx.Pinned)
             {
+                // ... and ignores the player again when it falls.
                 fx.Pinned = false;
+                FxSetSolid(state, false);
             }
+        }
+
+        /// <summary>
+        /// A prop that stands still in the air (pinned to the ceiling, riding a student) is a target again, not a
+        /// flying prop: the aim sees it and G or the wheel click takes it (TryResumeCarry).
+        /// </summary>
+        private static bool FxResumable(CarryState state)
+        {
+            return state != null && state.Fx != null && (state.Fx.Pinned || state.Fx.Riding);
+        }
+
+        /// <summary>
+        /// Solid: the player collides with the prop and its mesh colliders work, as they do for a prop that lies
+        /// in the world. Not solid (flight, carry): the player's colliders are ignored and the non-convex mesh
+        /// colliders of the body stay off (BeginCarry).
+        /// </summary>
+        private static void FxSetSolid(CarryState state, bool solid)
+        {
+            try
+            {
+                // Both ways start from a clean state: no ignored pairs are left over to be listed twice.
+                RestorePlayerCollisions(state);
+                if (solid)
+                {
+                    RestoreNonConvex(state.NonConvexColliders);
+                    return;
+                }
+
+                IgnorePlayerCollisions(state);
+                List<MeshCollider> nonConvex = state.NonConvexColliders;
+                for (int i = 0; nonConvex != null && i < nonConvex.Count; i++)
+                {
+                    if (nonConvex[i] != null)
+                    {
+                        nonConvex[i].enabled = false;
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                LogEventError("solidity of a pinned prop", exception);
+            }
+        }
+
+        /// <summary>
+        /// A pinned (or riding) prop is still in the list of airborne props as far as the flight is concerned.
+        /// BeginCarry asks here first: picking it up (or kicking it) takes that state out of the air and carries it
+        /// on, so the prop keeps its origin, coverage and renderer bookkeeping; releasing it creates a fresh event
+        /// state (FxOnRelease). `resumable` tells whether the prop was such a one; the result is its carry state
+        /// (null: it failed and went back to where it came from). Any other prop: the ordinary pickup follows.
+        /// </summary>
+        private CarryState TryResumeCarry(
+            Candidate candidate, PlayerManager player, Ray ray, bool keepRotation, out bool resumable)
+        {
+            resumable = false;
+            for (int i = 0; i < _airborne.Count; i++)
+            {
+                CarryState found = _airborne[i];
+                if (found == null || found.Root != candidate.Root || !FxResumable(found))
+                {
+                    continue;
+                }
+
+                resumable = true;
+                _airborne.RemoveAt(i);
+                try
+                {
+                    if (found.Body == null)
+                    {
+                        throw new InvalidOperationException("The pinned prop has lost its body.");
+                    }
+
+                    ResumeFromAir(found, candidate, ray, keepRotation);
+                }
+                catch (Exception exception)
+                {
+                    LogEventError("picking up a pinned prop", exception);
+                    ReturnToOrigin(found);
+                    return null;
+                }
+
+                return found;
+            }
+
+            return null;
+        }
+
+        private static void ResumeFromAir(CarryState state, Candidate candidate, Ray ray, bool keepRotation)
+        {
+            EventFx fx = state.Fx;
+            StopFlightSound(state);
+
+            Quaternion turned = state.Root.rotation;
+            Quaternion upright = fx != null ? fx.BaseRotation : turned;
+            float sideYaw = 0f;
+            Quaternion carryRotation = upright;
+            if (keepRotation)
+            {
+                // A kick starts from the pose the prop was released with: the turn-over belongs to the ceiling.
+                state.Body.position = state.FlightPosition;
+                state.Body.rotation = upright;
+                state.Root.SetPositionAndRotation(state.FlightPosition, upright);
+                turned = upright;
+            }
+            else
+            {
+                carryRotation = AimedSideRotation(turned, -ray.direction, candidate.AimNormal, upright, out sideYaw);
+            }
+
+            state.Landed = false;
+            state.Thrown = false;
+            state.FlightVelocity = Vector3.zero;
+            state.PositionSmoothVelocity = Vector3.zero;
+            state.ManualRotationSteps = 0;
+            state.SideYaw = sideYaw;
+            state.CameraRotation = carryRotation;
+            state.TargetRotation = carryRotation;
+            // The carry turns the prop upright by itself (UpdateHeldFacing).
+            state.CarryRotation = turned;
+            if (state.EnvironmentObject != null)
+            {
+                state.Coverage = state.EnvironmentObject.coverage.Rotated(DirectionFromRotation(carryRotation));
+            }
+            else if (state.IsLocker)
+            {
+                state.Coverage = LockerCoverage(carryRotation);
+            }
+
+            Bounds bounds;
+            if (CombinedBounds(state.Renderers, out bounds))
+            {
+                state.LocalGrabPoint = VisualCenterAnchor(state.Root, bounds);
+            }
+
+            FxSetSolid(state, false);
+            RestoreVisualGlow(state);
+            state.Glow = new GlowState(state.Root, state.Renderers);
+            state.Glow.SetColor(CarryHighlightColor);
         }
 
         // --- Flood: whirlpools ---
@@ -970,11 +1130,14 @@ namespace RebuildTheSchool
         }
 
         /// <summary>
-        /// The pull of Whirlpool.Update: a drift toward the middle of the pool, strongest at the middle,
-        /// (R - d) / R * 20 units per second, never more than the distance left. A wall in between stops it.
-        /// At 5 units from the middle, on the floor, the prop starts to sink (FxStepSink).
+        /// The pull of Whirlpool.Update, made a magnet for props. A prop within WhirlpoolMagnetExtra of the
+        /// pool's sphere is caught: the sideways speed it came with dies out (v is changed here) and it is pulled
+        /// to the middle of the pool at the vanilla speed, (R - d) / R * 20 units per second, times
+        /// WhirlpoolPropBoost, never slower than WhirlpoolMinSlide and never more than the distance left; a wall
+        /// in between stops it. At 5 units from the middle, on the floor, the prop starts to sink (FxStepSink).
+        /// The pull is a drift on top of the velocity: the caller adds it and takes it off again after the step.
         /// </summary>
-        private Vector3 FxDrift(CarryState state, Vector3 c, Vector3 half, float dt)
+        private Vector3 FxDrift(CarryState state, Vector3 c, Vector3 half, float dt, ref Vector3 v)
         {
             EventFx fx = state.Fx;
             if (fx == null)
@@ -983,7 +1146,7 @@ namespace RebuildTheSchool
             }
 
             fx.Pulled = false;
-            if (_whirlpools.Length == 0)
+            if (_whirlpools.Length == 0 || fx.PullGaveUp)
             {
                 return Vector3.zero;
             }
@@ -993,15 +1156,22 @@ namespace RebuildTheSchool
                 Bounds box = new Bounds(c, half * 2f);
                 float timeScale = state.Environment != null ? state.Environment.EnvironmentTimeScale : 1f;
                 int bestIndex = -1;
-                float bestPull = 0f;
+                float bestSpeed = 0f;
                 float bestFlat = 0f;
+                float bestZone = 1f;
                 Vector3 bestCentre = Vector3.zero;
                 Vector3 bestDirection = Vector3.zero;
                 for (int i = 0; i < _whirlpools.Length; i++)
                 {
                     Vector3 centre;
                     float radius;
-                    if (!WhirlpoolShape(i, out centre, out radius) || box.SqrDistance(centre) > radius * radius)
+                    if (!WhirlpoolShape(i, out centre, out radius))
+                    {
+                        continue;
+                    }
+
+                    float zone = radius + WhirlpoolMagnetExtra;
+                    if (box.SqrDistance(centre) > zone * zone)
                     {
                         continue;
                     }
@@ -1009,8 +1179,9 @@ namespace RebuildTheSchool
                     Vector3 flat = new Vector3(centre.x - c.x, 0f, centre.z - c.z);
                     float distance = flat.magnitude;
                     float pull = (radius - Mathf.Min(distance, radius)) / radius * WhirlpoolPull * timeScale;
+                    float speed = Mathf.Max(pull * WhirlpoolPropBoost, WhirlpoolMinSlide * timeScale);
                     FlightHit wall;
-                    if (pull <= bestPull
+                    if (speed <= bestSpeed
                         || (FlightGridSweep(state.Environment, c, Vector3.zero, flat, false, out wall)
                             && wall.Kind == FlightHitKind.Wall))
                     {
@@ -1018,8 +1189,9 @@ namespace RebuildTheSchool
                     }
 
                     bestIndex = i;
-                    bestPull = pull;
+                    bestSpeed = speed;
                     bestFlat = distance;
+                    bestZone = zone;
                     bestCentre = centre;
                     bestDirection = distance > 0.001f ? flat / distance : Vector3.zero;
                 }
@@ -1041,14 +1213,36 @@ namespace RebuildTheSchool
                     return Vector3.zero;
                 }
 
-                float speed = bestPull;
-                if (speed * dt > bestFlat)
+                // The catch: the speed a thrown prop brings dies out, faster toward the middle. It is taken off
+                // before the drift is added (a drift inside v would be damped too, and taking it off later would
+                // turn it around).
+                float closeness = 1f - Mathf.Clamp01(bestFlat / bestZone);
+                float keep = Mathf.Exp(-WhirlpoolCatchDamp * (0.25f + 0.75f * closeness) * dt);
+                v.x *= keep;
+                v.z *= keep;
+
+                float pullSpeed = bestSpeed;
+                if (pullSpeed * dt > bestFlat)
                 {
-                    speed = bestFlat / Mathf.Max(dt, 0.0001f);
+                    pullSpeed = bestFlat / Mathf.Max(dt, 0.0001f);
                 }
 
-                Vector3 drift = bestDirection * speed;
-                fx.Pulled = drift.sqrMagnitude >= WhirlpoolMinHoldPull * WhirlpoolMinHoldPull;
+                Vector3 drift = bestDirection * pullSpeed;
+                // Inside the sink distance the prop never settles before it has sunk, however short the last pull.
+                fx.Pulled = bestFlat <= WhirlpoolSinkDistance
+                    || drift.sqrMagnitude >= WhirlpoolMinHoldPull * WhirlpoolMinHoldPull;
+                if (fx.Pulled)
+                {
+                    fx.PulledSeconds += dt;
+                    if (fx.PulledSeconds > WhirlpoolMaxPullSeconds)
+                    {
+                        // Something keeps the prop from reaching the middle: let it go and land where it is.
+                        fx.PullGaveUp = true;
+                        fx.Pulled = false;
+                        return Vector3.zero;
+                    }
+                }
+
                 return drift;
             }
             catch (Exception exception)
@@ -1056,6 +1250,23 @@ namespace RebuildTheSchool
                 LogEventError("whirlpool pull", exception);
                 return Vector3.zero;
             }
+        }
+
+        /// <summary>
+        /// A prop that is pulled along the floor of a pool's area stays in the air as far as the sound goes: the
+        /// whoosh ends and the quiet LockDoorStop plays, once (like the landing of any other throw).
+        /// </summary>
+        private static void FxFloorContact(CarryState state, Vector3 c)
+        {
+            EventFx fx = state.Fx;
+            if (fx == null || fx.FloorTouched)
+            {
+                return;
+            }
+
+            fx.FloorTouched = true;
+            StopFlightSound(state);
+            PlaySoundAt(c, FloorSoundName, FloorSoundVolume);
         }
 
         /// <summary>
@@ -1140,6 +1351,12 @@ namespace RebuildTheSchool
 
             if (!fx.Riding)
             {
+                // A prop whose gravity points up (Gravity Chaos) does not come down on a head.
+                if (fx.Pinned || fx.GravityFactor < 0.5f)
+                {
+                    return false;
+                }
+
                 StudentCrowd_Follower follower = FindFollowerUnder(c, half);
                 if (follower == null)
                 {
