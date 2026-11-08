@@ -979,6 +979,21 @@ namespace RebuildTheSchool
             return state != null && state.Fx != null && (state.Fx.Pinned || state.Fx.Riding);
         }
 
+        /// <summary>True for a prop in the list of released props, whatever it is doing (flying, pinned, riding).</summary>
+        private bool IsReleased(Transform root)
+        {
+            for (int i = 0; i < _airborne.Count; i++)
+            {
+                CarryState state = _airborne[i];
+                if (state != null && state.Root == root)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         /// <summary>
         /// Solid: the player collides with the prop and its mesh colliders work, as they do for a prop that lies
         /// in the world. Not solid (flight, carry): the player's colliders are ignored and the non-convex mesh
@@ -1490,7 +1505,7 @@ namespace RebuildTheSchool
             {
                 ProxyProp proxy = _proxies[i];
                 if (proxy == null || proxy.Root == null || !proxy.Root.gameObject.activeInHierarchy
-                    || (_held != null && proxy.Root == _held.Root) || IsAirborneRoot(proxy.Root))
+                    || (_held != null && proxy.Root == _held.Root) || IsReleased(proxy.Root))
                 {
                     continue;
                 }
