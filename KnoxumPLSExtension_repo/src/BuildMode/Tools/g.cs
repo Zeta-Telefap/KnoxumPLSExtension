@@ -73,11 +73,14 @@ namespace RebuildTheSchool
         private const float FlightParallelEpsilon = 1e-7f;
         // A thrown prop that hits a character pushes it with the call the Bully uses in Bully.Push:
         // Entity.AddForce(new Force(direction, speed, acceleration)). The Bully's own values are speed 5 and
-        // acceleration -5; here the speed grows with the prop's speed (acceleration = -speed, like the Bully)
-        // and the Bang sound (1st Prize's audBang) is played.
+        // acceleration -5. Here the speed grows with the prop's speed (acceleration = -speed, like the Bully)
+        // and is multiplied by NpcPushStrength; the Bang sound (1st Prize's audBang) is played. With
+        // acceleration = -speed the force lasts 1 s and moves the character speed / 2, so the strength
+        // multiplies the speed and the distance alike (1 = the first version; 8 = eight times stronger).
         private const float NpcPushMinSpeed = 5f;
         private const float NpcPushMaxSpeed = 25f;
         private const float NpcPushPerPropSpeed = 0.5f;
+        private const float NpcPushStrength = 8f;
         private const float NpcMinHitSpeed = 3f;
         private const float NpcHitBounce = 0.3f;
         private const float NpcBangRetryInterval = 30f;
@@ -2964,7 +2967,8 @@ namespace RebuildTheSchool
                 away = flatVelocity;
             }
 
-            float push = Mathf.Clamp(flatVelocity.magnitude * NpcPushPerPropSpeed, NpcPushMinSpeed, NpcPushMaxSpeed);
+            float push = Mathf.Clamp(flatVelocity.magnitude * NpcPushPerPropSpeed, NpcPushMinSpeed, NpcPushMaxSpeed)
+                * NpcPushStrength;
             entity.AddForce(new Force(away.normalized, push, -push));
             PlayBang(npc);
             return push;
