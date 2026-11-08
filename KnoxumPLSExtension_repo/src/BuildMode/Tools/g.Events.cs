@@ -112,6 +112,10 @@ namespace RebuildTheSchool
             "squishTime", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly FieldInfo SuperDoorSlabField = typeof(LockdownDoor).GetField(
             "door", BindingFlags.Instance | BindingFlags.NonPublic);
+        // The flippers the gravity event keeps in a private list (they are children of floor tiles, not of the event).
+        private static readonly FieldInfo GravityFlippersField = typeof(GravityEvent).GetField(
+            "flippers", BindingFlags.Instance | BindingFlags.NonPublic);
+
         private static readonly FieldInfo WhirlpoolSphereField = typeof(Whirlpool).GetField(
             "sphereCollider", BindingFlags.Instance | BindingFlags.NonPublic);
         // Navigator.destinationPoints is protected: the list is read and edited through reflection.
@@ -218,13 +222,16 @@ namespace RebuildTheSchool
         private DrReflex[] _reflexes = new DrReflex[0];
         private LockdownDoor[] _superDoors = new LockdownDoor[0];
         private StudentCrowd_Follower[] _followers = new StudentCrowd_Follower[0];
+        private StudentEvent _studentEvent;
+        private readonly List<Balder_Entity> _balderList = new List<Balder_Entity>();
+        private readonly List<DrReflex> _reflexList = new List<DrReflex>();
         private readonly List<SquishTarget> _squishTargets = new List<SquishTarget>();
-        private readonly HashSet<Transform> _squishAirborne = new HashSet<Transform>();
         private readonly Dictionary<LockdownDoor, MeshRenderer> _superDoorSlabs =
             new Dictionary<LockdownDoor, MeshRenderer>();
         private readonly Dictionary<LockdownDoor, float> _superDoorBottoms = new Dictionary<LockdownDoor, float>();
         // Footprints of the props near any character (refreshed a few times per second) and, per character
         // and frame, the ones its next leg can touch.
+        private readonly List<Vector3> _avoidNpcPositions = new List<Vector3>();
         private readonly List<PropRect> _avoidProps = new List<PropRect>();
         private readonly List<AvoidNearProp> _avoidNear = new List<AvoidNearProp>();
         private readonly Dictionary<int, AvoidState> _avoidStates = new Dictionary<int, AvoidState>();
@@ -270,8 +277,11 @@ namespace RebuildTheSchool
         }
 
         /// <summary>
-        /// The event objects exist in the scene whether or not their event runs (GravityEvent.Active says so),
-        /// so they are looked up a couple of times per second, never per fixed step.
+        /// What the events work with, a couple of times per second and never per fixed step. Nothing here searches
+        /// the scene (a search walks every object of the floor): the running events come from
+        /// EnvironmentController.GetEvent (null while the event is not running), the whirlpools from the flood's
+        /// own list, the flippers from the gravity event's private list, the students from the children of the
+        /// student event, the characters from EnvironmentController.Npcs and the doors from the level's door list.
         /// </summary>
         private void RefreshEventRegistries(bool force)
         {
@@ -282,23 +292,56 @@ namespace RebuildTheSchool
             }
 
             _nextEventScanTime = now + EventScanInterval;
-            _gravityEvent = FindObjectOfType<GravityEvent>();
-            _balders = FindObjectsOfType<Balder_Entity>();
-            _reflexes = FindObjectsOfType<DrReflex>();
-            _superDoors = FindObjectsOfType<LockdownDoor>();
-
-            _whirlpools = FindObjectsOfType<Whirlpool>();
-            _poolSpheres = new SphereCollider[_whirlpools.Length];
-            for (int i = 0; i < _whirlpools.Length; i++)
+            EnvironmentController environment = _player != null ? _player.ec : null;
+            if (environment == null)
             {
-                _poolSpheres[i] = PoolSphere(_whirlpools[i]);
+                return;
             }
 
-            _flippers = FindObjectsOfType<GravityFlipper>();
-            _flipperBounds = new Bounds[_flippers.Length];
-            for (int i = 0; i < _flippers.Length; i++)
+            _gravityEvent = environment.GetEvent(RandomEventType.Gravity) as GravityEvent;
+            RefreshFlippers();
+            RefreshWhirlpools(environment.GetEvent(RandomEventType.Flood) as FloodEvent);
+            RefreshFollowers(environment.GetEvent(RandomEventType.StudentShuffle) as StudentEvent);
+            RefreshCharacters(environment);
+            if (_levelDoorsEnvironment != environment)
             {
-                GravityFlipper flipper = _flippers[i];
+                EnsureLevelDoors(environment);
+            }
+
+            _superDoors = _levelSuperDoors;
+        }
+
+        private void RefreshFlippers()
+        {
+            List<GravityFlipper> list = null;
+            if (_gravityEvent != null)
+            {
+                if (GravityFlippersField != null)
+                {
+                    try
+                    {
+                        list = GravityFlippersField.GetValue(_gravityEvent) as List<GravityFlipper>;
+                    }
+                    catch (Exception)
+                    {
+                        list = null;
+                    }
+                }
+
+                if (list == null)
+                {
+                    // The field is gone in this version of the game: search, but only while the event runs.
+                    list = new List<GravityFlipper>(FindObjectsOfType<GravityFlipper>());
+                }
+            }
+
+            int count = list != null ? list.Count : 0;
+            _flippers = new GravityFlipper[count];
+            _flipperBounds = new Bounds[count];
+            for (int i = 0; i < count; i++)
+            {
+                GravityFlipper flipper = list[i];
+                _flippers[i] = flipper;
                 if (flipper == null)
                 {
                     continue;
@@ -313,8 +356,41 @@ namespace RebuildTheSchool
                 bounds.Expand(0.5f);
                 _flipperBounds[i] = bounds;
             }
+        }
 
-            _followers = FindObjectsOfType<StudentCrowd_Follower>();
+        private void RefreshWhirlpools(FloodEvent flood)
+        {
+            List<Whirlpool> list = flood != null ? flood.whirlpools : null;
+            int count = list != null ? list.Count : 0;
+            _whirlpools = new Whirlpool[count];
+            _poolSpheres = new SphereCollider[count];
+            for (int i = 0; i < count; i++)
+            {
+                _whirlpools[i] = list[i];
+                _poolSpheres[i] = PoolSphere(list[i]);
+            }
+        }
+
+        /// <summary>
+        /// The students of the crowd are children of the student event. The event is remembered until the last
+        /// of them is gone: it is no longer "running" while the crowd walks out, and a ride goes on until then.
+        /// </summary>
+        private void RefreshFollowers(StudentEvent crowd)
+        {
+            if (crowd != null)
+            {
+                _studentEvent = crowd;
+            }
+
+            StudentCrowd_Follower[] followers = _studentEvent != null
+                ? _studentEvent.GetComponentsInChildren<StudentCrowd_Follower>()
+                : new StudentCrowd_Follower[0];
+            if (followers.Length == 0 && crowd == null)
+            {
+                _studentEvent = null;
+            }
+
+            _followers = followers;
             for (int i = 0; i < _followers.Length; i++)
             {
                 StudentCrowd_Follower follower = _followers[i];
@@ -330,6 +406,32 @@ namespace RebuildTheSchool
                     break;
                 }
             }
+        }
+
+        private void RefreshCharacters(EnvironmentController environment)
+        {
+            _balderList.Clear();
+            _reflexList.Clear();
+            List<NPC> npcs = environment.Npcs;
+            for (int i = 0; npcs != null && i < npcs.Count; i++)
+            {
+                NPC npc = npcs[i];
+                Balder_Entity balder = npc as Balder_Entity;
+                if (balder != null)
+                {
+                    _balderList.Add(balder);
+                    continue;
+                }
+
+                DrReflex reflex = npc as DrReflex;
+                if (reflex != null)
+                {
+                    _reflexList.Add(reflex);
+                }
+            }
+
+            _balders = _balderList.ToArray();
+            _reflexes = _reflexList.ToArray();
         }
 
         /// <summary>The sphere trigger that Whirlpool itself uses for its radius (its private sphereCollider).</summary>
@@ -464,26 +566,29 @@ namespace RebuildTheSchool
                 return;
             }
 
-            CollectSquishTargets();
             TickBalders();
             TickHammers();
             TickSuperDoors();
         }
 
-        /// <summary>Every prop that can be squished: the ones in flight and the movable props of the registry.</summary>
-        private void CollectSquishTargets()
+        /// <summary>
+        /// The props that can be squished within `radius` of `centre`: the ones in flight and the movable props of
+        /// the registry (tested on the position the registry keeps, so most props cost one distance test and
+        /// nothing is asked of Unity for them). Each danger zone collects its own.
+        /// </summary>
+        private void CollectSquishTargets(Vector3 centre, float radius)
         {
             _squishTargets.Clear();
-            _squishAirborne.Clear();
+            float radiusSqr = radius * radius;
             for (int i = 0; i < _airborne.Count; i++)
             {
                 CarryState state = _airborne[i];
-                if (state == null || state.Root == null || state.Renderers == null)
+                if (state == null || state.Root == null || state.Renderers == null
+                    || (state.Root.position - centre).sqrMagnitude > radiusSqr)
                 {
                     continue;
                 }
 
-                _squishAirborne.Add(state.Root);
                 SquishTarget target;
                 target.Root = state.Root;
                 target.Renderers = state.Renderers;
@@ -493,8 +598,9 @@ namespace RebuildTheSchool
             for (int i = 0; i < _proxies.Count; i++)
             {
                 ProxyProp proxy = _proxies[i];
-                if (proxy == null || proxy.Root == null || !proxy.Root.gameObject.activeInHierarchy
-                    || (_held != null && proxy.Root == _held.Root) || _squishAirborne.Contains(proxy.Root))
+                if ((proxy.Position - centre).sqrMagnitude > radiusSqr || proxy.Root == null
+                    || !proxy.Root.gameObject.activeInHierarchy
+                    || (_held != null && proxy.Root == _held.Root) || IsReleased(proxy.Root))
                 {
                     continue;
                 }
@@ -523,6 +629,7 @@ namespace RebuildTheSchool
                 }
 
                 float near = volume.extents.magnitude + SquishNearMargin;
+                CollectSquishTargets(volume.center, near);
                 for (int j = 0; j < _squishTargets.Count; j++)
                 {
                     SquishTarget target = _squishTargets[j];
@@ -561,6 +668,7 @@ namespace RebuildTheSchool
 
                 Vector3 centre = reflex.transform.position + reflex.transform.forward * HammerReach;
                 float near = HammerRadius + SquishNearMargin;
+                CollectSquishTargets(centre, near);
                 for (int j = 0; j < _squishTargets.Count; j++)
                 {
                     SquishTarget target = _squishTargets[j];
@@ -625,6 +733,7 @@ namespace RebuildTheSchool
                 }
 
                 float near = slabBounds.extents.magnitude + SquishNearMargin;
+                CollectSquishTargets(slabBounds.center, near);
                 bool crushed = false;
                 for (int j = 0; j < _squishTargets.Count; j++)
                 {
@@ -1500,33 +1609,44 @@ namespace RebuildTheSchool
         {
             _avoidProps.Clear();
             List<NPC> npcs = environment.Npcs;
+            _avoidNpcPositions.Clear();
+            for (int n = 0; n < npcs.Count; n++)
+            {
+                NPC npc = npcs[n];
+                if (npc != null)
+                {
+                    _avoidNpcPositions.Add(npc.transform.position);
+                }
+            }
+
+            if (_avoidNpcPositions.Count == 0)
+            {
+                return;
+            }
+
             float reachSqr = AvoidScanRadius * AvoidScanRadius;
             for (int i = 0; i < _proxies.Count; i++)
             {
+                // The registry's own position and box (the box is kept until the prop moves), so a prop far from every
+                // character costs a few distance tests, and a near one costs nothing more once its box is known.
                 ProxyProp proxy = _proxies[i];
-                if (proxy == null || proxy.Root == null || !proxy.Root.gameObject.activeInHierarchy
+                Vector3 position = proxy.Position;
+                bool near = false;
+                for (int n = 0; n < _avoidNpcPositions.Count && !near; n++)
+                {
+                    float dx = _avoidNpcPositions[n].x - position.x;
+                    float dz = _avoidNpcPositions[n].z - position.z;
+                    near = dx * dx + dz * dz <= reachSqr;
+                }
+
+                if (!near || proxy.Root == null || !proxy.Root.gameObject.activeInHierarchy
                     || (_held != null && proxy.Root == _held.Root) || IsReleased(proxy.Root))
                 {
                     continue;
                 }
 
-                Vector3 position = proxy.Root.position;
-                bool near = false;
-                for (int n = 0; n < npcs.Count && !near; n++)
-                {
-                    NPC npc = npcs[n];
-                    if (npc == null)
-                    {
-                        continue;
-                    }
-
-                    Vector3 delta = npc.transform.position - position;
-                    delta.y = 0f;
-                    near = delta.sqrMagnitude <= reachSqr;
-                }
-
                 Bounds bounds = new Bounds();
-                if (!near || !CombinedBounds(proxy.Renderers, out bounds)
+                if (!ProxyBox(proxy, out bounds)
                     || bounds.max.y < AvoidBandBottom || bounds.min.y > AvoidBandTop
                     || bounds.size.x > AvoidMaxSize || bounds.size.z > AvoidMaxSize)
                 {

@@ -34,8 +34,13 @@ namespace RebuildTheSchool
         private const float AimCandidateReuseTime = 0.2f;
         private const float ProxyDepthEpsilon = 0.02f;
         private const float ProxyPruneDistance = PickupRange + 20f;
-        private const float ProxyRefreshInterval = 20f;
+        // The aim-assist registry is built from the places where props live (see BeginProxyBuild), a little per frame,
+        // once per floor and again every ProxyRefreshInterval seconds; positions are kept up to date a few per frame.
+        private const float ProxyRefreshInterval = 60f;
         private const float ProxyScanBudgetMilliseconds = 1f;
+        private const int ProxyMaxDepth = 4;
+        private const int ProxyRoomDepth = 2;
+        private const int ProxyPositionsPerFrame = 64;
         private const string GlowObjectName = "Carry placement glow";
         // Set to true to log every change of the aimed prop (off by default; G always logs its result).
         private static readonly bool VerboseAimLog = false;
@@ -48,6 +53,8 @@ namespace RebuildTheSchool
         private const float DoorSafeCloseDistance = 2f;
         private const float DoorContactPadding = 0.35f;
         private const float DoorCheckInterval = 0.12f;
+        // Without a CoreGameManager the player is looked up in the scene, at most this often (seconds).
+        private const float PlayerSearchInterval = 2f;
         // Thrown and dropped props fly on a KINEMATIC body that this class integrates itself (StepFlight):
         // a swept box against the cell grid (walls, void, closed doors and windows), the floor and the
         // ceiling, plus a box cast for loose props. Nothing in the guarantee depends on the Unity layer
@@ -66,7 +73,8 @@ namespace RebuildTheSchool
         private const float FlightScanStep = 0.1f;
         private const float FlightMinHalfExtent = 0.05f;
         private const float FlightGrowFactor = 1.3f;
-        private const float FlightDoorRefreshInterval = 0.25f;
+        // The doors of a floor do not change once it is built; the list is renewed only when it is this old and asked for.
+        private const float LevelDoorsInterval = 120f;
         private const float FlightParallelEpsilon = 1e-7f;
         // A thrown prop that hits a character pushes it with the call the Bully uses in Bully.Push:
         // Entity.AddForce(new Force(direction, speed, acceleration)). The Bully's own values are speed 5 and
@@ -128,6 +136,7 @@ namespace RebuildTheSchool
         private GlowState _hoverGlow;
         private int _lastPickupFrame = -1;
         private float _nextDoorCheckTime;
+        private float _nextPlayerSearchTime;
         private float _lastAimTime;
         private int _aimFrame = -1;
         private PlayerManager _aimPlayer;
@@ -143,12 +152,22 @@ namespace RebuildTheSchool
         private float _nextSweepErrorLogTime;
         private readonly Dictionary<long, List<FlightDoor>> _flightDoors = new Dictionary<long, List<FlightDoor>>();
         private EnvironmentController _flightDoorsEnvironment;
-        private float _nextFlightDoorRefreshTime;
+        private int _flightDoorsVersion = -1;
+        private Door[] _levelDoors = new Door[0];
+        private Window[] _levelWindows = new Window[0];
+        private Bounds[] _levelWindowBounds = new Bounds[0];
+        private LockdownDoor[] _levelSuperDoors = new LockdownDoor[0];
+        private EnvironmentController _levelDoorsEnvironment;
+        private float _levelDoorsBuiltAt = -1000f;
+        private int _levelDoorsVersion;
         private readonly List<ProxyProp> _proxies = new List<ProxyProp>();
+        private readonly Dictionary<Transform, ProxyProp> _proxyByRoot = new Dictionary<Transform, ProxyProp>();
         private readonly HashSet<Transform> _proxyVisited = new HashSet<Transform>();
+        private readonly List<ProxyContainer> _proxyContainers = new List<ProxyContainer>();
+        private readonly Stack<ProxyNode> _proxyStack = new Stack<ProxyNode>();
         private List<ProxyProp> _proxyBuilding;
-        private Renderer[] _proxyScan;
-        private int _proxyScanIndex;
+        private int _proxyContainerIndex;
+        private int _proxyCursor;
         private EnvironmentController _proxyEnvironment;
         private float _proxyBuiltAt = -1000f;
         private bool _proxyErrorLogged;
@@ -239,6 +258,19 @@ namespace RebuildTheSchool
                 _held = null;
             }
 
+            // No floor to work in (menus, a floor that is still being built): nothing below has anything to do,
+            // and the mod stays out of the way while the level loads.
+            if (_player == null || _player.ec == null)
+            {
+                if (_hoverGlow != null || _hoveredRoot != null)
+                {
+                    ClearPickupHighlight();
+                }
+
+                return;
+            }
+
+            UpdateProxyRegistry(_player);
             if (_held != null && Time.timeScale > 0f)
             {
                 ClearPickupHighlight();
@@ -686,18 +718,29 @@ namespace RebuildTheSchool
                 return;
             }
 
+            CoreGameManager gameManager = null;
             try
             {
-                CoreGameManager gameManager = Singleton<CoreGameManager>.Instance;
-                _player = gameManager != null ? gameManager.GetPlayer(0) : null;
+                gameManager = Singleton<CoreGameManager>.Instance;
+                if (gameManager != null)
+                {
+                    _player = gameManager.GetPlayer(0);
+                }
             }
             catch
             {
                 _player = null;
             }
 
-            if (_player == null || _player.ec == null)
+            // The player has no environment (ec) until the floor is built: EnvironmentController.AssignPlayers
+            // runs after LevelBuilder.Generate. Searching the scene for a PlayerClick in every frame of that time
+            // never succeeds and costs more with every object the builder has made, which is what made big floors
+            // load for ages. The scene is only searched when there is no CoreGameManager to ask, and only now
+            // and then.
+            if (gameManager == null && (_player == null || _player.ec == null)
+                && Time.unscaledTime >= _nextPlayerSearchTime)
             {
+                _nextPlayerSearchTime = Time.unscaledTime + PlayerSearchInterval;
                 PlayerClick clicker = FindObjectOfType<PlayerClick>();
                 if (clicker != null && clicker.pm != null && clicker.pm.ec != null)
                 {
@@ -733,12 +776,26 @@ namespace RebuildTheSchool
             Vector3 forward = hasCameraRay
                 ? Vector3.ProjectOnPlane(cameraRay.direction, Vector3.up).normalized
                 : Vector3.ProjectOnPlane(_held.Player.transform.forward, Vector3.up).normalized;
-            Door[] doors = FindObjectsOfType<Door>();
+            EnsureLevelDoors(_held.Environment);
+            Door[] doors = _levelDoors;
+            Vector3 playerPosition = _held.Player.transform.position;
+            float contactReach = propBounds.extents.magnitude + WorldTileWidth;
+            float aheadReach = DoorLookAhead + DoorLateralTolerance + 1f;
 
             for (int i = 0; i < doors.Length; i++)
             {
                 Door door = doors[i];
-                if (door == null || door is Window || door.ec != _held.Environment || door.locked)
+                // Windows are broken, not opened; a super door is closed by its event or lever and a prop never opens it.
+                if (door == null || door is Window || door is LockdownDoor
+                    || door.ec != _held.Environment || door.locked)
+                {
+                    continue;
+                }
+
+                // Only the doors near the prop (touching it) or near the player (the one being walked through).
+                Vector3 doorPosition = door.transform.position;
+                if ((doorPosition - propBounds.center).sqrMagnitude > contactReach * contactReach
+                    && (doorPosition - playerPosition).sqrMagnitude > aheadReach * aheadReach)
                 {
                     continue;
                 }
@@ -768,20 +825,147 @@ namespace RebuildTheSchool
                 return;
             }
 
+            EnsureLevelDoors(state.Environment);
+            if (_levelWindows.Length == 0 || _levelDoorsEnvironment != state.Environment)
+            {
+                return;
+            }
+
             // Tiny geometric tolerance avoids missed contacts from floating-point bounds; no cooldown is used.
             propBounds.Expand(0.1f);
-            Window[] windows = FindObjectsOfType<Window>();
-            for (int i = 0; i < windows.Length; i++)
+            for (int i = 0; i < _levelWindows.Length; i++)
             {
-                Window window = windows[i];
-                Bounds windowBounds;
-                if (window != null && window.ec == state.Environment
-                    && CombinedBounds(window.windows, out windowBounds)
-                    && propBounds.Intersects(windowBounds))
+                Window window = _levelWindows[i];
+                if (window != null && propBounds.Intersects(_levelWindowBounds[i]))
                 {
                     window.Break(false);
                 }
             }
+        }
+
+        /// <summary>
+        /// Every door, window and super door of the floor, looked up once per floor (and renewed when it is
+        /// LevelDoorsInterval seconds old and something asks). FindObjectsOfType walks the whole scene, which
+        /// on a floor with many objects is far too slow to repeat every frame or every physics step. The windows
+        /// come with their world boxes (they never move); the boxes come from the meshes, so a window whose
+        /// renderers are culled at the moment has one too.
+        /// </summary>
+        private void EnsureLevelDoors(EnvironmentController environment)
+        {
+            if (environment == null)
+            {
+                return;
+            }
+
+            float now = Time.unscaledTime;
+            if (environment == _levelDoorsEnvironment && now - _levelDoorsBuiltAt < LevelDoorsInterval)
+            {
+                return;
+            }
+
+            _levelDoorsEnvironment = environment;
+            _levelDoorsBuiltAt = now;
+            _levelDoorsVersion++;
+            List<Door> doors = new List<Door>();
+            List<Window> windows = new List<Window>();
+            List<Bounds> windowBounds = new List<Bounds>();
+            List<LockdownDoor> superDoors = new List<LockdownDoor>();
+            Door[] all = FindObjectsOfType<Door>();
+            for (int i = 0; i < all.Length; i++)
+            {
+                Door door = all[i];
+                if (door == null || door.ec != environment)
+                {
+                    continue;
+                }
+
+                doors.Add(door);
+                Window window = door as Window;
+                if (window != null)
+                {
+                    Bounds box;
+                    if (TryGetWindowBounds(window, out box))
+                    {
+                        windows.Add(window);
+                        windowBounds.Add(box);
+                    }
+
+                    continue;
+                }
+
+                LockdownDoor superDoor = door as LockdownDoor;
+                if (superDoor != null)
+                {
+                    superDoors.Add(superDoor);
+                }
+            }
+
+            _levelDoors = doors.ToArray();
+            _levelWindows = windows.ToArray();
+            _levelWindowBounds = windowBounds.ToArray();
+            _levelSuperDoors = superDoors.ToArray();
+        }
+
+        private static bool TryGetWindowBounds(Window window, out Bounds bounds)
+        {
+            bounds = new Bounds();
+            bool found = false;
+            Renderer[] panes = window.windows;
+            for (int i = 0; panes != null && i < panes.Length; i++)
+            {
+                Bounds pane;
+                if (!TryGetMeshWorldBounds(panes[i], out pane))
+                {
+                    continue;
+                }
+
+                if (found)
+                {
+                    bounds.Encapsulate(pane);
+                }
+                else
+                {
+                    bounds = pane;
+                    found = true;
+                }
+            }
+
+            return found || CombinedBounds(panes, out bounds);
+        }
+
+        /// <summary>
+        /// The world box of a renderer's mesh, worked out from its transform: right whether or not the renderer is
+        /// enabled at the moment (the game's culling switches the renderers of far chunks off, and the bounds of a
+        /// disabled renderer are not to be trusted).
+        /// </summary>
+        private static bool TryGetMeshWorldBounds(Renderer renderer, out Bounds bounds)
+        {
+            bounds = new Bounds();
+            Bounds local;
+            if (renderer == null || !TryGetLocalMeshBounds(renderer, out local))
+            {
+                return false;
+            }
+
+            Transform transform = renderer.transform;
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 corner = local.center + new Vector3(
+                    (i & 1) == 0 ? -local.extents.x : local.extents.x,
+                    (i & 2) == 0 ? -local.extents.y : local.extents.y,
+                    (i & 4) == 0 ? -local.extents.z : local.extents.z);
+                Vector3 world = transform.TransformPoint(corner);
+                if (i == 0)
+                {
+                    bounds = new Bounds(world, Vector3.zero);
+                }
+                else
+                {
+                    bounds.Encapsulate(world);
+                }
+            }
+
+            return true;
         }
 
         private static bool DoorBoundsTouchProp(Door door, Bounds propBounds)
@@ -1257,7 +1441,6 @@ namespace RebuildTheSchool
         {
             candidate = null;
             distance = float.MaxValue;
-            UpdateProxyRegistry(player);
             if (maxDistance <= 0f || _proxies.Count == 0)
             {
                 return false;
@@ -1268,11 +1451,6 @@ namespace RebuildTheSchool
             for (int i = 0; i < _proxies.Count; i++)
             {
                 ProxyProp proxy = _proxies[i];
-                if (proxy.Root == null || !proxy.Root.gameObject.activeInHierarchy)
-                {
-                    continue;
-                }
-
                 // Physics is authoritative for props that have colliders: when the ray already hit a
                 // movable prop, only collider-less props (which physics cannot see) may still beat it.
                 if (physicalFound && proxy.HasSolidCollider)
@@ -1280,7 +1458,13 @@ namespace RebuildTheSchool
                     continue;
                 }
 
-                if ((proxy.Root.position - ray.origin).sqrMagnitude > pruneSqr)
+                // The far props are dropped on the position kept in the registry, before anything is asked of Unity.
+                if ((proxy.Position - ray.origin).sqrMagnitude > pruneSqr)
+                {
+                    continue;
+                }
+
+                if (proxy.Root == null || !proxy.Root.gameObject.activeInHierarchy)
                 {
                     continue;
                 }
@@ -1300,35 +1484,50 @@ namespace RebuildTheSchool
                 && TryBuildCandidate(player, best.Root, best.EnvironmentObject, out candidate);
         }
 
+        /// <summary>
+        /// Builds the aim-assist registry from the places where the level builder puts props: the objects of every
+        /// room (EnvironmentObject), the base of every cell that has one (lockers, vending machines) and, shallow,
+        /// the room itself. It walks those trees a little each frame (ProxyScanBudgetMilliseconds) instead of
+        /// asking Unity for every renderer in the scene, which on a floor with many objects took tens of
+        /// thousands of lookups, again and again. Once built, the positions are refreshed a few per frame.
+        /// </summary>
         private void UpdateProxyRegistry(PlayerManager player)
         {
             if (_proxyEnvironment != player.ec)
             {
                 _proxyEnvironment = player.ec;
                 _proxies.Clear();
-                _proxyScan = null;
+                _proxyByRoot.Clear();
+                _proxyBuilding = null;
+                _proxyStack.Clear();
+                _proxyCursor = 0;
                 _proxyBuiltAt = -ProxyRefreshInterval - 1f;
             }
 
             float now = Time.unscaledTime;
-            if (_proxyScan == null)
+            if (_proxyBuilding == null)
             {
+                RefreshProxyPositions();
                 if (now - _proxyBuiltAt < ProxyRefreshInterval)
                 {
                     return;
                 }
 
-                _proxyScan = FindObjectsOfType<Renderer>();
-                _proxyScanIndex = 0;
-                _proxyBuilding = new List<ProxyProp>();
-                _proxyVisited.Clear();
+                BeginProxyBuild(player.ec);
             }
 
             float start = Time.realtimeSinceStartup;
-            while (_proxyScanIndex < _proxyScan.Length)
+            while (_proxyStack.Count > 0 || _proxyContainerIndex < _proxyContainers.Count)
             {
-                ScanProxyRenderer(player, _proxyScan[_proxyScanIndex]);
-                _proxyScanIndex++;
+                if (_proxyStack.Count == 0)
+                {
+                    ProxyContainer container = _proxyContainers[_proxyContainerIndex];
+                    _proxyContainerIndex++;
+                    PushProxyChildren(container.Root, 1, container.MaxDepth);
+                    continue;
+                }
+
+                ScanProxyNode(player, _proxyStack.Pop());
                 if ((Time.realtimeSinceStartup - start) * 1000f >= ProxyScanBudgetMilliseconds)
                 {
                     return;
@@ -1337,37 +1536,132 @@ namespace RebuildTheSchool
 
             _proxies.Clear();
             _proxies.AddRange(_proxyBuilding);
+            _proxyByRoot.Clear();
+            for (int i = 0; i < _proxies.Count; i++)
+            {
+                _proxyByRoot[_proxies[i].Root] = _proxies[i];
+            }
+
             _proxyBuilding = null;
-            _proxyScan = null;
             _proxyVisited.Clear();
+            _proxyContainers.Clear();
             _proxyBuiltAt = now;
         }
 
-        private void ScanProxyRenderer(PlayerManager player, Renderer renderer)
+        private void BeginProxyBuild(EnvironmentController environment)
         {
-            if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy)
+            _proxyBuilding = new List<ProxyProp>();
+            _proxyVisited.Clear();
+            _proxyStack.Clear();
+            _proxyContainers.Clear();
+            _proxyContainerIndex = 0;
+            List<RoomController> rooms = environment.rooms;
+            for (int i = 0; rooms != null && i < rooms.Count; i++)
+            {
+                RoomController room = rooms[i];
+                if (room == null)
+                {
+                    continue;
+                }
+
+                if (room.objectObject != null)
+                {
+                    AddProxyContainer(room.objectObject.transform, ProxyMaxDepth);
+                }
+
+                AddProxyContainer(room.transform, ProxyRoomDepth);
+            }
+
+            Cell[,] cells = environment.cells;
+            if (cells == null)
+            {
+                return;
+            }
+
+            int width = cells.GetLength(0);
+            int length = cells.GetLength(1);
+            for (int x = 0; x < width; x++)
+            {
+                for (int z = 0; z < length; z++)
+                {
+                    // ObjectBase creates itself when asked: only the cells that already have one are looked at.
+                    Cell cell = cells[x, z];
+                    if (cell != null && cell.HasObjectBase)
+                    {
+                        AddProxyContainer(cell.ObjectBase, ProxyMaxDepth);
+                    }
+                }
+            }
+        }
+
+        private void AddProxyContainer(Transform root, int maxDepth)
+        {
+            if (root == null)
+            {
+                return;
+            }
+
+            ProxyContainer container;
+            container.Root = root;
+            container.MaxDepth = maxDepth;
+            _proxyContainers.Add(container);
+        }
+
+        private void PushProxyChildren(Transform parent, int depth, int maxDepth)
+        {
+            if (parent == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < parent.childCount; i++)
+            {
+                ProxyNode item;
+                item.Node = parent.GetChild(i);
+                item.Depth = depth;
+                item.MaxDepth = maxDepth;
+                _proxyStack.Push(item);
+            }
+        }
+
+        /// <summary>
+        /// One transform of the walk. An EnvironmentObject is a prop root; so is the outermost transform with a
+        /// supported name (FindSupportedPropRoot, from the top down); tiles, doors, characters and activities end
+        /// the branch, as they end the climb of FindSupportedPropRoot.
+        /// </summary>
+        private void ScanProxyNode(PlayerManager player, ProxyNode item)
+        {
+            Transform node = item.Node;
+            if (node == null)
             {
                 return;
             }
 
             try
             {
-                EnvironmentObject environmentObject = renderer.GetComponentInParent<EnvironmentObject>();
-                Transform root = environmentObject != null
-                    ? environmentObject.transform
-                    : FindSupportedPropRoot(renderer.transform);
-                if (root == null || !_proxyVisited.Add(root))
+                EnvironmentObject environmentObject = node.GetComponent<EnvironmentObject>();
+                if (environmentObject != null)
+                {
+                    AddProxyRoot(player, node, environmentObject);
+                    return;
+                }
+
+                if (node.GetComponent<TileBasedObject>() != null || node.GetComponent<RoomController>() != null
+                    || node.GetComponent<NPC>() != null || node.GetComponent<Activity>() != null
+                    || node.GetComponent<Door>() != null)
                 {
                     return;
                 }
 
-                Cell cell;
-                bool eligible = environmentObject != null
-                    ? CanPickupEnvironmentObject(environmentObject, player, out cell)
-                    : !IsForbiddenPropHierarchy(root);
-                if (eligible)
+                if (IsSupportedPropName(node.name))
                 {
-                    _proxyBuilding.Add(BuildProxy(root, environmentObject, HasSolidCollider(root)));
+                    AddProxyRoot(player, node, null);
+                    return;
+                }
+
+                if (item.Depth < item.MaxDepth)
+                {
+                    PushProxyChildren(node, item.Depth + 1, item.MaxDepth);
                 }
             }
             catch (Exception exception)
@@ -1375,9 +1669,127 @@ namespace RebuildTheSchool
                 if (!_proxyErrorLogged)
                 {
                     _proxyErrorLogged = true;
-                    Debug.LogWarning("[Rebuild the School] Prop scan skipped a renderer: " + exception.Message);
+                    Debug.LogWarning("[Rebuild the School] Prop scan skipped an object: " + exception.Message);
                 }
             }
+        }
+
+        private void AddProxyRoot(PlayerManager player, Transform root, EnvironmentObject environmentObject)
+        {
+            if (!_proxyVisited.Add(root))
+            {
+                return;
+            }
+
+            Cell cell;
+            bool eligible = environmentObject != null
+                ? CanPickupEnvironmentObject(environmentObject, player, out cell)
+                : !IsForbiddenPropHierarchy(root);
+            if (!eligible)
+            {
+                return;
+            }
+
+            ProxyProp proxy = BuildProxy(root, environmentObject, HasSolidCollider(root));
+            if (proxy.Renderers.Length == 0)
+            {
+                return;
+            }
+
+            proxy.Position = root.position;
+            _proxyBuilding.Add(proxy);
+        }
+
+        /// <summary>The positions of a few props per frame, round and round (a moved prop also reports itself, NoteProxyMoved).</summary>
+        private void RefreshProxyPositions()
+        {
+            int count = _proxies.Count;
+            int steps = Mathf.Min(count, ProxyPositionsPerFrame);
+            for (int i = 0; i < steps; i++)
+            {
+                if (_proxyCursor >= count)
+                {
+                    _proxyCursor = 0;
+                }
+
+                ProxyProp proxy = _proxies[_proxyCursor];
+                _proxyCursor++;
+                if (proxy.Root != null)
+                {
+                    Vector3 position = proxy.Root.position;
+                    if ((position - proxy.Position).sqrMagnitude > 0.0001f)
+                    {
+                        proxy.Position = position;
+                        proxy.HasBox = false;
+                    }
+                }
+            }
+        }
+
+        /// <summary>A prop of the registry that was put somewhere (landed, placed, sent home) says where it is now.</summary>
+        private void NoteProxyMoved(Transform root)
+        {
+            ProxyProp proxy;
+            if (root != null && _proxyByRoot.TryGetValue(root, out proxy) && proxy.Root != null)
+            {
+                proxy.Position = root.position;
+                proxy.HasBox = false;
+            }
+        }
+
+        /// <summary>
+        /// The world box of a registry prop, worked out from its meshes (so a prop whose renderers are culled at the
+        /// moment has one too) and kept until the prop moves.
+        /// </summary>
+        private static bool ProxyBox(ProxyProp proxy, out Bounds bounds)
+        {
+            if (proxy.HasBox)
+            {
+                bounds = proxy.Box;
+                return true;
+            }
+
+            bounds = new Bounds();
+            bool found = false;
+            Renderer[] renderers = proxy.Renderers;
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                Renderer renderer = renderers[i];
+                if (renderer == null)
+                {
+                    continue;
+                }
+
+                Bounds one = new Bounds();
+                bool has = proxy.HasLocalBounds[i] && TryGetMeshWorldBounds(renderer, out one);
+                if (!has)
+                {
+                    if (!renderer.enabled || !renderer.gameObject.activeInHierarchy)
+                    {
+                        continue;
+                    }
+
+                    one = renderer.bounds;
+                }
+
+                if (found)
+                {
+                    bounds.Encapsulate(one);
+                }
+                else
+                {
+                    bounds = one;
+                    found = true;
+                }
+            }
+
+            if (found)
+            {
+                proxy.Box = bounds;
+                proxy.HasBox = true;
+            }
+
+            return found;
         }
 
         private static bool HasSolidCollider(Transform root)
@@ -2559,20 +2971,21 @@ namespace RebuildTheSchool
 
         private void RefreshFlightDoors(EnvironmentController environment)
         {
-            if (environment == _flightDoorsEnvironment && Time.unscaledTime < _nextFlightDoorRefreshTime)
+            EnsureLevelDoors(environment);
+            if (environment == _flightDoorsEnvironment && _flightDoorsVersion == _levelDoorsVersion)
             {
                 return;
             }
 
             _flightDoorsEnvironment = environment;
-            _nextFlightDoorRefreshTime = Time.unscaledTime + FlightDoorRefreshInterval;
+            _flightDoorsVersion = _levelDoorsVersion;
             _flightDoors.Clear();
             if (environment == null)
             {
                 return;
             }
 
-            Door[] doors = FindObjectsOfType<Door>();
+            Door[] doors = _levelDoors;
             for (int i = 0; i < doors.Length; i++)
             {
                 Door door = doors[i];
@@ -3626,6 +4039,7 @@ namespace RebuildTheSchool
 
             if (placed)
             {
+                NoteProxyMoved(state.Root);
                 LogLanding(state);
                 return;
             }
@@ -4127,6 +4541,7 @@ namespace RebuildTheSchool
                 state.Root.rotation = state.OriginalRotation;
                 AddRendererReferences(state.OriginCell, state.RegisteredRenderers);
                 RestoreBody(state, true);
+                NoteProxyMoved(state.Root);
             }
             catch (Exception exception)
             {
@@ -4461,6 +4876,9 @@ namespace RebuildTheSchool
             return propRoot;
         }
 
+        // A name is looked at over and over (every renderer of every copy of a prop has one), so the answer is kept.
+        private static readonly Dictionary<string, bool> SupportedNames = new Dictionary<string, bool>();
+
         private static bool IsSupportedPropName(string name)
         {
             if (string.IsNullOrEmpty(name))
@@ -4468,6 +4886,24 @@ namespace RebuildTheSchool
                 return false;
             }
 
+            bool supported;
+            if (SupportedNames.TryGetValue(name, out supported))
+            {
+                return supported;
+            }
+
+            supported = ComputeSupportedPropName(name);
+            if (SupportedNames.Count >= 4096)
+            {
+                SupportedNames.Clear();
+            }
+
+            SupportedNames[name] = supported;
+            return supported;
+        }
+
+        private static bool ComputeSupportedPropName(string name)
+        {
             string value = name.ToLowerInvariant();
             if (value.Contains("bedroom") || value.Contains("classroom") || value.Contains("bathroom"))
             {
@@ -4794,6 +5230,12 @@ namespace RebuildTheSchool
             }
         }
 
+        /// <summary>
+        /// The coverage that the other props standing in this cell still provide: the EnvironmentObjects of the
+        /// cell's room and the lockers on the cell's base. Only those two places are looked at (they are where such
+        /// props live); asking Unity for every EnvironmentObject and every MeshRenderer of the scene on each pickup
+        /// froze the game for a while on floors with many objects.
+        /// </summary>
         private static CellCoverage OtherCoverageProviders(
             EnvironmentController environment,
             Cell cell,
@@ -4801,37 +5243,48 @@ namespace RebuildTheSchool
             CellCoverage coverage)
         {
             CellCoverage provided = CellCoverage.None;
-            EnvironmentObject[] objects = FindObjectsOfType<EnvironmentObject>();
-            for (int i = 0; i < objects.Length; i++)
+            if (cell == null || cell.room == null)
             {
-                EnvironmentObject item = objects[i];
-                if (item == null || item.transform == excludedRoot || item.Ec != environment)
-                {
-                    continue;
-                }
+                return provided;
+            }
 
-                Cell itemCell;
-                if (TryGetCell(environment, item.transform.position, out itemCell) && itemCell == cell)
+            if (cell.room.objectObject != null)
+            {
+                EnvironmentObject[] objects = cell.room.objectObject.GetComponentsInChildren<EnvironmentObject>(true);
+                for (int i = 0; i < objects.Length; i++)
                 {
-                    provided |= item.coverage.Rotated(DirectionFromRotation(item.transform.rotation));
+                    EnvironmentObject item = objects[i];
+                    if (item == null || item.transform == excludedRoot || item.Ec != environment)
+                    {
+                        continue;
+                    }
+
+                    Cell itemCell;
+                    if (TryGetCell(environment, item.transform.position, out itemCell) && itemCell == cell)
+                    {
+                        provided |= item.coverage.Rotated(DirectionFromRotation(item.transform.rotation));
+                    }
                 }
             }
 
-            MeshRenderer[] renderers = FindObjectsOfType<MeshRenderer>();
-            HashSet<Transform> visited = new HashSet<Transform>();
-            for (int i = 0; i < renderers.Length; i++)
+            if (cell.HasObjectBase)
             {
-                Transform root = renderers[i] != null
-                    ? FindSupportedPropRoot(renderers[i].transform) : null;
-                if (root == null || root == excludedRoot || !IsLocker(root) || !visited.Add(root))
+                MeshRenderer[] renderers = cell.ObjectBase.GetComponentsInChildren<MeshRenderer>(true);
+                HashSet<Transform> visited = new HashSet<Transform>();
+                for (int i = 0; i < renderers.Length; i++)
                 {
-                    continue;
-                }
+                    Transform root = renderers[i] != null
+                        ? FindSupportedPropRoot(renderers[i].transform) : null;
+                    if (root == null || root == excludedRoot || !IsLocker(root) || !visited.Add(root))
+                    {
+                        continue;
+                    }
 
-                Cell itemCell;
-                if (TryGetCell(environment, root.position, out itemCell) && itemCell == cell)
-                {
-                    provided |= LockerCoverage(root.rotation);
+                    Cell itemCell;
+                    if (TryGetCell(environment, root.position, out itemCell) && itemCell == cell)
+                    {
+                        provided |= LockerCoverage(root.rotation);
+                    }
                 }
             }
 
@@ -4960,6 +5413,24 @@ namespace RebuildTheSchool
             public Renderer[] Renderers;
             public Bounds[] LocalBounds;
             public bool[] HasLocalBounds;
+            // Where the root was last seen: the queries that look at every prop test this, not the transform.
+            public Vector3 Position;
+            // The world box of the meshes, worked out once and kept until the prop moves (ProxyBox).
+            public bool HasBox;
+            public Bounds Box;
+        }
+
+        private struct ProxyContainer
+        {
+            public Transform Root;
+            public int MaxDepth;
+        }
+
+        private struct ProxyNode
+        {
+            public Transform Node;
+            public int Depth;
+            public int MaxDepth;
         }
 
         private enum ParentKind
