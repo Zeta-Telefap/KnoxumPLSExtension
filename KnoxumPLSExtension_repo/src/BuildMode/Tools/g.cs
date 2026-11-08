@@ -13,9 +13,6 @@ namespace RebuildTheSchool
     {
         private const float PickupRange = 16f;
         private const float CarryOrbitRadius = 6f;
-        private const float PickupHalfWidth = 0f;
-        internal const float PickupStripHalfThickness = 0.03f;
-        internal const float PickupHalfHeight = 2.25f;
         private const float ThrowSpeed = 20f;
         private const float CarryRotationSpeed = 720f;
         private const float CarryMoveSmoothTime = 0.08f;
@@ -89,8 +86,8 @@ namespace RebuildTheSchool
         private const string BullyingRule = "Bullying";
         private const float BullyingLinger = 1f;
         private const float BullyingSensitivity = 0.25f;
-        // While a prop or structure is carried, and for a moment after it was thrown or placed, the game does not
-        // see the mouse: LMB (PlayerClick), RMB (ItemManager.UseItem) and the wheel (item selection).
+        // While a prop is carried, and for a moment after it was thrown or placed, the game does not see the
+        // mouse: LMB (PlayerClick), RMB (ItemManager.UseItem) and the wheel (item selection).
         private const float GameMouseBlockAfterRelease = 0.3f;
         // Sounds (SoundObject asset names). Bang is also 1st Prize's audBang, Ben_Gum_Whoosh is also the audWhoosh of
         // the Gum. The whoosh loops while a thrown prop flies, Bang plays on every wall impact, LockDoorStop (quiet)
@@ -157,22 +154,18 @@ namespace RebuildTheSchool
         private bool _proxyErrorLogged;
 
         public static g Instance { get; private set; }
-        internal bool IsHoldingObject { get { return _held != null; } }
 
         /// <summary>
-        /// True while a prop or structure is carried and for GameMouseBlockAfterRelease seconds after it was thrown
-        /// or placed. The game then ignores LMB (PlayerClick), RMB (ItemManager.UseItem) and the wheel (item
-        /// selection). This mod reads the mouse itself, through UnityEngine.Input, and is not affected.
+        /// True while a prop is carried and for GameMouseBlockAfterRelease seconds after it was thrown or placed.
+        /// The game then ignores LMB (PlayerClick), RMB (ItemManager.UseItem) and the wheel (item selection).
+        /// This mod reads the mouse itself, through UnityEngine.Input, and is not affected.
         /// </summary>
         internal static bool GameMouseBlocked
         {
             get
             {
                 g props = Instance;
-                g2 structures = g2.Instance;
-                return Time.unscaledTime < _gameMouseBlockedUntil
-                    || (props != null && props._held != null)
-                    || (structures != null && structures.IsDragging);
+                return Time.unscaledTime < _gameMouseBlockedUntil || (props != null && props._held != null);
             }
         }
 
@@ -251,8 +244,7 @@ namespace RebuildTheSchool
                 UpdatePlacementPreview(_held);
                 UpdateDoorForCarriedProp();
             }
-            else if (_held == null && Time.timeScale > 0f
-                && (g2.Instance == null || !g2.Instance.IsDragging))
+            else if (_held == null && Time.timeScale > 0f)
             {
                 UpdatePickupHighlight();
             }
@@ -261,20 +253,10 @@ namespace RebuildTheSchool
                 ClearPickupHighlight();
             }
 
-            if (_held == null && Time.timeScale > 0f && PickupPressed()
-                && (g2.Instance == null || !g2.Instance.IsDragging))
+            if (_held == null && Time.timeScale > 0f && PickupPressed())
             {
-                // A prop under the crosshair always wins: it comes from the same fresh query that
-                // drives the glow. Only when there is none does G fall through to g2's structures.
-                if (TryPickupHighlighted(_player))
-                {
-                    return;
-                }
-
-                if (g2.Instance != null)
-                {
-                    g2.Instance.HandlePickupRequest(_player);
-                }
+                // The prop comes from the same fresh query that drives the glow.
+                TryPickupHighlighted(_player);
             }
         }
 
@@ -492,10 +474,9 @@ namespace RebuildTheSchool
         }
 
         /// <summary>
-        /// The single G entry point shared by g.Update, g2.Update and the PlayerClick hook. It runs the
-        /// same per-frame aim query as the glow. Returns true when a prop is under the crosshair
-        /// (picked, or refused with a logged reason) so structural selection never also claims the same
-        /// key press; false when there is no prop target at all.
+        /// The single G entry point shared by g.Update and the PlayerClick hook. It runs the same
+        /// per-frame aim query as the glow. Returns true when a prop is under the crosshair (picked, or
+        /// refused with a logged reason); false when there is no prop target at all.
         /// </summary>
         internal bool TryPickupHighlighted(PlayerManager player)
         {
@@ -527,19 +508,6 @@ namespace RebuildTheSchool
 
             TryPickup(player, target);
             return true;
-        }
-
-        /// <summary>True while a prop is (or was an instant ago) under the crosshair; g2 yields to it.</summary>
-        internal bool HasPropTarget(PlayerManager player)
-        {
-            if (_held != null || player == null)
-            {
-                return false;
-            }
-
-            return ResolveAimThisFrame(player) != null
-                || (_hoveredCandidate != null && _hoveredCandidate.Root != null
-                    && Time.unscaledTime - _lastAimTime <= HighlightGraceTime);
         }
 
         private void UpdatePlacementPreview(CarryState state)
@@ -4219,62 +4187,6 @@ namespace RebuildTheSchool
             return false;
         }
 
-        internal static bool BoundsIntersectPickupCorridor(
-            Renderer[] renderers,
-            Ray ray,
-            out float distance)
-        {
-            distance = float.MaxValue;
-            Bounds bounds;
-            return CombinedBounds(renderers, out bounds)
-                && BoundsIntersectsPickupStrip(bounds, ray, out distance);
-        }
-
-        private static bool BoundsIntersectsPickupStrip(Bounds bounds, Ray ray, out float distance)
-        {
-            distance = float.MaxValue;
-            Vector3 direction = ray.direction.normalized;
-            Vector3 right = Vector3.Cross(direction, Vector3.up);
-            if (right.sqrMagnitude < 0.001f)
-            {
-                right = Vector3.Cross(direction, Vector3.forward);
-            }
-
-            if (right.sqrMagnitude < 0.001f)
-            {
-                return false;
-            }
-
-            right.Normalize();
-            Vector3 up = Vector3.Cross(right, direction).normalized;
-            Vector3 delta = bounds.center - ray.origin;
-            Vector3 extents = bounds.extents;
-            Vector3 absRight = new Vector3(Mathf.Abs(right.x), Mathf.Abs(right.y), Mathf.Abs(right.z));
-            Vector3 absUp = new Vector3(Mathf.Abs(up.x), Mathf.Abs(up.y), Mathf.Abs(up.z));
-            Vector3 absDirection = new Vector3(
-                Mathf.Abs(direction.x), Mathf.Abs(direction.y), Mathf.Abs(direction.z));
-
-            float sideReach = Vector3.Dot(extents, absRight) + PickupHalfWidth;
-            float verticalReach = Vector3.Dot(extents, absUp) + PickupHalfHeight;
-            if (Mathf.Abs(Vector3.Dot(delta, right)) > sideReach
-                || Mathf.Abs(Vector3.Dot(delta, up)) > verticalReach)
-            {
-                return false;
-            }
-
-            float centerDistance = Vector3.Dot(delta, direction);
-            float depth = Vector3.Dot(extents, absDirection);
-            float entryDistance = centerDistance - depth;
-            float exitDistance = centerDistance + depth;
-            if (exitDistance < 0f || entryDistance > PickupRange)
-            {
-                return false;
-            }
-
-            distance = Mathf.Max(0f, entryDistance);
-            return true;
-        }
-
         private static bool CombinedBounds(Renderer[] renderers, out Bounds bounds)
         {
             bounds = new Bounds();
@@ -5056,26 +4968,6 @@ namespace RebuildTheSchool
             [HarmonyPrefix]
             private static bool Prefix(PlayerClick __instance)
             {
-                g2 structuralRuntime = g2.Instance;
-                if (structuralRuntime != null)
-                {
-                    try
-                    {
-                        if (structuralRuntime.HandlePlayerClick(__instance))
-                        {
-                            return false;
-                        }
-                    }
-                    catch (Exception exception)
-                    {
-                        Debug.LogError("[Rebuild the School] Structural PlayerClick input hook failed: " + exception);
-                        if (structuralRuntime.IsDragging)
-                        {
-                            return false;
-                        }
-                    }
-                }
-
                 g runtime = Instance;
                 if (runtime == null)
                 {
@@ -5098,8 +4990,8 @@ namespace RebuildTheSchool
                     }
                 }
 
-                // A prop or structure was just thrown or placed: the click that did it must not also click on
-                // something the game can see.
+                // A prop was just thrown or placed: the click that did it must not also click on something the
+                // game can see.
                 if (Time.unscaledTime < _gameMouseBlockedUntil)
                 {
                     __instance.clickedThisFrame = null;

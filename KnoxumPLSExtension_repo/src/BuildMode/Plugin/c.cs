@@ -28,13 +28,12 @@ namespace RebuildTheSchool
                 _runtimeObject = new GameObject("RebuildTheSchool.Runtime");
                 DontDestroyOnLoad(_runtimeObject);
                 _runtimeObject.AddComponent<g>();
-                _runtimeObject.AddComponent<g2>();
 
                 _harmony = new Harmony(PluginGuid);
                 _harmony.PatchAll(typeof(c).Assembly);
                 g.TryPatchGameInput(_harmony);
 
-                Logger.LogInfo($"{PluginName} loaded. G selects from a narrow vertical strip at screen center; LMB places, RMB throws props only, wheel moves structures to walls, Shift+wheel strafes, R+wheel rotates.");
+                Logger.LogInfo($"{PluginName} loaded. G picks up the prop under the crosshair; LMB places it, RMB throws it, R + mouse wheel rotates it.");
             }
             catch (Exception exception)
             {
