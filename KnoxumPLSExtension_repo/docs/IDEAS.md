@@ -46,3 +46,12 @@
 - when Dr. Reflex is angry/hunting he can break breakable windows to reach the player
 - first version may be simple raycast-based logic
 - later version could consider path obstruction more intelligently
+
+## Build Mode / Builder Garage (см. `BUILD_MODE_DESIGN.md`)
+- перетаскивание мебели (автоматы, шкафы, столы) в режиме стройки
+- перенос и снос стен (грань клетки, не объект) и дверей (синие / жёлтые)
+- пристройки-комнаты модулями 1x1 … 3x3 внутри свободных клеток уровня
+- Builder Garage: комната-магазин, где мебель, стены, двери и комнаты покупаются за YTP
+- ресток ассортимента за сдачу собранных объектов интерьера и стен; за ресток начислять бонусные YTP
+- отдельный счётчик собранного для рестока; ванильные слоты инвентаря не занимать
+- dev-инспектор клетки как первый этап (проверка `constBin`, покрытия, комнат)
