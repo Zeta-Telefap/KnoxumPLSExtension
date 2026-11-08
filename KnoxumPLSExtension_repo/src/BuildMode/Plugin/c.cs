@@ -32,6 +32,7 @@ namespace RebuildTheSchool
 
                 _harmony = new Harmony(PluginGuid);
                 _harmony.PatchAll(typeof(c).Assembly);
+                g.TryPatchGameInput(_harmony);
 
                 Logger.LogInfo($"{PluginName} loaded. G selects from a narrow vertical strip at screen center; LMB places, RMB throws props only, wheel moves structures to walls, Shift+wheel strafes, R+wheel rotates.");
             }

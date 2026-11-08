@@ -83,8 +83,27 @@ namespace RebuildTheSchool
         private const float NpcPushStrength = 8f;
         private const float NpcMinHitSpeed = 3f;
         private const float NpcHitBounce = 0.3f;
-        private const float NpcBangRetryInterval = 30f;
+        // A thrown prop that touches a character breaks the player's "Bullying" rule (PlayerManager.RuleBreak, the
+        // way drinking or entering a faculty room do): the Principal scolds the player when he sees it within
+        // BullyingLinger seconds, for at least BullyingSensitivity seconds in total.
+        private const string BullyingRule = "Bullying";
+        private const float BullyingLinger = 1f;
+        private const float BullyingSensitivity = 0.25f;
+        // While a prop or structure is carried, and for a moment after it was thrown or placed, the game does not
+        // see the mouse: LMB (PlayerClick), RMB (ItemManager.UseItem) and the wheel (item selection).
+        private const float GameMouseBlockAfterRelease = 0.3f;
+        // Sounds (SoundObject asset names). Bang is also 1st Prize's audBang, Ben_Gum_Whoosh is also the audWhoosh of
+        // the Gum. The whoosh loops while a thrown prop flies, Bang plays on every wall impact, LockDoorStop (quiet)
+        // when the prop touches the floor.
         private const string BangSoundName = "Bang";
+        private const string WhooshSoundName = "Ben_Gum_Whoosh";
+        private const string FloorSoundName = "LockDoorStop";
+        private const float FloorSoundVolume = 0.25f;
+        private const float SoundMinDistance = 10f;
+        private const float SoundMaxDistance = 70f;
+        private const float ImpactSoundMinSpeed = 2.5f;
+        private const float ImpactSoundInterval = 0.2f;
+        private const float SoundRescanInterval = 30f;
         private static readonly float[] FlightFitScales = { 1f, 0.85f, 0.7f, 0.55f, 0.4f, 0.3f, 0.2f, 0.12f, 0.06f };
 
         private static readonly FieldInfo HardCoverageField = typeof(Cell).GetField(
@@ -96,8 +115,12 @@ namespace RebuildTheSchool
         private static readonly Collider[] WalkabilityHits = new Collider[128];
         private static readonly List<Collider> NpcColliders = new List<Collider>();
         private static readonly RayHitComparer RayHitOrder = new RayHitComparer();
-        private static SoundObject _bangSound;
-        private static float _nextBangSearchTime;
+        private static readonly Dictionary<string, SoundObject> SoundsByName =
+            new Dictionary<string, SoundObject>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> SoundsReported = new HashSet<string>();
+        private static float _nextSoundScanTime;
+        private static float _nextSoundErrorLogTime;
+        private static float _gameMouseBlockedUntil;
 
         private readonly List<CarryState> _airborne = new List<CarryState>();
         private CarryState _held;
@@ -135,6 +158,64 @@ namespace RebuildTheSchool
 
         public static g Instance { get; private set; }
         internal bool IsHoldingObject { get { return _held != null; } }
+
+        /// <summary>
+        /// True while a prop or structure is carried and for GameMouseBlockAfterRelease seconds after it was thrown
+        /// or placed. The game then ignores LMB (PlayerClick), RMB (ItemManager.UseItem) and the wheel (item
+        /// selection). This mod reads the mouse itself, through UnityEngine.Input, and is not affected.
+        /// </summary>
+        internal static bool GameMouseBlocked
+        {
+            get
+            {
+                g props = Instance;
+                g2 structures = g2.Instance;
+                return Time.unscaledTime < _gameMouseBlockedUntil
+                    || (props != null && props._held != null)
+                    || (structures != null && structures.IsDragging);
+            }
+        }
+
+        internal static void BlockGameMouseBriefly()
+        {
+            _gameMouseBlockedUntil = Time.unscaledTime + GameMouseBlockAfterRelease;
+        }
+
+        /// <summary>
+        /// Stops the game from using an item (RMB) or switching items (wheel) while the mouse is blocked. The
+        /// plugin calls it once after PatchAll; a method that cannot be patched only leaves that input unblocked.
+        /// </summary>
+        internal static void TryPatchGameInput(Harmony harmony)
+        {
+            string[] methods = { "UseItem", "IncreaseItemSelection", "DecreaseItemSelection" };
+            for (int i = 0; i < methods.Length; i++)
+            {
+                try
+                {
+                    MethodInfo target = AccessTools.Method(typeof(ItemManager), methods[i]);
+                    MethodInfo skip = typeof(g).GetMethod(
+                        nameof(SkipItemInputWhileBlocked), BindingFlags.Static | BindingFlags.NonPublic);
+                    if (target == null || skip == null)
+                    {
+                        Debug.LogWarning("[Rebuild the School] ItemManager." + methods[i]
+                            + " was not found; the game keeps reading that input while a prop is carried.");
+                        continue;
+                    }
+
+                    harmony.Patch(target, prefix: new HarmonyMethod(skip));
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning("[Rebuild the School] ItemManager." + methods[i]
+                        + " could not be blocked while a prop is carried: " + exception.Message);
+                }
+            }
+        }
+
+        private static bool SkipItemInputWhileBlocked()
+        {
+            return !GameMouseBlocked;
+        }
 
         private void Awake()
         {
@@ -1793,6 +1874,7 @@ namespace RebuildTheSchool
             }
 
             CarryState state = _held;
+            BlockGameMouseBriefly();
             try
             {
                 Ray ray;
@@ -1811,7 +1893,13 @@ namespace RebuildTheSchool
                 state.Thrown = throwForward;
                 state.WallHits = 0;
                 state.PushedNpcs = null;
+                state.NextImpactSoundTime = 0f;
                 _airborne.Add(state);
+                if (throwForward)
+                {
+                    StartFlightSound(state);
+                }
+
                 _held = null;
                 InvalidateAim();
                 Debug.Log(throwForward
@@ -2157,7 +2245,7 @@ namespace RebuildTheSchool
                     c += hit.Normal * FlightSkin;
                 }
 
-                RegisterFlightImpact(state, hit, v);
+                RegisterFlightImpact(state, hit, v, c);
                 v = FlightReflect(v, hit.Normal);
                 remaining *= 1f - hit.T;
             }
@@ -2171,6 +2259,17 @@ namespace RebuildTheSchool
             if (state.Thrown)
             {
                 HitNpcs(state, stepStart, c, half, impactVelocity, ref v);
+            }
+
+            if (landed)
+            {
+                // The prop touched the floor (or a support): the whoosh ends, a quiet LockDoorStop plays.
+                StopFlightSound(state);
+                PlaySoundAt(c, FloorSoundName, FloorSoundVolume);
+            }
+            else if (state.FlightSoundObject != null)
+            {
+                state.FlightSoundObject.transform.position = c;
             }
 
             state.FlightVelocity = landed ? Vector3.zero : v;
@@ -2303,9 +2402,10 @@ namespace RebuildTheSchool
             return tangent * FlightBounceFriction + normal * away;
         }
 
-        private static void RegisterFlightImpact(CarryState state, FlightHit hit, Vector3 velocity)
+        private static void RegisterFlightImpact(CarryState state, FlightHit hit, Vector3 velocity, Vector3 point)
         {
             state.WallHits++;
+            PlayImpactSound(state, hit, velocity, point);
             if (state.WallHits != 1)
             {
                 return;
@@ -2337,6 +2437,22 @@ namespace RebuildTheSchool
             float into = Mathf.Max(0f, -Vector3.Dot(velocity, hit.Normal));
             Debug.Log("[Rebuild the School] " + (state.Thrown ? "Thrown" : "Dropped") + " prop hit " + what
                 + " at " + into.ToString("0.0") + " u/s; bounced.");
+        }
+
+        /// <summary>
+        /// A prop that hits a wall, a closed door, the ceiling or a loose collider plays Bang. Grazing contacts
+        /// and a quick series of bounces stay silent.
+        /// </summary>
+        private static void PlayImpactSound(CarryState state, FlightHit hit, Vector3 velocity, Vector3 point)
+        {
+            float into = Mathf.Max(0f, -Vector3.Dot(velocity, hit.Normal));
+            if (into < ImpactSoundMinSpeed || Time.time < state.NextImpactSoundTime)
+            {
+                return;
+            }
+
+            state.NextImpactSoundTime = Time.time + ImpactSoundInterval;
+            PlaySoundAt(point, BangSoundName, 1f);
         }
 
         /// <summary>The flight integrator reached the floor or a support: put the prop there for settling.</summary>
@@ -2934,10 +3050,11 @@ namespace RebuildTheSchool
 
                     state.PushedNpcs.Add(npc);
                     float push = PushNpc(npc, entity, away, flat);
+                    BreakBullyingRule(state);
                     hit = true;
                     Debug.Log("[Rebuild the School] Thrown prop hit " + npc.name + " at "
                         + flat.magnitude.ToString("0.0") + " u/s; pushed it away at "
-                        + push.ToString("0.0") + " u/s (Bang).");
+                        + push.ToString("0.0") + " u/s (Bang); the player broke the Bullying rule.");
                 }
 
                 if (hit)
@@ -3066,7 +3183,7 @@ namespace RebuildTheSchool
 
         private static void PlayBang(NPC npc)
         {
-            SoundObject bang = FindBangSound();
+            SoundObject bang = GetSound(BangSoundName);
             if (bang == null)
             {
                 return;
@@ -3080,44 +3197,207 @@ namespace RebuildTheSchool
             }
         }
 
-        /// <summary>
-        /// The Bang sound: the SoundObject named "Bang", otherwise 1st Prize's audBang (it plays it when it slams
-        /// into a wall). Found once; a failed search is repeated after NpcBangRetryInterval seconds.
-        /// </summary>
-        private static SoundObject FindBangSound()
+        /// <summary>The player breaks the "Bullying" rule; the Principal reacts when he sees it.</summary>
+        private static void BreakBullyingRule(CarryState state)
         {
-            if (_bangSound != null || Time.unscaledTime < _nextBangSearchTime)
+            if (state.Player != null)
             {
-                return _bangSound;
+                state.Player.RuleBreak(BullyingRule, BullyingLinger, BullyingSensitivity);
+            }
+        }
+
+        // --- sounds of a flying prop ---
+
+        /// <summary>
+        /// A sound by its SoundObject name. All SoundObjects are indexed on first use (and again after
+        /// SoundRescanInterval seconds while a requested sound is missing), so a lookup is free afterwards.
+        /// </summary>
+        private static SoundObject GetSound(string name)
+        {
+            SoundObject sound;
+            if (SoundsByName.TryGetValue(name, out sound) && sound != null)
+            {
+                return sound;
             }
 
-            _nextBangSearchTime = Time.unscaledTime + NpcBangRetryInterval;
-            SoundObject[] sounds = Resources.FindObjectsOfTypeAll<SoundObject>();
-            for (int i = 0; i < sounds.Length && _bangSound == null; i++)
+            if (Time.unscaledTime < _nextSoundScanTime)
             {
-                if (sounds[i] != null
-                    && string.Equals(sounds[i].name, BangSoundName, StringComparison.OrdinalIgnoreCase))
-                {
-                    _bangSound = sounds[i];
-                }
+                return null;
             }
 
-            if (_bangSound == null)
+            _nextSoundScanTime = Time.unscaledTime + SoundRescanInterval;
+            ScanSounds();
+            return SoundsByName.TryGetValue(name, out sound) && sound != null ? sound : null;
+        }
+
+        private static void ScanSounds()
+        {
+            try
             {
-                FirstPrize[] prizes = Resources.FindObjectsOfTypeAll<FirstPrize>();
-                for (int i = 0; i < prizes.Length && _bangSound == null; i++)
+                SoundObject known;
+                SoundObject[] sounds = Resources.FindObjectsOfTypeAll<SoundObject>();
+                for (int i = 0; i < sounds.Length; i++)
                 {
-                    if (prizes[i] != null && prizes[i].audBang != null)
+                    SoundObject candidate = sounds[i];
+                    if (candidate != null && !string.IsNullOrEmpty(candidate.name)
+                        && (!SoundsByName.TryGetValue(candidate.name, out known) || known == null))
                     {
-                        _bangSound = prizes[i].audBang;
+                        SoundsByName[candidate.name] = candidate;
+                    }
+                }
+
+                // 1st Prize plays its audBang when it slams into a wall.
+                if (!SoundsByName.TryGetValue(BangSoundName, out known) || known == null)
+                {
+                    FirstPrize[] prizes = Resources.FindObjectsOfTypeAll<FirstPrize>();
+                    for (int i = 0; i < prizes.Length; i++)
+                    {
+                        if (prizes[i] != null && prizes[i].audBang != null)
+                        {
+                            SoundsByName[BangSoundName] = prizes[i].audBang;
+                            break;
+                        }
+                    }
+                }
+
+                // The Gum (the projectile of Beans) loops its audWhoosh while it flies.
+                if (!SoundsByName.TryGetValue(WhooshSoundName, out known) || known == null)
+                {
+                    FieldInfo whooshField = typeof(Gum).GetField(
+                        "audWhoosh", BindingFlags.Instance | BindingFlags.NonPublic);
+                    Gum[] gums = whooshField != null ? Resources.FindObjectsOfTypeAll<Gum>() : new Gum[0];
+                    for (int i = 0; i < gums.Length; i++)
+                    {
+                        SoundObject whoosh = gums[i] != null ? whooshField.GetValue(gums[i]) as SoundObject : null;
+                        if (whoosh != null)
+                        {
+                            SoundsByName[WhooshSoundName] = whoosh;
+                            break;
+                        }
                     }
                 }
             }
+            catch (Exception exception)
+            {
+                LogSoundError("Indexing the sounds", exception);
+            }
 
-            Debug.Log(_bangSound != null
-                ? "[Rebuild the School] Bang sound found: " + _bangSound.name
-                : "[Rebuild the School] The Bang sound was not found; characters are pushed without it.");
-            return _bangSound;
+            ReportSound(BangSoundName);
+            ReportSound(WhooshSoundName);
+            ReportSound(FloorSoundName);
+        }
+
+        /// <summary>Logs, once per outcome, whether a sound the mod plays exists.</summary>
+        private static void ReportSound(string name)
+        {
+            SoundObject sound;
+            bool found = SoundsByName.TryGetValue(name, out sound) && sound != null;
+            if (SoundsReported.Add(name + (found ? ":found" : ":missing")))
+            {
+                Debug.Log("[Rebuild the School] Sound '" + name + "': "
+                    + (found ? "found (" + sound.name + ")." : "not found, so it stays silent."));
+            }
+        }
+
+        /// <summary>
+        /// A 3D sound source on its own object, built like AudioManager.VirtualAwake builds its AudioSourceManager
+        /// (inactive while it is set up), so the game's volume settings and mixer groups apply.
+        /// </summary>
+        private static AudioSourceManager CreateSoundSource(string hostName, Vector3 position, out GameObject host)
+        {
+            host = new GameObject(hostName);
+            try
+            {
+                host.SetActive(false);
+                host.transform.position = position;
+                AudioSourceManager manager = host.AddComponent<AudioSourceManager>();
+                manager.Initialize(true, false, false);
+                manager.spatialBlend = 1f;
+                manager.rolloffMode = AudioRolloffMode.Linear;
+                manager.minDistance = SoundMinDistance;
+                manager.maxDistance = SoundMaxDistance;
+                host.SetActive(true);
+                return manager;
+            }
+            catch
+            {
+                Destroy(host);
+                throw;
+            }
+        }
+
+        /// <summary>A short sound at a position, fire and forget: its object removes itself.</summary>
+        private static void PlaySoundAt(Vector3 position, string soundName, float volume)
+        {
+            try
+            {
+                SoundObject sound = GetSound(soundName);
+                if (sound == null || sound.soundClip == null)
+                {
+                    return;
+                }
+
+                GameObject host;
+                AudioSourceManager manager = CreateSoundSource("Rebuild the School sound", position, out host);
+                manager.PlayOneShot(SoundType.Effect, sound.soundClip, sound.volumeMultiplier * volume);
+                Destroy(host, sound.soundClip.length + 0.5f);
+            }
+            catch (Exception exception)
+            {
+                LogSoundError("Playing the sound '" + soundName + "'", exception);
+            }
+        }
+
+        /// <summary>The looping whoosh of a thrown prop; StepFlight moves it with the prop, landing ends it.</summary>
+        private static void StartFlightSound(CarryState state)
+        {
+            try
+            {
+                SoundObject whoosh = GetSound(WhooshSoundName);
+                if (whoosh == null || whoosh.soundClip == null)
+                {
+                    return;
+                }
+
+                GameObject host;
+                AudioSourceManager manager = CreateSoundSource(
+                    "Rebuild the School flight sound", state.FlightPosition + state.FlightCenterOffset, out host);
+                manager.SetClip(SoundType.Effect, whoosh.soundClip);
+                manager.loop = true;
+                manager.volume = whoosh.volumeMultiplier;
+                manager.Play();
+                // A flight ends by itself after ReleaseTimeout; this only guards against a missed stop.
+                Destroy(host, ReleaseTimeout + 2f);
+                state.FlightSoundObject = host;
+            }
+            catch (Exception exception)
+            {
+                LogSoundError("Starting the flight sound", exception);
+            }
+        }
+
+        private static void StopFlightSound(CarryState state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            if (state.FlightSoundObject != null)
+            {
+                Destroy(state.FlightSoundObject);
+            }
+
+            state.FlightSoundObject = null;
+        }
+
+        private static void LogSoundError(string what, Exception exception)
+        {
+            if (Time.unscaledTime >= _nextSoundErrorLogTime)
+            {
+                _nextSoundErrorLogTime = Time.unscaledTime + 5f;
+                Debug.LogError("[Rebuild the School] " + what + " failed: " + exception);
+            }
         }
 
         private void SettleThrown(CarryState state, Cell target)
@@ -3641,6 +3921,7 @@ namespace RebuildTheSchool
         private void ReturnToOrigin(CarryState state)
         {
             InvalidateAim();
+            StopFlightSound(state);
             if (state == null || state.Root == null)
             {
                 return;
@@ -4747,6 +5028,9 @@ namespace RebuildTheSchool
             public int WallHits;
             // Characters this thrown prop has already pushed (each is pushed once per flight).
             public List<NPC> PushedNpcs;
+            // The looping whoosh of a thrown prop: it follows the prop and is destroyed when the prop lands.
+            public GameObject FlightSoundObject;
+            public float NextImpactSoundTime;
             // Flight of a released prop (see StepFlight): the body is kinematic and moved from here.
             public Vector3 FlightPosition;
             public Vector3 FlightVelocity;
@@ -4800,13 +5084,29 @@ namespace RebuildTheSchool
 
                 try
                 {
-                    return !runtime.HandlePlayerClick(__instance);
+                    if (runtime.HandlePlayerClick(__instance))
+                    {
+                        return false;
+                    }
                 }
                 catch (Exception exception)
                 {
                     Debug.LogError("[Rebuild the School] PlayerClick input hook failed: " + exception);
-                    return runtime._held == null;
+                    if (runtime._held != null)
+                    {
+                        return false;
+                    }
                 }
+
+                // A prop or structure was just thrown or placed: the click that did it must not also click on
+                // something the game can see.
+                if (Time.unscaledTime < _gameMouseBlockedUntil)
+                {
+                    __instance.clickedThisFrame = null;
+                    return false;
+                }
+
+                return true;
             }
         }
     }

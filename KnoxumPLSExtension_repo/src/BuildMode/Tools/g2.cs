@@ -1152,6 +1152,7 @@ namespace RebuildTheSchool
             if (_held == state)
             {
                 _held = null;
+                g.BlockGameMouseBriefly();
             }
         }
 
