@@ -16,7 +16,6 @@ namespace RebuildTheSchool
         private const float PickupHalfWidth = 0f;
         internal const float PickupStripHalfThickness = 0.03f;
         internal const float PickupHalfHeight = 2.25f;
-        private const float HitPadding = 0.2f;
         private const float ThrowSpeed = 20f;
         private const float CarryRotationSpeed = 720f;
         private const float CarryMoveSmoothTime = 0.08f;
@@ -24,15 +23,24 @@ namespace RebuildTheSchool
         private static readonly Color CarryHighlightColor = new Color(0.15f, 0.65f, 1f, 1f);
         private static readonly Color ValidPlacementColor = new Color(0.15f, 0.9f, 0.35f, 1f);
         private static readonly Color InvalidPlacementColor = new Color(1f, 0.12f, 0.08f, 1f);
-        private const float GroundContactTolerance = 0.12f;
         private const float GroundSupportNormal = 0.65f;
         private const float PlacementSearchFineStep = 0.25f;
         private const float PlacementSearchFineRadius = 2.5f;
         private const float PlacementSearchCoarseStep = 0.5f;
         private const float PlacementSearchRadius = 5f;
-        private const float HighlightRefreshInterval = 0.25f;
-        private const float PickupHighlightGraceTime = 0.35f;
-        private const float HighlightTargetHysteresis = 0.15f;
+        // Aim resolution: ONE fresh query per frame feeds both the glow and the G key, so the glowing
+        // prop is by construction the prop G picks. The grace only bridges one-frame gaps; it never
+        // overrides a fresh target.
+        private const float HighlightGraceTime = 0.12f;
+        private const float SuppressReleaseTime = 0.3f;
+        private const float AimCandidateReuseTime = 0.2f;
+        private const float ProxyDepthEpsilon = 0.02f;
+        private const float ProxyPruneDistance = PickupRange + 20f;
+        private const float ProxyRefreshInterval = 20f;
+        private const float ProxyScanBudgetMilliseconds = 1f;
+        private const string GlowObjectName = "Carry placement glow";
+        // Set to true to log every change of the aimed prop (off by default; G always logs its result).
+        private static readonly bool VerboseAimLog = false;
         private const float PlacementPreviewRefreshInterval = 0.25f;
         private const float ReleaseTimeout = 8f;
         private const float WorldTileWidth = 10f;
@@ -43,14 +51,50 @@ namespace RebuildTheSchool
         private const float DoorSafeCloseDistance = 2f;
         private const float DoorContactPadding = 0.35f;
         private const float DoorCheckInterval = 0.12f;
+        // Thrown and dropped props fly on a KINEMATIC body that this class integrates itself (StepFlight):
+        // a swept box against the cell grid (walls, void, closed doors and windows), the floor and the
+        // ceiling, plus a box cast for loose props. Nothing in the guarantee depends on the Unity layer
+        // matrix, on dynamic rigidbody collision or on continuous detection - those are what let the
+        // earlier versions fly through BB+ walls and the floor.
+        private const float FlightSkin = 0.02f;
+        private const float FlightWallHalfThickness = 0.1f;
+        private const float FlightCeilingHeight = 10f;
+        private const float FlightGravityFallback = -9.81f;
+        private const float FlightMaxSpeed = 80f;
+        private const int FlightMaxBounces = 4;
+        private const int FlightMaxDoorRetries = 6;
+        private const float FlightBounceRestitution = 0.35f;
+        private const float FlightBounceFriction = 0.85f;
+        private const float FlightBounceMinNormalSpeed = 0.6f;
+        private const float FlightScanStep = 0.1f;
+        private const float FlightMinHalfExtent = 0.05f;
+        private const float FlightGrowFactor = 1.3f;
+        private const float FlightDoorRefreshInterval = 0.25f;
+        private const float FlightParallelEpsilon = 1e-7f;
+        // A thrown prop that hits a character pushes it with the call the Bully uses in Bully.Push:
+        // Entity.AddForce(new Force(direction, speed, acceleration)). The Bully's own values are speed 5 and
+        // acceleration -5; here the speed grows with the prop's speed (acceleration = -speed, like the Bully)
+        // and the Bang sound (1st Prize's audBang) is played.
+        private const float NpcPushMinSpeed = 5f;
+        private const float NpcPushMaxSpeed = 25f;
+        private const float NpcPushPerPropSpeed = 0.5f;
+        private const float NpcMinHitSpeed = 3f;
+        private const float NpcHitBounce = 0.3f;
+        private const float NpcBangRetryInterval = 30f;
+        private const string BangSoundName = "Bang";
+        private static readonly float[] FlightFitScales = { 1f, 0.85f, 0.7f, 0.55f, 0.4f, 0.3f, 0.2f, 0.12f, 0.06f };
 
         private static readonly FieldInfo HardCoverageField = typeof(Cell).GetField(
             "hardCoverage", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly FieldInfo SoftCoverageField = typeof(Cell).GetField(
             "softCoverage", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly RaycastHit[] RayHits = new RaycastHit[128];
+        private static readonly RaycastHit[] SweepHits = new RaycastHit[64];
         private static readonly Collider[] WalkabilityHits = new Collider[128];
+        private static readonly List<Collider> NpcColliders = new List<Collider>();
         private static readonly RayHitComparer RayHitOrder = new RayHitComparer();
+        private static SoundObject _bangSound;
+        private static float _nextBangSearchTime;
 
         private readonly List<CarryState> _airborne = new List<CarryState>();
         private CarryState _held;
@@ -61,8 +105,30 @@ namespace RebuildTheSchool
         private GlowState _hoverGlow;
         private int _lastPickupFrame = -1;
         private float _nextDoorCheckTime;
-        private float _nextHighlightRefreshTime;
-        private float _lastPickupHighlightTime;
+        private float _lastAimTime;
+        private int _aimFrame = -1;
+        private PlayerManager _aimPlayer;
+        private Candidate _aimResult;
+        private Collider _aimBlocker;
+        private float _aimBlockerDistance;
+        private string _aimNote;
+        private Candidate _aimCache;
+        private float _aimCacheTime;
+        private int _lastNoTargetLogFrame = -1;
+        private float _nextHighlightErrorLogTime;
+        private float _nextAimErrorLogTime;
+        private float _nextSweepErrorLogTime;
+        private readonly Dictionary<long, List<FlightDoor>> _flightDoors = new Dictionary<long, List<FlightDoor>>();
+        private EnvironmentController _flightDoorsEnvironment;
+        private float _nextFlightDoorRefreshTime;
+        private readonly List<ProxyProp> _proxies = new List<ProxyProp>();
+        private readonly HashSet<Transform> _proxyVisited = new HashSet<Transform>();
+        private List<ProxyProp> _proxyBuilding;
+        private Renderer[] _proxyScan;
+        private int _proxyScanIndex;
+        private EnvironmentController _proxyEnvironment;
+        private float _proxyBuiltAt = -1000f;
+        private bool _proxyErrorLogged;
 
         public static g Instance { get; private set; }
         internal bool IsHoldingObject { get { return _held != null; } }
@@ -114,24 +180,24 @@ namespace RebuildTheSchool
             if (_held == null && Time.timeScale > 0f && PickupPressed()
                 && (g2.Instance == null || !g2.Instance.IsDragging))
             {
-                // If a prop is glowing, G must pick that exact prop before structural selection
-                // or a fresh ray query can choose a different object than the visible highlight.
+                // A prop under the crosshair always wins: it comes from the same fresh query that
+                // drives the glow. Only when there is none does G fall through to g2's structures.
                 if (TryPickupHighlighted(_player))
                 {
                     return;
                 }
 
-                if (g2.Instance != null && g2.Instance.HandlePickupRequest(_player))
+                if (g2.Instance != null)
                 {
-                    return;
+                    g2.Instance.HandlePickupRequest(_player);
                 }
-
-                TryPickup(_player);
             }
         }
 
         private void FixedUpdate()
         {
+            StepAirborneProps();
+
             if (_held == null || _held.Root == null || _held.Body == null)
             {
                 return;
@@ -246,123 +312,87 @@ namespace RebuildTheSchool
 
         private void UpdatePickupHighlight()
         {
-            if (Time.unscaledTime < _nextHighlightRefreshTime)
+            try
             {
-                return;
+                UpdatePickupHighlightCore();
             }
-
-            _nextHighlightRefreshTime = Time.unscaledTime + HighlightRefreshInterval;
-            Ray ray;
-            Candidate candidate;
-            if (_player == null || !TryGetCameraRay(_player, out ray))
+            catch (Exception exception)
             {
-                if (Time.unscaledTime - _lastPickupHighlightTime > PickupHighlightGraceTime)
+                // Runs every frame now, so one bad prop must not flood the log or break Update.
+                if (Time.unscaledTime >= _nextHighlightErrorLogTime)
+                {
+                    _nextHighlightErrorLogTime = Time.unscaledTime + 5f;
+                    Debug.LogError("[Rebuild the School] Pickup highlight failed: " + exception);
+                }
+
+                try
                 {
                     ClearPickupHighlight();
                 }
-
-                return;
-            }
-
-            if (!FindCandidate(_player, ray, out candidate)
-                || !CanBeginCarry(candidate, _player))
-            {
-                if (KeepCurrentPickupHighlight(null, ray))
+                catch (Exception)
                 {
-                    return;
+                    _hoverGlow = null;
+                    _hoveredRoot = null;
+                    _hoveredCandidate = null;
                 }
-
-                ClearPickupHighlight();
-                _suppressHoverRoot = null;
-                return;
-            }
-
-            if (_suppressHoverRoot != null)
-            {
-                if (_suppressHoverRoot == candidate.Root)
-                {
-                    ClearPickupHighlight();
-                    return;
-                }
-
-                // Once the player looks away, the placed prop may be highlighted again on a later aim.
-                _suppressHoverRoot = null;
-            }
-
-            if (_hoveredRoot != candidate.Root && KeepCurrentPickupHighlight(candidate, ray))
-            {
-                return;
-            }
-
-            if (_hoveredRoot != candidate.Root)
-            {
-                ClearPickupHighlight();
-                _hoveredRoot = candidate.Root;
-                _hoverGlow = new GlowState(candidate.Root, candidate.Renderers);
-            }
-
-            _hoveredCandidate = candidate;
-            _lastPickupHighlightTime = Time.unscaledTime;
-            if (_hoverGlow != null)
-            {
-                _hoverGlow.SetColor(ValidPlacementColor);
             }
         }
 
-        private bool KeepCurrentPickupHighlight(Candidate nextCandidate, Ray ray)
+        private void UpdatePickupHighlightCore()
         {
-            Candidate current = _hoveredCandidate;
-            if (current == null || current.Root == null || _hoveredRoot != current.Root
-                || !CanBeginCarry(current, _player))
+            // Fresh every frame: no polling interval, no hysteresis against the real target.
+            Candidate aim = ResolveAimThisFrame(_player);
+            float now = Time.unscaledTime;
+            if (aim == null)
             {
-                return false;
+                // The grace only bridges single-frame gaps (seams between meshes); it never
+                // overrides a fresh target, which is handled below.
+                if (_hoveredCandidate != null && _hoveredCandidate.Root != null
+                    && now - _lastAimTime <= HighlightGraceTime)
+                {
+                    return;
+                }
+
+                ClearPickupHighlight();
+                if (_suppressHoverRoot != null && now - _lastAimTime > SuppressReleaseTime)
+                {
+                    _suppressHoverRoot = null;
+                }
+
+                return;
             }
 
-            float currentDistance;
-            bool currentOnRay = TryGetCenterRayBoundsDistance(
-                current.Renderers, ray, out currentDistance) && currentDistance <= PickupRange;
-            if (nextCandidate != null)
+            _lastAimTime = now;
+            if (_suppressHoverRoot != null)
             {
-                float nextDistance;
-                bool nextOnRay = TryGetCenterRayBoundsDistance(
-                    nextCandidate.Renderers, ray, out nextDistance) && nextDistance <= PickupRange;
-                if (nextOnRay && (!currentOnRay
-                    || currentDistance > nextDistance + HighlightTargetHysteresis))
+                if (_suppressHoverRoot == aim.Root)
                 {
-                    return false;
+                    // Just placed: keep the prop un-tinted while the crosshair is still on it.
+                    ClearPickupHighlight();
+                    return;
+                }
+
+                // Once the player looks at something else, the placed prop may glow again later.
+                _suppressHoverRoot = null;
+            }
+
+            if (_hoveredRoot != aim.Root)
+            {
+                ClearPickupHighlight();
+                _hoveredRoot = aim.Root;
+                _hoverGlow = new GlowState(aim.Root, aim.Renderers);
+                if (VerboseAimLog)
+                {
+                    Debug.Log("[Rebuild the School] Aim -> " + DescribePath(aim.Root) + " ("
+                        + aim.AimSource + ", " + aim.AimDistance.ToString("0.0") + " units).");
                 }
             }
 
-            if (!currentOnRay)
-            {
-                if (Time.unscaledTime - _lastPickupHighlightTime > PickupHighlightGraceTime)
-                {
-                    return false;
-                }
-
-                if (_hoverGlow != null)
-                {
-                    _hoverGlow.SetColor(ValidPlacementColor);
-                }
-
-                return true;
-            }
-
-            RaycastHit blocker;
-            bool hasBlocker = TryNearestHit(ray, PickupRange, null, _player, out blocker);
-            if (!VisibleBeforeBlocker(currentDistance, blocker, hasBlocker, current.Root))
-            {
-                return false;
-            }
-
-            _hoveredCandidate = current;
-            _lastPickupHighlightTime = Time.unscaledTime;
+            _hoveredCandidate = aim;
             if (_hoverGlow != null)
             {
                 _hoverGlow.SetColor(ValidPlacementColor);
             }
-
-            return true;
         }
 
         private void ClearPickupHighlight()
@@ -377,16 +407,55 @@ namespace RebuildTheSchool
             _hoveredCandidate = null;
         }
 
+        /// <summary>
+        /// The single G entry point shared by g.Update, g2.Update and the PlayerClick hook. It runs the
+        /// same per-frame aim query as the glow. Returns true when a prop is under the crosshair
+        /// (picked, or refused with a logged reason) so structural selection never also claims the same
+        /// key press; false when there is no prop target at all.
+        /// </summary>
         internal bool TryPickupHighlighted(PlayerManager player)
         {
-            Candidate candidate = _hoveredCandidate;
-            if (candidate == null || candidate.Root == null || _hoveredRoot != candidate.Root)
+            if (_held != null || player == null)
             {
                 return false;
             }
 
-            TryPickup(player, candidate);
+            // The fresh query wins. The glow is only a fallback for the instant the crosshair slips off
+            // the prop that was glowing a moment ago, and it is re-validated before use.
+            Candidate target = ResolveAimThisFrame(player);
+            if (target == null && _hoveredCandidate != null && _hoveredCandidate.Root != null
+                && Time.unscaledTime - _lastAimTime <= HighlightGraceTime
+                && CanBeginCarry(_hoveredCandidate, player))
+            {
+                target = _hoveredCandidate;
+            }
+
+            if (target == null)
+            {
+                if (_lastNoTargetLogFrame != Time.frameCount)
+                {
+                    _lastNoTargetLogFrame = Time.frameCount;
+                    Debug.Log("[Rebuild the School] G: no prop under the crosshair (" + DescribeAimInfo() + ").");
+                }
+
+                return false;
+            }
+
+            TryPickup(player, target);
             return true;
+        }
+
+        /// <summary>True while a prop is (or was an instant ago) under the crosshair; g2 yields to it.</summary>
+        internal bool HasPropTarget(PlayerManager player)
+        {
+            if (_held != null || player == null)
+            {
+                return false;
+            }
+
+            return ResolveAimThisFrame(player) != null
+                || (_hoveredCandidate != null && _hoveredCandidate.Root != null
+                    && Time.unscaledTime - _lastAimTime <= HighlightGraceTime);
         }
 
         private void UpdatePlacementPreview(CarryState state)
@@ -481,12 +550,14 @@ namespace RebuildTheSchool
                     return false;
                 }
 
-                clicker.clickedThisFrame = null;
+                // Same fresh aim query as g.Update. With no prop under the crosshair this returns
+                // false and the game's own click handling runs untouched.
                 if (!TryPickupHighlighted(clicker.pm))
                 {
-                    TryPickup(clicker.pm);
+                    return false;
                 }
 
+                clicker.clickedThisFrame = null;
                 return true;
             }
 
@@ -629,35 +700,6 @@ namespace RebuildTheSchool
             }
         }
 
-        private void UpdateDoorForThrownProp(CarryState state)
-        {
-            if (state == null || state.Root == null || Time.unscaledTime < _nextDoorCheckTime)
-            {
-                return;
-            }
-
-            _nextDoorCheckTime = Time.unscaledTime + DoorCheckInterval;
-            Bounds propBounds;
-            if (!CombinedBounds(state.Renderers, out propBounds))
-            {
-                return;
-            }
-
-            Bounds contactBounds = propBounds;
-            contactBounds.Expand(DoorContactPadding * 2f);
-            Door[] doors = FindObjectsOfType<Door>();
-            for (int i = 0; i < doors.Length; i++)
-            {
-                Door door = doors[i];
-                if (door != null && !(door is Window) && door.ec == state.Environment && !door.locked
-                    && DoorBoundsTouchProp(door, contactBounds)
-                    && PropFitsDoorway(state.Root, propBounds, door))
-                {
-                    door.OpenTimed(DoorOpenDuration, false);
-                }
-            }
-        }
-
         private void BreakWindowsTouchingProp(CarryState state)
         {
             Bounds propBounds;
@@ -746,12 +788,7 @@ namespace RebuildTheSchool
                 && lateralOffset.magnitude <= DoorLateralTolerance;
         }
 
-        private void TryPickup(PlayerManager player)
-        {
-            TryPickup(player, null);
-        }
-
-        private void TryPickup(PlayerManager player, Candidate preferredCandidate)
+        private void TryPickup(PlayerManager player, Candidate candidate)
         {
             if (_lastPickupFrame == Time.frameCount)
             {
@@ -761,10 +798,9 @@ namespace RebuildTheSchool
             _lastPickupFrame = Time.frameCount;
             try
             {
-                Debug.Log("[Rebuild the School] G pickup input received.");
-                if (player == null || player.ec == null)
+                if (player == null || player.ec == null || candidate == null || candidate.Root == null)
                 {
-                    Debug.LogWarning("[Rebuild the School] Pickup blocked: player or environment is not ready.");
+                    Debug.LogWarning("[Rebuild the School] Pickup blocked: player, environment or target is not ready.");
                     return;
                 }
 
@@ -776,25 +812,10 @@ namespace RebuildTheSchool
                     return;
                 }
 
-                Candidate candidate = preferredCandidate;
-                if (candidate == null)
-                {
-                    if (!FindCandidate(player, ray, out candidate))
-                    {
-                        Debug.Log("[Rebuild the School] No supported object intersects the pickup corridor.");
-                        return;
-                    }
-                }
-                else if (!CanBeginCarry(candidate, player))
-                {
-                    Debug.LogWarning("[Rebuild the School] Highlighted pickup is no longer available.");
-                    return;
-                }
-
+                string targetName = DescribePath(candidate.Root);
                 if (!CanBeginCarry(candidate, player))
                 {
-                    Debug.LogWarning("[Rebuild the School] Selected prop is not currently movable: "
-                        + (candidate.Root != null ? candidate.Root.name : "<missing>"));
+                    Debug.LogWarning("[Rebuild the School] Selected prop is not currently movable: " + targetName);
                     return;
                 }
 
@@ -804,13 +825,15 @@ namespace RebuildTheSchool
                 CarryState state;
                 if (!BeginCarry(candidate, player, ray, out state))
                 {
-                    Debug.LogWarning("[Rebuild the School] Pickup setup rejected: " + candidate.Root.name + ".");
+                    Debug.LogWarning("[Rebuild the School] Pickup setup rejected: " + targetName + ".");
                     return;
                 }
 
                 _held = state;
-                Debug.Log("[Rebuild the School] Picked up: " + state.Root.name
-                    + "; visual center locked to the camera orbit.");
+                InvalidateAim();
+                Debug.Log("[Rebuild the School] G picked up " + targetName + " ("
+                    + (candidate.AimSource ?? "aim") + ", " + candidate.AimDistance.ToString("0.0")
+                    + " units); visual center locked to the camera orbit.");
             }
             catch (Exception exception)
             {
@@ -818,15 +841,288 @@ namespace RebuildTheSchool
             }
         }
 
-        private bool TryCreateCandidateFromHit(PlayerManager player, RaycastHit hit, out Candidate candidate)
+        // ------------------------------------------------------------------------------------
+        // Aim resolution. Everything that decides "which prop is under the crosshair" lives here.
+        // ------------------------------------------------------------------------------------
+
+        private void InvalidateAim()
+        {
+            _aimFrame = -1;
+            _aimResult = null;
+            _aimCache = null;
+        }
+
+        private string DescribeAimInfo()
+        {
+            if (_aimNote != null)
+            {
+                return _aimNote;
+            }
+
+            if (_aimBlocker == null)
+            {
+                return "nothing solid within " + PickupRange.ToString("0") + " units";
+            }
+
+            string text = "blocked by " + DescribePath(_aimBlocker.transform) + " (layer "
+                + _aimBlocker.gameObject.layer + ") at " + _aimBlockerDistance.ToString("0.0");
+            EnvironmentObject environmentObject = _aimBlocker.GetComponentInParent<EnvironmentObject>();
+            Transform propRoot = environmentObject != null
+                ? environmentObject.transform
+                : FindSupportedPropRoot(_aimBlocker.transform);
+            if (propRoot != null)
+            {
+                text += "; it looks like a prop (" + DescribePath(propRoot) + ") but cannot be carried: "
+                    + DescribeCarryRejection(propRoot, environmentObject, _aimPlayer);
+            }
+
+            return text;
+        }
+
+        /// <summary>
+        /// Diagnostic only (runs when G found nothing to pick): names the first check that makes a
+        /// prop-looking object uncarriable, mirroring CanBeginCarry / TryBuildCandidate.
+        /// </summary>
+        private string DescribeCarryRejection(
+            Transform root, EnvironmentObject environmentObject, PlayerManager player)
+        {
+            if (root == null || player == null || player.ec == null)
+            {
+                return "player or object missing";
+            }
+
+            string forbidden = ForbiddenPickupReason(root);
+            if (forbidden != null)
+            {
+                return "excluded (" + forbidden + ")";
+            }
+
+            if (IsAirborneRoot(root))
+            {
+                return "still in flight";
+            }
+
+            if (!root.gameObject.activeInHierarchy)
+            {
+                return "inactive";
+            }
+
+            if (environmentObject != null)
+            {
+                Cell environmentCell;
+                if (!CanPickupEnvironmentObject(environmentObject, player, out environmentCell))
+                {
+                    return "environment object is not carriable (other level, door/tile/NPC/activity parent, or no cell)";
+                }
+            }
+            else if (IsForbiddenPropHierarchy(root))
+            {
+                return "it sits inside a door, tile object, NPC, activity or environment object";
+            }
+
+            Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true);
+            Bounds bounds;
+            if (renderers.Length == 0 || !CombinedBounds(renderers, out bounds))
+            {
+                return "no renderers with usable bounds";
+            }
+
+            Rigidbody[] bodies = root.GetComponentsInChildren<Rigidbody>(true);
+            for (int i = 0; i < bodies.Length; i++)
+            {
+                if (bodies[i] != null && bodies[i].transform != root)
+                {
+                    return "a child has its own Rigidbody (" + DescribePath(bodies[i].transform) + ")";
+                }
+            }
+
+            Cell cell;
+            if (!TryGetCell(player.ec, root.position, out cell)
+                && !TryGetCell(player.ec, bounds.center, out cell))
+            {
+                return "it is not inside any cell";
+            }
+
+            return "parent type, cell or coverage data do not allow carrying";
+        }
+
+        /// <summary>
+        /// What the crosshair is on, computed at most once per frame and shared by the glow and G.
+        /// Rule: the first solid thing on the camera's center ray decides. A prop must really be hit by
+        /// the ray; a wall, door, window, NPC or immovable prop in front blocks it, so nothing is ever
+        /// picked through geometry. Props the ray does not touch physically (no solid collider at all, or
+        /// gaps in the collider) are matched by the boxes of their meshes as aim assist: collider-less props
+        /// compete with a physical hit by distance, props that do have colliders are only assisted when the
+        /// ray hit no movable prop. In every case the prop must be in front of the first solid hit.
+        /// </summary>
+        private Candidate ResolveAimThisFrame(PlayerManager player)
+        {
+            if (_aimFrame == Time.frameCount && _aimPlayer == player)
+            {
+                return _aimResult;
+            }
+
+            _aimFrame = Time.frameCount;
+            _aimPlayer = player;
+            _aimResult = null;
+            _aimBlocker = null;
+            _aimBlockerDistance = 0f;
+            _aimNote = null;
+            if (player == null || player.ec == null || _held != null)
+            {
+                _aimNote = "not available right now";
+                return null;
+            }
+
+            Ray ray;
+            if (!TryGetCameraRay(player, out ray))
+            {
+                _aimNote = "camera ray unavailable";
+                return null;
+            }
+
+            try
+            {
+                _aimResult = ResolveAim(player, ray, out _aimBlocker, out _aimBlockerDistance);
+            }
+            catch (Exception exception)
+            {
+                _aimResult = null;
+                _aimNote = "aim query failed: " + exception.Message;
+                if (Time.unscaledTime >= _nextAimErrorLogTime)
+                {
+                    _nextAimErrorLogTime = Time.unscaledTime + 5f;
+                    Debug.LogError("[Rebuild the School] Aim query failed: " + exception);
+                }
+            }
+
+            return _aimResult;
+        }
+
+        private Candidate ResolveAim(
+            PlayerManager player, Ray ray, out Collider blocker, out float blockerDistance)
+        {
+            blocker = null;
+            blockerDistance = 0f;
+            int count = Physics.RaycastNonAlloc(
+                ray, RayHits, PickupRange, ~0, QueryTriggerInteraction.Ignore);
+            if (count > 1)
+            {
+                Array.Sort(RayHits, 0, count, RayHitOrder);
+            }
+
+            Candidate physical = null;
+            float solidDistance = PickupRange;
+            for (int i = 0; i < count; i++)
+            {
+                Collider collider = RayHits[i].collider;
+                if (collider == null || IsIgnoredForAim(collider, player))
+                {
+                    continue;
+                }
+
+                // The first solid hit decides: either it belongs to a movable prop (that prop is the
+                // target) or it blocks everything behind it. No second chances further along the ray.
+                solidDistance = RayHits[i].distance;
+                if (TryCandidateFromCollider(player, collider, out physical))
+                {
+                    physical.AimDistance = solidDistance;
+                    physical.AimSource = "collider";
+                }
+                else
+                {
+                    blocker = collider;
+                    blockerDistance = solidDistance;
+                }
+
+                break;
+            }
+
+            Candidate assisted;
+            float assistedDistance;
+            if (TryFindAssistProp(player, ray, solidDistance - ProxyDepthEpsilon, physical != null,
+                out assisted, out assistedDistance))
+            {
+                assisted.AimDistance = assistedDistance;
+                assisted.AimSource = "mesh box";
+                blocker = null;
+                return assisted;
+            }
+
+            return physical;
+        }
+
+        private bool IsIgnoredForAim(Collider collider, PlayerManager player)
+        {
+            Transform hit = collider.transform;
+            if (player != null && (hit == player.transform || hit.IsChildOf(player.transform)))
+            {
+                return true;
+            }
+
+            // Props that were just dropped or thrown are neither targets nor blockers while airborne.
+            for (int i = 0; i < _airborne.Count; i++)
+            {
+                CarryState state = _airborne[i];
+                if (state != null && state.Root != null
+                    && (hit == state.Root || hit.IsChildOf(state.Root)))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool IsAirborneRoot(Transform root)
+        {
+            for (int i = 0; i < _airborne.Count; i++)
+            {
+                CarryState state = _airborne[i];
+                if (state != null && state.Root == root)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool TryCandidateFromCollider(PlayerManager player, Collider collider, out Candidate candidate)
         {
             candidate = null;
-            if (player == null || player.ec == null || hit.collider == null)
+            if (player == null || player.ec == null || collider == null)
             {
                 return false;
             }
 
-            EnvironmentObject environmentObject = hit.collider.GetComponentInParent<EnvironmentObject>();
+            EnvironmentObject environmentObject = collider.GetComponentInParent<EnvironmentObject>();
+            Transform root = environmentObject != null
+                ? environmentObject.transform
+                : FindSupportedPropRoot(collider.transform);
+            return root != null && TryBuildCandidate(player, root, environmentObject, out candidate);
+        }
+
+        private bool TryBuildCandidate(
+            PlayerManager player, Transform root, EnvironmentObject environmentObject, out Candidate candidate)
+        {
+            candidate = null;
+            if (player == null || player.ec == null || root == null || IsAirborneRoot(root))
+            {
+                return false;
+            }
+
+            // The same prop stays the target for many frames; do not rebuild its renderer arrays
+            // and re-run every component query each frame.
+            Candidate cached = _aimCache;
+            if (cached != null && cached.Root == root && cached.Root.gameObject.activeInHierarchy
+                && Time.unscaledTime - _aimCacheTime < AimCandidateReuseTime)
+            {
+                candidate = cached;
+                return true;
+            }
+
+            Candidate built;
             if (environmentObject != null)
             {
                 Cell cell;
@@ -835,7 +1131,7 @@ namespace RebuildTheSchool
                     return false;
                 }
 
-                candidate = new Candidate
+                built = new Candidate
                 {
                     Root = environmentObject.transform,
                     EnvironmentObject = environmentObject,
@@ -843,132 +1139,367 @@ namespace RebuildTheSchool
                     Cell = cell,
                     ParentKind = ParentKind.RoomObjects
                 };
-                return CanBeginCarry(candidate, player);
             }
-
-            Transform root = FindSupportedPropRoot(hit.collider.transform);
-            if (root == null || IsForbiddenPropHierarchy(root))
+            else
             {
-                return false;
-            }
-
-            Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true);
-            Bounds bounds;
-            bool hasBounds = CombinedBounds(renderers, out bounds);
-            Cell propCell;
-            bool hasCell = TryGetCell(player.ec, root.position, out propCell);
-            if (!hasCell && (!hasBounds || !TryGetCell(player.ec, bounds.center, out propCell)))
-            {
-                return false;
-            }
-
-            candidate = new Candidate
-            {
-                Root = root,
-                EnvironmentObject = null,
-                Renderers = renderers,
-                Cell = propCell,
-                ParentKind = IsChildOfCellObjectBase(root, propCell)
-                    ? ParentKind.CellObjectBase
-                    : ParentKind.Room
-            };
-            return CanBeginCarry(candidate, player);
-        }
-
-        private bool FindCandidate(PlayerManager player, Ray ray, out Candidate best)
-        {
-            best = null;
-            RaycastHit nearestHit;
-            bool hasHit = TryNearestHit(ray, PickupRange, null, player, out nearestHit);
-            if (hasHit && TryCreateCandidateFromHit(player, nearestHit, out best))
-            {
-                return true;
-            }
-
-            float bestDistance = float.MaxValue;
-            EnvironmentObject[] environmentObjects = FindObjectsOfType<EnvironmentObject>();
-            for (int i = 0; i < environmentObjects.Length; i++)
-            {
-                EnvironmentObject environmentObject = environmentObjects[i];
-                Cell cell;
-                if (!CanPickupEnvironmentObject(environmentObject, player, out cell))
+                if (IsForbiddenPropHierarchy(root))
                 {
-                    continue;
-                }
-
-                Renderer[] renderers = environmentObject.GetComponentsInChildren<Renderer>(true);
-                float distance;
-                if (!TryGetCenterRayBoundsDistance(renderers, ray, out distance)
-                    || distance > PickupRange || distance >= bestDistance
-                    || !VisibleBeforeBlocker(distance, nearestHit, hasHit,
-                        environmentObject.transform))
-                {
-                    continue;
-                }
-
-                Candidate candidate = new Candidate
-                {
-                    Root = environmentObject.transform,
-                    EnvironmentObject = environmentObject,
-                    Renderers = renderers,
-                    Cell = cell,
-                    ParentKind = ParentKind.RoomObjects
-                };
-                if (CanBeginCarry(candidate, player))
-                {
-                    best = candidate;
-                    bestDistance = distance;
-                }
-            }
-
-            Renderer[] propRenderers = FindObjectsOfType<Renderer>();
-            HashSet<Transform> visitedRoots = new HashSet<Transform>();
-            for (int i = 0; i < propRenderers.Length; i++)
-            {
-                Renderer propRenderer = propRenderers[i];
-                Transform root = propRenderer != null
-                    ? FindSupportedPropRoot(propRenderer.transform) : null;
-                if (root == null || IsForbiddenPropHierarchy(root) || !visitedRoots.Add(root))
-                {
-                    continue;
+                    return false;
                 }
 
                 Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true);
-                float distance;
-                if (!TryGetCenterRayBoundsDistance(renderers, ray, out distance)
-                    || distance > PickupRange || distance >= bestDistance
-                    || !VisibleBeforeBlocker(distance, nearestHit, hasHit, root))
-                {
-                    continue;
-                }
-
                 Bounds bounds;
                 bool hasBounds = CombinedBounds(renderers, out bounds);
-                Cell cell;
-                bool hasCell = TryGetCell(player.ec, root.position, out cell);
-                if (!hasCell && (!hasBounds || !TryGetCell(player.ec, bounds.center, out cell)))
+                Cell propCell;
+                bool hasCell = TryGetCell(player.ec, root.position, out propCell);
+                if (!hasCell && (!hasBounds || !TryGetCell(player.ec, bounds.center, out propCell)))
                 {
-                    continue;
+                    return false;
                 }
 
-                Candidate candidate = new Candidate
+                built = new Candidate
                 {
                     Root = root,
                     EnvironmentObject = null,
                     Renderers = renderers,
-                    Cell = cell,
-                    ParentKind = IsChildOfCellObjectBase(root, cell)
+                    Cell = propCell,
+                    ParentKind = IsChildOfCellObjectBase(root, propCell)
                         ? ParentKind.CellObjectBase
                         : ParentKind.Room
                 };
-                if (CanBeginCarry(candidate, player))
+            }
+
+            if (!CanBeginCarry(built, player))
+            {
+                return false;
+            }
+
+            candidate = built;
+            _aimCache = built;
+            _aimCacheTime = Time.unscaledTime;
+            return true;
+        }
+
+        // ------------------------------------------------------------------------------------
+        // Aim assist. A physics ray can miss a prop that is clearly under the crosshair: some props have
+        // no solid collider at all, others have meshy colliders with gaps (an open chair back). Those are
+        // matched by the oriented bounding box of each of their meshes (never the inflated world AABB),
+        // only when they are nearer than the first solid hit, from a registry that is built a little per
+        // frame instead of scanning every renderer in the scene on every query.
+        // ------------------------------------------------------------------------------------
+
+        private bool TryFindAssistProp(
+            PlayerManager player, Ray ray, float maxDistance, bool physicalFound,
+            out Candidate candidate, out float distance)
+        {
+            candidate = null;
+            distance = float.MaxValue;
+            UpdateProxyRegistry(player);
+            if (maxDistance <= 0f || _proxies.Count == 0)
+            {
+                return false;
+            }
+
+            float pruneSqr = ProxyPruneDistance * ProxyPruneDistance;
+            ProxyProp best = null;
+            for (int i = 0; i < _proxies.Count; i++)
+            {
+                ProxyProp proxy = _proxies[i];
+                if (proxy.Root == null || !proxy.Root.gameObject.activeInHierarchy)
                 {
-                    best = candidate;
-                    bestDistance = distance;
+                    continue;
+                }
+
+                // Physics is authoritative for props that have colliders: when the ray already hit a
+                // movable prop, only collider-less props (which physics cannot see) may still beat it.
+                if (physicalFound && proxy.HasSolidCollider)
+                {
+                    continue;
+                }
+
+                if ((proxy.Root.position - ray.origin).sqrMagnitude > pruneSqr)
+                {
+                    continue;
+                }
+
+                float proxyDistance = 0f;
+                if (!RayHitsProxy(proxy, ray, out proxyDistance)
+                    || proxyDistance > maxDistance || proxyDistance >= distance)
+                {
+                    continue;
+                }
+
+                best = proxy;
+                distance = proxyDistance;
+            }
+
+            return best != null
+                && TryBuildCandidate(player, best.Root, best.EnvironmentObject, out candidate);
+        }
+
+        private void UpdateProxyRegistry(PlayerManager player)
+        {
+            if (_proxyEnvironment != player.ec)
+            {
+                _proxyEnvironment = player.ec;
+                _proxies.Clear();
+                _proxyScan = null;
+                _proxyBuiltAt = -ProxyRefreshInterval - 1f;
+            }
+
+            float now = Time.unscaledTime;
+            if (_proxyScan == null)
+            {
+                if (now - _proxyBuiltAt < ProxyRefreshInterval)
+                {
+                    return;
+                }
+
+                _proxyScan = FindObjectsOfType<Renderer>();
+                _proxyScanIndex = 0;
+                _proxyBuilding = new List<ProxyProp>();
+                _proxyVisited.Clear();
+            }
+
+            float start = Time.realtimeSinceStartup;
+            while (_proxyScanIndex < _proxyScan.Length)
+            {
+                ScanProxyRenderer(player, _proxyScan[_proxyScanIndex]);
+                _proxyScanIndex++;
+                if ((Time.realtimeSinceStartup - start) * 1000f >= ProxyScanBudgetMilliseconds)
+                {
+                    return;
                 }
             }
 
-            return best != null;
+            _proxies.Clear();
+            _proxies.AddRange(_proxyBuilding);
+            _proxyBuilding = null;
+            _proxyScan = null;
+            _proxyVisited.Clear();
+            _proxyBuiltAt = now;
+        }
+
+        private void ScanProxyRenderer(PlayerManager player, Renderer renderer)
+        {
+            if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy)
+            {
+                return;
+            }
+
+            try
+            {
+                EnvironmentObject environmentObject = renderer.GetComponentInParent<EnvironmentObject>();
+                Transform root = environmentObject != null
+                    ? environmentObject.transform
+                    : FindSupportedPropRoot(renderer.transform);
+                if (root == null || !_proxyVisited.Add(root))
+                {
+                    return;
+                }
+
+                Cell cell;
+                bool eligible = environmentObject != null
+                    ? CanPickupEnvironmentObject(environmentObject, player, out cell)
+                    : !IsForbiddenPropHierarchy(root);
+                if (eligible)
+                {
+                    _proxyBuilding.Add(BuildProxy(root, environmentObject, HasSolidCollider(root)));
+                }
+            }
+            catch (Exception exception)
+            {
+                if (!_proxyErrorLogged)
+                {
+                    _proxyErrorLogged = true;
+                    Debug.LogWarning("[Rebuild the School] Prop scan skipped a renderer: " + exception.Message);
+                }
+            }
+        }
+
+        private static bool HasSolidCollider(Transform root)
+        {
+            Collider[] colliders = root.GetComponentsInChildren<Collider>(true);
+            for (int i = 0; i < colliders.Length; i++)
+            {
+                Collider collider = colliders[i];
+                if (collider != null && collider.enabled && !collider.isTrigger)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static ProxyProp BuildProxy(
+            Transform root, EnvironmentObject environmentObject, bool hasSolidCollider)
+        {
+            Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true);
+            ProxyProp proxy = new ProxyProp
+            {
+                Root = root,
+                EnvironmentObject = environmentObject,
+                HasSolidCollider = hasSolidCollider,
+                Renderers = renderers,
+                LocalBounds = new Bounds[renderers.Length],
+                HasLocalBounds = new bool[renderers.Length]
+            };
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                Bounds local;
+                if (TryGetLocalMeshBounds(renderers[i], out local))
+                {
+                    proxy.LocalBounds[i] = local;
+                    proxy.HasLocalBounds[i] = true;
+                }
+            }
+
+            return proxy;
+        }
+
+        private static bool TryGetLocalMeshBounds(Renderer renderer, out Bounds bounds)
+        {
+            bounds = new Bounds();
+            if (renderer == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                SpriteRenderer spriteRenderer = renderer as SpriteRenderer;
+                if (spriteRenderer != null)
+                {
+                    if (spriteRenderer.sprite == null)
+                    {
+                        return false;
+                    }
+
+                    bounds = spriteRenderer.sprite.bounds;
+                    return true;
+                }
+
+                MeshRenderer meshRenderer = renderer as MeshRenderer;
+                if (meshRenderer != null)
+                {
+                    MeshFilter filter = meshRenderer.GetComponent<MeshFilter>();
+                    if (filter != null && filter.sharedMesh != null)
+                    {
+                        bounds = filter.sharedMesh.bounds;
+                        return true;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Fall back to the renderer's world bounds when a mesh cannot report local bounds.
+            }
+
+            return false;
+        }
+
+        private static bool RayHitsProxy(ProxyProp proxy, Ray ray, out float distance)
+        {
+            distance = float.MaxValue;
+            bool hit = false;
+            for (int i = 0; i < proxy.Renderers.Length; i++)
+            {
+                Renderer renderer = proxy.Renderers[i];
+                if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+
+                float rendererDistance;
+                bool intersects = proxy.HasLocalBounds[i]
+                    ? RayHitsLocalBox(renderer.transform, proxy.LocalBounds[i], ray, out rendererDistance)
+                    : renderer.bounds.IntersectRay(ray, out rendererDistance);
+                if (intersects && rendererDistance >= 0f && rendererDistance < distance)
+                {
+                    distance = rendererDistance;
+                    hit = true;
+                }
+            }
+
+            return hit;
+        }
+
+        /// <summary>
+        /// Ray against a mesh's local-space box. The ray is moved into the transform's local space
+        /// (InverseTransformVector keeps the scale, so the parameter t stays a world distance), then a
+        /// standard slab test is run. Unlike renderer.bounds this stays tight for rotated props.
+        /// </summary>
+        private static bool RayHitsLocalBox(Transform transform, Bounds box, Ray ray, out float distance)
+        {
+            distance = 0f;
+            Vector3 origin = transform.InverseTransformPoint(ray.origin);
+            Vector3 direction = transform.InverseTransformVector(ray.direction);
+            Vector3 min = box.min;
+            Vector3 max = box.max;
+            float tMin = 0f;
+            float tMax = float.MaxValue;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                float o = origin[axis];
+                float d = direction[axis];
+                float lo = min[axis];
+                float hi = max[axis];
+                if (Mathf.Abs(d) < 1e-9f)
+                {
+                    if (o < lo || o > hi)
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                float t1 = (lo - o) / d;
+                float t2 = (hi - o) / d;
+                if (t1 > t2)
+                {
+                    float swap = t1;
+                    t1 = t2;
+                    t2 = swap;
+                }
+
+                if (t1 > tMin)
+                {
+                    tMin = t1;
+                }
+
+                if (t2 < tMax)
+                {
+                    tMax = t2;
+                }
+
+                if (tMin > tMax)
+                {
+                    return false;
+                }
+            }
+
+            distance = tMin;
+            return true;
+        }
+
+        private static string DescribePath(Transform transform)
+        {
+            if (transform == null)
+            {
+                return "<missing>";
+            }
+
+            string path = transform.name;
+            Transform parent = transform.parent;
+            for (int depth = 0; parent != null && depth < 3; depth++)
+            {
+                path = parent.name + "/" + path;
+                parent = parent.parent;
+            }
+
+            return path;
         }
 
         private bool CanPickupEnvironmentObject(
@@ -1268,34 +1799,21 @@ namespace RebuildTheSchool
                 }
 
                 state.Root.SetParent(state.Environment.transform, true);
-                RestorePlayerCollisions(state);
                 RestoreVisualGlow(state);
                 _suppressHoverRoot = state.Root;
-                Rigidbody body = state.Body;
-                body.isKinematic = false;
-                body.useGravity = true;
-                body.detectCollisions = true;
-                body.constraints = RigidbodyConstraints.FreezeRotation;
-                body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-                body.interpolation = RigidbodyInterpolation.Interpolate;
-                body.drag = throwForward ? 0.03f : 0.15f;
-                body.angularDrag = 0.18f;
-                body.angularVelocity = Vector3.zero;
-                body.velocity = throwForward ? PlayerVelocity(state.Player) * 0.35f : Vector3.zero;
-
-                if (throwForward)
-                {
-                    float mass = Mathf.Max(0.5f, body.mass);
-                    body.AddForce(ray.direction * ThrowSpeed * mass, ForceMode.Impulse);
-                }
-
-                body.WakeUp();
+                // The body stays kinematic and keeps ignoring the player (both set up while carried); the
+                // landing (RestoreBody) gives the prop its original body settings back.
+                BeginFlight(state, ray, throwForward);
                 state.Age = 0f;
+                state.Thrown = throwForward;
+                state.WallHits = 0;
+                state.PushedNpcs = null;
                 _airborne.Add(state);
                 _held = null;
+                InvalidateAim();
                 Debug.Log(throwForward
-                    ? "[Rebuild the School] Prop thrown with collision enabled."
-                    : "[Rebuild the School] Prop dropped; it will settle on contact.");
+                    ? "[Rebuild the School] Prop thrown; it flies on a swept path that cannot pass walls, doors or the floor."
+                    : "[Rebuild the School] Prop dropped; it falls on a swept path and settles on contact.");
             }
             catch (Exception exception)
             {
@@ -1319,69 +1837,1288 @@ namespace RebuildTheSchool
                 }
 
                 state.Age += Time.deltaTime;
-                UpdateDoorForThrownProp(state);
                 BreakWindowsTouchingProp(state);
 
-                Cell supportCell;
-                if (TryGetGroundContact(state, out supportCell))
+                if (state.Landed)
                 {
-                    SettleThrown(state, supportCell);
+                    // StepFlight put the prop on the floor (or on a support); settle it into the world.
                     _airborne.RemoveAt(i);
+                    try
+                    {
+                        Cell supportCell;
+                        if (FinishFlight(state, out supportCell))
+                        {
+                            SettleThrown(state, supportCell);
+                        }
+                        else
+                        {
+                            Debug.LogWarning("[Rebuild the School] A prop came to rest outside every room; it went back to where it came from.");
+                            ReturnToOrigin(state);
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        Debug.LogError("[Rebuild the School] Settling a landed prop failed; it went back to where it came from: " + exception);
+                        ReturnToOrigin(state);
+                    }
                 }
                 else if (state.Age >= ReleaseTimeout)
                 {
+                    Debug.LogWarning("[Rebuild the School] A prop was still airborne after "
+                        + ReleaseTimeout + " s; it went back to where it came from.");
                     ReturnToOrigin(state);
                     _airborne.RemoveAt(i);
                 }
             }
         }
 
-        private bool TryGetGroundContact(CarryState state, out Cell supportCell)
+        // ------------------------------------------------------------------------------------------
+        // Flight of released props (RMB throw and LMB drop)
+        // ------------------------------------------------------------------------------------------
+
+        private enum FlightHitKind
         {
-            supportCell = null;
+            Wall,
+            Door,
+            Floor,
+            Ceiling,
+            Collider,
+            Support
+        }
+
+        private enum FlightEdgeKind
+        {
+            None,
+            Wall,
+            Door
+        }
+
+        private struct FlightHit
+        {
+            public float T;
+            public Vector3 Normal;
+            public FlightHitKind Kind;
+            public bool Inside;
+            public FlightDoor Door;
+            public Collider Collider;
+            public int EdgeX;
+            public int EdgeZ;
+            public int EdgeAxis;
+        }
+
+        private sealed class FlightDoor
+        {
+            public Door Door;
+            public Collider[] Colliders;
+        }
+
+        /// <summary>
+        /// Starts the flight of a released prop. The body stays kinematic, exactly as while it was carried,
+        /// and StepFlight moves it from FixedUpdate. The start is resolved against the walls first: the
+        /// camera is in free space, so the prop never starts on the far side of a wall, and a prop that
+        /// does not fit between the camera and a wall gets a smaller collision box until it has room.
+        /// </summary>
+        private void BeginFlight(CarryState state, Ray ray, bool throwForward)
+        {
+            Rigidbody body = state.Body;
             Bounds bounds;
-            if (state == null || state.Root == null || state.Body == null
-                || !CombinedBounds(state.Renderers, out bounds))
+            if (!CombinedBounds(state.Renderers, out bounds))
+            {
+                throw new InvalidOperationException("The released prop has no active renderers.");
+            }
+
+            body.isKinematic = true;
+            body.useGravity = false;
+            body.detectCollisions = true;
+            body.constraints = RigidbodyConstraints.None;
+            body.interpolation = RigidbodyInterpolation.Interpolate;
+
+            Cell floorCell;
+            state.FlightFloorY = TryGetCell(state.Environment, ray.origin, out floorCell)
+                ? floorCell.FloorWorldPosition.y
+                : state.OriginFloorY;
+            state.FlightCenterOffset = bounds.center - state.Root.position;
+            Vector3 fullHalf = Vector3.Max(
+                bounds.extents, new Vector3(FlightMinHalfExtent, FlightMinHalfExtent, FlightMinHalfExtent));
+            Vector3 desiredCenter = body.position + state.FlightCenterOffset;
+            Vector3 center;
+            Vector3 half;
+            ResolveFlightStart(state, ray.origin, desiredCenter, fullHalf, out center, out half);
+
+            state.FlightFullHalf = fullHalf;
+            state.FlightHalf = half;
+            state.FlightPosition = center - state.FlightCenterOffset;
+            state.FlightDrag = throwForward ? 0.03f : 0.15f;
+            state.FlightVelocity = throwForward
+                ? PlayerVelocity(state.Player) * 0.35f + ray.direction * ThrowSpeed
+                : Vector3.zero;
+            state.Landed = false;
+
+            float moved = (center - desiredCenter).magnitude;
+            if (moved > 0.001f)
+            {
+                body.position = state.FlightPosition;
+                state.Root.position = state.FlightPosition;
+            }
+
+            float scale = Mathf.Min(half.x / fullHalf.x, half.z / fullHalf.z);
+            if (moved > 0.05f || scale < 0.999f)
+            {
+                Debug.Log("[Rebuild the School] Released next to a wall: the prop was pulled "
+                    + moved.ToString("0.00") + " back toward you and its collision box is at "
+                    + Mathf.RoundToInt(scale * 100f) + "% until it has room, so the flight starts clear of every wall.");
+            }
+        }
+
+        /// <summary>
+        /// The camera is known to be in free space, so the point sweep camera -> prop centre decides the
+        /// side of every wall. Then the box is scanned back along that segment to the first position where
+        /// it overlaps no wall; if there is none, the position that fits the largest collision box wins.
+        /// </summary>
+        private void ResolveFlightStart(
+            CarryState state, Vector3 origin, Vector3 desiredCenter, Vector3 fullHalf,
+            out Vector3 center, out Vector3 half)
+        {
+            EnvironmentController environment = state.Environment;
+            Vector3 clamped = desiredCenter;
+            Vector3 toCenter = desiredCenter - origin;
+            FlightHit wallHit;
+            if (FlightGridSweep(environment, origin, Vector3.zero, toCenter, false, out wallHit)
+                && wallHit.Kind == FlightHitKind.Wall)
+            {
+                clamped = origin + toCenter * wallHit.T;
+            }
+
+            Vector3 segment = clamped - origin;
+            int steps = Mathf.Max(1, Mathf.CeilToInt(segment.magnitude / FlightScanStep));
+            Vector3 bestPoint = clamped;
+            float bestScale = -1f;
+            for (int i = 0; i <= steps; i++)
+            {
+                Vector3 point = origin + segment * (1f - (float)i / steps);
+                float scale = FlightFitScale(environment, point, fullHalf);
+                if (scale >= 1f)
+                {
+                    bestPoint = point;
+                    bestScale = scale;
+                    break;
+                }
+
+                if (scale > bestScale)
+                {
+                    bestPoint = point;
+                    bestScale = scale;
+                }
+            }
+
+            bestScale = Mathf.Max(0f, bestScale);
+            half = new Vector3(
+                Mathf.Max(FlightMinHalfExtent, fullHalf.x * bestScale),
+                fullHalf.y,
+                Mathf.Max(FlightMinHalfExtent, fullHalf.z * bestScale));
+            center = bestPoint;
+            float low = state.FlightFloorY + half.y;
+            if (center.y < low)
+            {
+                center.y = low;
+            }
+
+            if (2f * half.y + 0.2f < FlightCeilingHeight)
+            {
+                float high = state.FlightFloorY + FlightCeilingHeight - half.y;
+                if (center.y > high)
+                {
+                    center.y = high;
+                }
+            }
+        }
+
+        private static float FlightFitScale(EnvironmentController environment, Vector3 point, Vector3 fullHalf)
+        {
+            for (int i = 0; i < FlightFitScales.Length; i++)
+            {
+                float scale = FlightFitScales[i];
+                Vector3 trial = new Vector3(
+                    Mathf.Max(FlightMinHalfExtent, fullHalf.x * scale),
+                    fullHalf.y,
+                    Mathf.Max(FlightMinHalfExtent, fullHalf.z * scale));
+                if (!FlightOverlaps(environment, point, trial))
+                {
+                    return scale;
+                }
+            }
+
+            return 0f;
+        }
+
+        private void StepAirborneProps()
+        {
+            if (_airborne.Count == 0)
+            {
+                return;
+            }
+
+            float dt = Time.fixedDeltaTime;
+            for (int i = 0; i < _airborne.Count; i++)
+            {
+                CarryState state = _airborne[i];
+                if (state == null || state.Root == null || state.Body == null
+                    || state.Environment == null || state.Landed)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    RefreshFlightDoors(state.Environment);
+                    StepFlight(state, dt);
+                }
+                catch (Exception exception)
+                {
+                    if (Time.unscaledTime >= _nextSweepErrorLogTime)
+                    {
+                        _nextSweepErrorLogTime = Time.unscaledTime + 5f;
+                        Debug.LogError("[Rebuild the School] Thrown-prop flight step failed: " + exception);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// One physics step of a released prop: gravity and drag, then up to FlightMaxBounces contacts. The
+        /// box sweeps against the cell grid (wall bits, void cells, closed doors and windows), the floor and
+        /// the ceiling are analytic and continuous, so no speed can skip a wall.
+        /// </summary>
+        private void StepFlight(CarryState state, float dt)
+        {
+            Vector3 c = state.FlightPosition + state.FlightCenterOffset;
+            Vector3 stepStart = c;
+            Vector3 v = state.FlightVelocity;
+            Vector3 half = GrowFlightBox(state, c);
+            float gravity = Physics.gravity.y;
+            if (gravity > -1f)
+            {
+                gravity = FlightGravityFallback;
+            }
+
+            v.y += gravity * dt;
+            v *= Mathf.Max(0f, 1f - state.FlightDrag * dt);
+            float speed = v.magnitude;
+            if (speed > FlightMaxSpeed)
+            {
+                v *= FlightMaxSpeed / speed;
+            }
+
+            Vector3 impactVelocity = v;
+            float remaining = 1f;
+            bool settled = false;
+            bool landed = false;
+            for (int iteration = 0; iteration <= FlightMaxBounces; iteration++)
+            {
+                if (remaining <= 0.001f)
+                {
+                    settled = true;
+                    break;
+                }
+
+                Vector3 d = v * (dt * remaining);
+                FlightHit hit;
+                if (!FindFlightHit(state, c, half, d, out hit))
+                {
+                    c += d;
+                    settled = true;
+                    break;
+                }
+
+                c += d * hit.T;
+                if (hit.Kind == FlightHitKind.Floor)
+                {
+                    c.y = state.FlightFloorY + half.y;
+                    landed = true;
+                    v = Vector3.zero;
+                    settled = true;
+                    break;
+                }
+
+                if (hit.Kind == FlightHitKind.Support)
+                {
+                    c += hit.Normal * FlightSkin;
+                    landed = true;
+                    v = Vector3.zero;
+                    settled = true;
+                    break;
+                }
+
+                if (!hit.Inside)
+                {
+                    c += hit.Normal * FlightSkin;
+                }
+
+                RegisterFlightImpact(state, hit, v);
+                v = FlightReflect(v, hit.Normal);
+                remaining *= 1f - hit.T;
+            }
+
+            if (!settled)
+            {
+                // Wedged between surfaces: stop here; gravity takes over on the next step.
+                v = Vector3.zero;
+            }
+
+            if (state.Thrown)
+            {
+                HitNpcs(state, stepStart, c, half, impactVelocity, ref v);
+            }
+
+            state.FlightVelocity = landed ? Vector3.zero : v;
+            state.FlightPosition = c - state.FlightCenterOffset;
+            state.Body.MovePosition(state.FlightPosition);
+            if (landed)
+            {
+                state.Landed = true;
+            }
+        }
+
+        /// <summary>
+        /// The collision box may be smaller than the prop while the prop is squeezed against a wall; it
+        /// grows back as soon as there is room (never into an overlap).
+        /// </summary>
+        private static Vector3 GrowFlightBox(CarryState state, Vector3 center)
+        {
+            Vector3 half = state.FlightHalf;
+            Vector3 full = state.FlightFullHalf;
+            if (half.x >= full.x && half.z >= full.z)
+            {
+                return half;
+            }
+
+            Vector3 trial = new Vector3(
+                Mathf.Min(full.x, Mathf.Max(half.x * FlightGrowFactor, half.x + 0.05f)),
+                half.y,
+                Mathf.Min(full.z, Mathf.Max(half.z * FlightGrowFactor, half.z + 0.05f)));
+            if (!FlightOverlaps(state.Environment, center, trial))
+            {
+                state.FlightHalf = trial;
+                return trial;
+            }
+
+            return half;
+        }
+
+        private bool FindFlightHit(CarryState state, Vector3 c, Vector3 half, Vector3 d, out FlightHit best)
+        {
+            best = new FlightHit();
+            for (int attempt = 0; attempt < FlightMaxDoorRetries; attempt++)
+            {
+                FlightHit candidate;
+                FlightHit other;
+                bool found = FlightGridSweep(state.Environment, c, half, d, true, out candidate);
+                if (FlightPlaneSweep(state, c, half, d, out other) && (!found || other.T < candidate.T))
+                {
+                    candidate = other;
+                    found = true;
+                }
+
+                if (FlightColliderSweep(state, c, half, d, out other) && (!found || other.T < candidate.T))
+                {
+                    candidate = other;
+                    found = true;
+                }
+
+                if (!found)
+                {
+                    return false;
+                }
+
+                best = candidate;
+                if (candidate.Kind == FlightHitKind.Door && FlightDoorLetsPass(state, candidate.Door, c))
+                {
+                    // The door (or window) gave way; look again for whatever is behind it.
+                    continue;
+                }
+
+                return true;
+            }
+
+            // Never treat a chain of doors as free space: the last hit stays a contact.
+            return true;
+        }
+
+        private static bool FlightDoorLetsPass(CarryState state, FlightDoor entry, Vector3 center)
+        {
+            Door door = entry != null ? entry.Door : null;
+            if (door == null)
+            {
+                return true;
+            }
+
+            Window window = door as Window;
+            if (window != null)
+            {
+                // The same call BreakWindowsTouchingProp makes. A broken (or already open) window has its
+                // colliders switched off, so the prop flies on; an unbreakable one stays a wall.
+                if (!window.open)
+                {
+                    window.Break(false);
+                }
+
+                return window.open;
+            }
+
+            if (door.open)
+            {
+                return true;
+            }
+
+            // Locked doors and props wider than a doorway behave like walls.
+            Bounds propBounds = new Bounds(center, state.FlightFullHalf * 2f);
+            if (door.ec == state.Environment && !door.locked
+                && PropFitsDoorway(state.Root, propBounds, door))
+            {
+                door.OpenTimed(DoorOpenDuration, false);
+                return door.open;
+            }
+
+            return false;
+        }
+
+        private static Vector3 FlightReflect(Vector3 velocity, Vector3 normal)
+        {
+            float into = -Vector3.Dot(velocity, normal);
+            if (into <= 0f)
+            {
+                return velocity;
+            }
+
+            Vector3 tangent = velocity + normal * into;
+            float away = into * FlightBounceRestitution;
+            if (away < FlightBounceMinNormalSpeed)
+            {
+                away = 0f;
+            }
+
+            return tangent * FlightBounceFriction + normal * away;
+        }
+
+        private static void RegisterFlightImpact(CarryState state, FlightHit hit, Vector3 velocity)
+        {
+            state.WallHits++;
+            if (state.WallHits != 1)
+            {
+                return;
+            }
+
+            string what;
+            switch (hit.Kind)
+            {
+                case FlightHitKind.Wall:
+                    what = "a wall (cell " + hit.EdgeX + "," + hit.EdgeZ
+                        + (hit.EdgeAxis == 0 ? ", east edge)" : ", north edge)");
+                    break;
+                case FlightHitKind.Door:
+                    what = hit.Door != null && hit.Door.Door != null
+                        ? "the closed " + DescribePath(hit.Door.Door.transform)
+                        : "a closed door";
+                    break;
+                case FlightHitKind.Ceiling:
+                    what = "the ceiling";
+                    break;
+                case FlightHitKind.Collider:
+                    what = hit.Collider != null ? DescribePath(hit.Collider.transform) : "a collider";
+                    break;
+                default:
+                    what = hit.Kind.ToString();
+                    break;
+            }
+
+            float into = Mathf.Max(0f, -Vector3.Dot(velocity, hit.Normal));
+            Debug.Log("[Rebuild the School] " + (state.Thrown ? "Thrown" : "Dropped") + " prop hit " + what
+                + " at " + into.ToString("0.0") + " u/s; bounced.");
+        }
+
+        /// <summary>The flight integrator reached the floor or a support: put the prop there for settling.</summary>
+        private static bool FinishFlight(CarryState state, out Cell supportCell)
+        {
+            Vector3 position = state.FlightPosition;
+            state.Body.position = position;
+            state.Root.position = position;
+            state.FlightVelocity = Vector3.zero;
+            // The cell under the prop's centre owns it; the pivot can sit outside the prop's own bounds.
+            return TryGetCell(state.Environment, position + state.FlightCenterOffset, out supportCell)
+                || TryGetCell(state.Environment, position, out supportCell);
+        }
+
+        // --- the cell grid as a set of solid edges ---
+
+        private void RefreshFlightDoors(EnvironmentController environment)
+        {
+            if (environment == _flightDoorsEnvironment && Time.unscaledTime < _nextFlightDoorRefreshTime)
+            {
+                return;
+            }
+
+            _flightDoorsEnvironment = environment;
+            _nextFlightDoorRefreshTime = Time.unscaledTime + FlightDoorRefreshInterval;
+            _flightDoors.Clear();
+            if (environment == null)
+            {
+                return;
+            }
+
+            Door[] doors = FindObjectsOfType<Door>();
+            for (int i = 0; i < doors.Length; i++)
+            {
+                Door door = doors[i];
+                long key;
+                if (door == null || door.ec != environment
+                    || !TryFlightEdgeKey(door.position, door.direction, out key))
+                {
+                    continue;
+                }
+
+                FlightDoor entry = new FlightDoor();
+                entry.Door = door;
+                // Whether a collider is enabled is read live, so doors that open or lock between refreshes
+                // are handled; only the list of doors and their colliders is cached.
+                entry.Colliders = door.GetComponentsInChildren<Collider>(true);
+                List<FlightDoor> list;
+                if (!_flightDoors.TryGetValue(key, out list))
+                {
+                    list = new List<FlightDoor>(2);
+                    _flightDoors[key] = list;
+                }
+
+                list.Add(entry);
+            }
+        }
+
+        // axis 0 = the east edge of cell (ax, az) (plane x = 10 (ax + 1)); axis 1 = its north edge (plane z = 10 (az + 1)).
+        private static long FlightEdgeKey(int ax, int az, int axis)
+        {
+            return (((long)(ax + 1000)) * 100000L + (long)(az + 1000)) * 2L + axis;
+        }
+
+        private static bool TryFlightEdgeKey(IntVector2 position, Direction direction, out long key)
+        {
+            key = 0L;
+            switch (direction)
+            {
+                case Direction.North:
+                    key = FlightEdgeKey(position.x, position.z, 1);
+                    return true;
+                case Direction.East:
+                    key = FlightEdgeKey(position.x, position.z, 0);
+                    return true;
+                case Direction.South:
+                    key = FlightEdgeKey(position.x, position.z - 1, 1);
+                    return true;
+                case Direction.West:
+                    key = FlightEdgeKey(position.x - 1, position.z, 0);
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static bool FlightDoorIsSolid(FlightDoor entry)
+        {
+            Door door = entry.Door;
+            if (door == null || door.open)
             {
                 return false;
             }
 
-            // BB+ floor tiles do not provide a horizontal physics collider (they expose wall colliders only).
-            // Use the environment's floor plane as a fallback so released props cannot fall through it.
-            Cell floorCell;
-            if (TryGetCell(state.Environment, state.Root.position, out floorCell))
+            Collider[] colliders = entry.Colliders;
+            for (int i = 0; i < colliders.Length; i++)
             {
-                float floorGap = bounds.min.y - floorCell.FloorWorldPosition.y;
-                if (floorGap <= GroundContactTolerance)
+                Collider collider = colliders[i];
+                if (collider != null && collider.enabled && !collider.isTrigger
+                    && collider.gameObject.activeInHierarchy)
                 {
-                    Vector3 landingPosition = state.Root.position;
-                    landingPosition.y -= floorGap;
-                    state.Body.position = landingPosition;
-                    state.Root.position = landingPosition;
-                    state.Body.velocity = Vector3.zero;
-                    state.Body.angularVelocity = Vector3.zero;
-                    supportCell = floorCell;
                     return true;
                 }
             }
 
-            Ray groundRay = new Ray(bounds.center, Vector3.down);
-            RaycastHit hit;
-            float rayLength = bounds.extents.y + GroundContactTolerance + 0.1f;
-            if (!TryNearestHit(groundRay, rayLength, state, state.Player, out hit)
-                || Vector3.Dot(hit.normal, Vector3.up) < GroundSupportNormal)
+            return false;
+        }
+
+        // A cell that is outside the map, Null or an empty filler (ConstBin 16) is void: all its edges are solid.
+        private static Cell FlightCell(EnvironmentController environment, int x, int z)
+        {
+            IntVector2 position = new IntVector2(x, z);
+            if (!environment.ContainsCoordinates(position))
+            {
+                return null;
+            }
+
+            Cell cell = environment.CellFromPosition(position);
+            return cell == null || cell.Null || cell.room == null || cell.ConstBin == 16 ? null : cell;
+        }
+
+        private static bool FlightEdgeSolid(EnvironmentController environment, int ax, int az, int axis)
+        {
+            Cell a = FlightCell(environment, ax, az);
+            Cell b = axis == 0 ? FlightCell(environment, ax + 1, az) : FlightCell(environment, ax, az + 1);
+            if (a == null || b == null)
+            {
+                return true;
+            }
+
+            Direction direction = axis == 0 ? Direction.East : Direction.North;
+            return a.HasWallInDirection(direction) || b.HasWallInDirection(direction.GetOpposite());
+        }
+
+        private FlightEdgeKind FlightEdgeCandidate(
+            EnvironmentController environment, int ax, int az, int axis, bool includeDoors, out FlightDoor door)
+        {
+            door = null;
+            if (FlightEdgeSolid(environment, ax, az, axis))
+            {
+                return FlightEdgeKind.Wall;
+            }
+
+            List<FlightDoor> list;
+            if (includeDoors && _flightDoors.TryGetValue(FlightEdgeKey(ax, az, axis), out list))
+            {
+                for (int i = 0; i < list.Count; i++)
+                {
+                    if (FlightDoorIsSolid(list[i]))
+                    {
+                        door = list[i];
+                        return FlightEdgeKind.Door;
+                    }
+                }
+            }
+
+            return FlightEdgeKind.None;
+        }
+
+        /// <summary>Strict test: does the box overlap any wall or void edge (doors are not counted)?</summary>
+        private static bool FlightOverlaps(EnvironmentController environment, Vector3 c, Vector3 half)
+        {
+            float margin = FlightSkin + FlightWallHalfThickness;
+            int k0 = Mathf.CeilToInt((c.x - half.x - margin) / WorldTileWidth);
+            int k1 = Mathf.FloorToInt((c.x + half.x + margin) / WorldTileWidth);
+            int j0 = Mathf.FloorToInt((c.z - half.z - margin) / WorldTileWidth);
+            int j1 = Mathf.FloorToInt((c.z + half.z + margin) / WorldTileWidth);
+            for (int k = k0; k <= k1; k++)
+            {
+                for (int j = j0; j <= j1; j++)
+                {
+                    float plane = k * WorldTileWidth;
+                    if (plane - FlightWallHalfThickness - half.x < c.x && c.x < plane + FlightWallHalfThickness + half.x
+                        && j * WorldTileWidth - half.z < c.z && c.z < (j + 1) * WorldTileWidth + half.z
+                        && FlightEdgeSolid(environment, k - 1, j, 0))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            int m0 = Mathf.CeilToInt((c.z - half.z - margin) / WorldTileWidth);
+            int m1 = Mathf.FloorToInt((c.z + half.z + margin) / WorldTileWidth);
+            int i0 = Mathf.FloorToInt((c.x - half.x - margin) / WorldTileWidth);
+            int i1 = Mathf.FloorToInt((c.x + half.x + margin) / WorldTileWidth);
+            for (int m = m0; m <= m1; m++)
+            {
+                for (int i = i0; i <= i1; i++)
+                {
+                    float plane = m * WorldTileWidth;
+                    if (plane - FlightWallHalfThickness - half.z < c.z && c.z < plane + FlightWallHalfThickness + half.z
+                        && i * WorldTileWidth - half.x < c.x && c.x < (i + 1) * WorldTileWidth + half.x
+                        && FlightEdgeSolid(environment, i, m - 1, 1))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Earliest contact of the box (centre c, half extents, displacement d) with a wall, a void edge or
+        /// a closed door/window. Every solid edge is a thin rectangle, Minkowski-expanded by the half
+        /// extents, so the box is a point swept against it: an exact slab test, no tunnelling at any speed.
+        /// </summary>
+        private bool FlightGridSweep(
+            EnvironmentController environment, Vector3 c, Vector3 half, Vector3 d, bool includeDoors, out FlightHit best)
+        {
+            best = new FlightHit();
+            bool found = false;
+            float margin = FlightSkin + FlightWallHalfThickness;
+            float minX = Mathf.Min(c.x, c.x + d.x) - half.x - margin;
+            float maxX = Mathf.Max(c.x, c.x + d.x) + half.x + margin;
+            float minZ = Mathf.Min(c.z, c.z + d.z) - half.z - margin;
+            float maxZ = Mathf.Max(c.z, c.z + d.z) + half.z + margin;
+
+            // x-normal planes at x = 10 k: the east edge of cells (k - 1, j)
+            int k0 = Mathf.CeilToInt(minX / WorldTileWidth);
+            int k1 = Mathf.FloorToInt(maxX / WorldTileWidth);
+            int j0 = Mathf.FloorToInt(minZ / WorldTileWidth);
+            int j1 = Mathf.FloorToInt(maxZ / WorldTileWidth);
+            for (int k = k0; k <= k1; k++)
+            {
+                for (int j = j0; j <= j1; j++)
+                {
+                    FlightDoor door;
+                    FlightEdgeKind kind = FlightEdgeCandidate(environment, k - 1, j, 0, includeDoors, out door);
+                    if (kind == FlightEdgeKind.None)
+                    {
+                        continue;
+                    }
+
+                    float t;
+                    float na;
+                    float nl;
+                    bool inside;
+                    if (!FlightSlabHit(
+                            c.x, c.z, d.x, d.z, k * WorldTileWidth, j * WorldTileWidth, (j + 1) * WorldTileWidth,
+                            half.x, half.z, out t, out na, out nl, out inside))
+                    {
+                        continue;
+                    }
+
+                    if (!found || t < best.T)
+                    {
+                        found = true;
+                        best.T = t;
+                        best.Normal = new Vector3(na, 0f, nl);
+                        best.Kind = kind == FlightEdgeKind.Door ? FlightHitKind.Door : FlightHitKind.Wall;
+                        best.Inside = inside;
+                        best.Door = door;
+                        best.Collider = null;
+                        best.EdgeX = k - 1;
+                        best.EdgeZ = j;
+                        best.EdgeAxis = 0;
+                    }
+                }
+            }
+
+            // z-normal planes at z = 10 m: the north edge of cells (i, m - 1)
+            int m0 = Mathf.CeilToInt(minZ / WorldTileWidth);
+            int m1 = Mathf.FloorToInt(maxZ / WorldTileWidth);
+            int i0 = Mathf.FloorToInt(minX / WorldTileWidth);
+            int i1 = Mathf.FloorToInt(maxX / WorldTileWidth);
+            for (int m = m0; m <= m1; m++)
+            {
+                for (int i = i0; i <= i1; i++)
+                {
+                    FlightDoor door;
+                    FlightEdgeKind kind = FlightEdgeCandidate(environment, i, m - 1, 1, includeDoors, out door);
+                    if (kind == FlightEdgeKind.None)
+                    {
+                        continue;
+                    }
+
+                    float t;
+                    float na;
+                    float nl;
+                    bool inside;
+                    if (!FlightSlabHit(
+                            c.z, c.x, d.z, d.x, m * WorldTileWidth, i * WorldTileWidth, (i + 1) * WorldTileWidth,
+                            half.z, half.x, out t, out na, out nl, out inside))
+                    {
+                        continue;
+                    }
+
+                    if (!found || t < best.T)
+                    {
+                        found = true;
+                        best.T = t;
+                        best.Normal = new Vector3(nl, 0f, na);
+                        best.Kind = kind == FlightEdgeKind.Door ? FlightHitKind.Door : FlightHitKind.Wall;
+                        best.Inside = inside;
+                        best.Door = door;
+                        best.Collider = null;
+                        best.EdgeX = i;
+                        best.EdgeZ = m - 1;
+                        best.EdgeAxis = 1;
+                    }
+                }
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// Sweeps the box centre (ca along the plane normal, cl along the wall) by (da, dl) against one wall
+        /// rectangle [plane +- thickness] x [latLo, latHi], expanded by the half extents (ha, hl). When the
+        /// centre is already inside (the box overlaps the wall) the position is never moved: the wall only
+        /// blocks motion that goes deeper through the nearest exit face, so the centre cannot cross it.
+        /// </summary>
+        private static bool FlightSlabHit(
+            float ca, float cl, float da, float dl, float plane, float latLo, float latHi, float ha, float hl,
+            out float t, out float na, out float nl, out bool inside)
+        {
+            t = 0f;
+            na = 0f;
+            nl = 0f;
+            inside = false;
+            float aLo = plane - FlightWallHalfThickness - ha;
+            float aHi = plane + FlightWallHalfThickness + ha;
+            float lLo = latLo - hl;
+            float lHi = latHi + hl;
+            if (aLo < ca && ca < aHi && lLo < cl && cl < lHi)
+            {
+                float paLo = ca - aLo;
+                float paHi = aHi - ca;
+                float plLo = cl - lLo;
+                float plHi = lHi - cl;
+                float least = Mathf.Min(Mathf.Min(paLo, paHi), Mathf.Min(plLo, plHi));
+                if (least == paLo)
+                {
+                    na = -1f;
+                }
+                else if (least == paHi)
+                {
+                    na = 1f;
+                }
+                else if (least == plLo)
+                {
+                    nl = -1f;
+                }
+                else
+                {
+                    nl = 1f;
+                }
+
+                if (da * na + dl * nl >= 0f)
+                {
+                    na = 0f;
+                    nl = 0f;
+                    return false;
+                }
+
+                inside = true;
+                return true;
+            }
+
+            float tMin = -1e30f;
+            float tMax = 1e30f;
+            if (Mathf.Abs(da) < FlightParallelEpsilon)
+            {
+                if (ca <= aLo || ca >= aHi)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                float t1 = (aLo - ca) / da;
+                float t2 = (aHi - ca) / da;
+                if (t1 > t2)
+                {
+                    float swap = t1;
+                    t1 = t2;
+                    t2 = swap;
+                }
+
+                if (t1 > tMin)
+                {
+                    tMin = t1;
+                    na = da > 0f ? -1f : 1f;
+                    nl = 0f;
+                }
+
+                tMax = Mathf.Min(tMax, t2);
+            }
+
+            if (Mathf.Abs(dl) < FlightParallelEpsilon)
+            {
+                if (cl <= lLo || cl >= lHi)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                float t1 = (lLo - cl) / dl;
+                float t2 = (lHi - cl) / dl;
+                if (t1 > t2)
+                {
+                    float swap = t1;
+                    t1 = t2;
+                    t2 = swap;
+                }
+
+                if (t1 > tMin)
+                {
+                    tMin = t1;
+                    na = 0f;
+                    nl = dl > 0f ? -1f : 1f;
+                }
+
+                tMax = Mathf.Min(tMax, t2);
+            }
+
+            if (tMin > tMax || tMax <= 0f || tMin > 1f)
             {
                 return false;
             }
 
-            float bottomGap = hit.distance - bounds.extents.y;
-            return bottomGap <= GroundContactTolerance
-                && bottomGap >= -0.35f
-                && TryGetCell(state.Environment, state.Root.position, out supportCell);
+            if (tMin < 0f)
+            {
+                tMin = 0f;
+                if (na == 0f && nl == 0f)
+                {
+                    return false;
+                }
+            }
+
+            t = tMin;
+            return true;
+        }
+
+        private static bool FlightPlaneSweep(CarryState state, Vector3 c, Vector3 half, Vector3 d, out FlightHit best)
+        {
+            best = new FlightHit();
+            bool found = false;
+            if (d.y < 0f)
+            {
+                float gap = (c.y - half.y) - state.FlightFloorY;
+                float t = gap < 0f ? 0f : gap / -d.y;
+                if (t <= 1f)
+                {
+                    found = true;
+                    best.T = t;
+                    best.Normal = Vector3.up;
+                    best.Kind = FlightHitKind.Floor;
+                }
+            }
+
+            // A prop taller than the room has no ceiling contact; it would never fit under it anyway.
+            if (d.y > 0f && 2f * half.y + 0.2f < FlightCeilingHeight)
+            {
+                float gap = state.FlightFloorY + FlightCeilingHeight - (c.y + half.y);
+                float t = gap < 0f ? 0f : gap / d.y;
+                if (t <= 1f && (!found || t < best.T))
+                {
+                    found = true;
+                    best.T = t;
+                    best.Normal = Vector3.down;
+                    best.Kind = FlightHitKind.Ceiling;
+                }
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// Loose props and furniture: a plain box cast. Walls (Tile colliders) and doors/windows come from the
+        /// analytic sweep above, entities and the player are ignored, and hits that start inside a collider
+        /// are skipped so a prop can never get stuck in one.
+        /// </summary>
+        private bool FlightColliderSweep(CarryState state, Vector3 c, Vector3 half, Vector3 d, out FlightHit best)
+        {
+            best = new FlightHit();
+            float distance = d.magnitude;
+            if (distance < 0.0005f)
+            {
+                return false;
+            }
+
+            Vector3 direction = d / distance;
+            int count = Physics.BoxCastNonAlloc(
+                c,
+                half,
+                direction,
+                SweepHits,
+                Quaternion.identity,
+                distance + FlightSkin,
+                ~0,
+                QueryTriggerInteraction.Ignore);
+            if (count <= 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (count > 1)
+                {
+                    Array.Sort(SweepHits, 0, count, RayHitOrder);
+                }
+
+                for (int i = 0; i < count; i++)
+                {
+                    RaycastHit hit = SweepHits[i];
+                    Collider collider = hit.collider;
+                    if (collider == null || !collider.enabled || hit.distance <= 0.0001f
+                        || Vector3.Dot(direction, hit.normal) >= 0f
+                        || IsPartOf(collider.transform, state.Root)
+                        || (state.Player != null && IsPartOf(collider.transform, state.Player.transform))
+                        || collider.GetComponentInParent<Entity>() != null
+                        || collider.GetComponentInParent<Door>() != null
+                        || collider.GetComponentInParent<Tile>() != null)
+                    {
+                        continue;
+                    }
+
+                    best.T = Mathf.Clamp01(hit.distance / distance);
+                    best.Normal = hit.normal.normalized;
+                    best.Collider = collider;
+                    best.Kind = d.y <= 0f && best.Normal.y >= GroundSupportNormal
+                        ? FlightHitKind.Support
+                        : FlightHitKind.Collider;
+                    return true;
+                }
+
+                return false;
+            }
+            finally
+            {
+                Array.Clear(SweepHits, 0, count);
+            }
+        }
+
+        private static bool IsPartOf(Transform candidate, Transform root)
+        {
+            return candidate != null && root != null && (candidate == root || candidate.IsChildOf(root));
+        }
+
+        // --- thrown props hit characters ---
+
+        /// <summary>
+        /// Thrown props only. The segment the prop's centre travelled this step is tested against the bounds
+        /// of every character (the prop's half extents added), so no speed can skip one. A character that is
+        /// hit is pushed once per flight, the Bang sound plays and the prop bounces back. Walls, doors and the
+        /// floor were decided before this runs and are never changed by it.
+        /// </summary>
+        private void HitNpcs(
+            CarryState state, Vector3 start, Vector3 end, Vector3 half, Vector3 impactVelocity, ref Vector3 velocity)
+        {
+            try
+            {
+                Vector3 flat = new Vector3(impactVelocity.x, 0f, impactVelocity.z);
+                List<NPC> npcs = state.Environment != null ? state.Environment.Npcs : null;
+                if (npcs == null || flat.magnitude < NpcMinHitSpeed)
+                {
+                    return;
+                }
+
+                bool hit = false;
+                for (int i = 0; i < npcs.Count; i++)
+                {
+                    NPC npc = npcs[i];
+                    Entity entity;
+                    Bounds bounds;
+                    if (!TryGetPushableNpc(npc, out entity, out bounds)
+                        || (state.PushedNpcs != null && state.PushedNpcs.Contains(npc)))
+                    {
+                        continue;
+                    }
+
+                    bounds.Expand(half * 2f);
+                    float entry;
+                    if (!SegmentHitsBounds(start, end, bounds, out entry))
+                    {
+                        continue;
+                    }
+
+                    // Only a prop that is moving toward the character hits it.
+                    Vector3 away = entity.transform.position - Vector3.Lerp(start, end, entry);
+                    away.y = 0f;
+                    if (Vector3.Dot(flat, away) <= 0f)
+                    {
+                        continue;
+                    }
+
+                    if (state.PushedNpcs == null)
+                    {
+                        state.PushedNpcs = new List<NPC>();
+                    }
+
+                    state.PushedNpcs.Add(npc);
+                    float push = PushNpc(npc, entity, away, flat);
+                    hit = true;
+                    Debug.Log("[Rebuild the School] Thrown prop hit " + npc.name + " at "
+                        + flat.magnitude.ToString("0.0") + " u/s; pushed it away at "
+                        + push.ToString("0.0") + " u/s (Bang).");
+                }
+
+                if (hit)
+                {
+                    velocity.x = -velocity.x * NpcHitBounce;
+                    velocity.z = -velocity.z * NpcHitBounce;
+                }
+            }
+            catch (Exception exception)
+            {
+                if (Time.unscaledTime >= _nextSweepErrorLogTime)
+                {
+                    _nextSweepErrorLogTime = Time.unscaledTime + 5f;
+                    Debug.LogError("[Rebuild the School] Pushing a character with a thrown prop failed: " + exception);
+                }
+            }
+        }
+
+        /// <summary>
+        /// The push of Bully.Push: Entity.AddForce(new Force(direction, speed, acceleration)). The direction runs
+        /// from the point of impact through the character (the Bully uses its own position instead).
+        /// </summary>
+        private static float PushNpc(NPC npc, Entity entity, Vector3 away, Vector3 flatVelocity)
+        {
+            if (away.sqrMagnitude < 0.0001f)
+            {
+                away = flatVelocity;
+            }
+
+            float push = Mathf.Clamp(flatVelocity.magnitude * NpcPushPerPropSpeed, NpcPushMinSpeed, NpcPushMaxSpeed);
+            entity.AddForce(new Force(away.normalized, push, -push));
+            PlayBang(npc);
+            return push;
+        }
+
+        /// <summary>
+        /// A character can be pushed while it is active, visible, not frozen or squished (a frozen entity keeps
+        /// its forces unused) and has an enabled collider; its bounds are those of its colliders.
+        /// </summary>
+        private static bool TryGetPushableNpc(NPC npc, out Entity entity, out Bounds bounds)
+        {
+            entity = null;
+            bounds = new Bounds();
+            if (npc == null || !npc.isActiveAndEnabled || npc.Navigator == null)
+            {
+                return false;
+            }
+
+            entity = npc.Navigator.Entity;
+            if (entity == null || !entity.isActiveAndEnabled || entity.Frozen || entity.Squished || !entity.Visible)
+            {
+                return false;
+            }
+
+            // The solid colliders decide; a character that only has trigger colliders uses those.
+            bool found = false;
+            entity.GetComponents(NpcColliders);
+            for (int pass = 0; pass < 2 && !found; pass++)
+            {
+                for (int i = 0; i < NpcColliders.Count; i++)
+                {
+                    Collider collider = NpcColliders[i];
+                    if (collider == null || !collider.enabled || collider.isTrigger != (pass == 1))
+                    {
+                        continue;
+                    }
+
+                    if (found)
+                    {
+                        bounds.Encapsulate(collider.bounds);
+                    }
+                    else
+                    {
+                        bounds = collider.bounds;
+                        found = true;
+                    }
+                }
+            }
+
+            NpcColliders.Clear();
+            return found;
+        }
+
+        /// <summary>Does the segment a -> b touch the box? entry is the segment fraction where it first does.</summary>
+        private static bool SegmentHitsBounds(Vector3 a, Vector3 b, Bounds box, out float entry)
+        {
+            entry = 0f;
+            float tMin = 0f;
+            float tMax = 1f;
+            Vector3 delta = b - a;
+            Vector3 low = box.min;
+            Vector3 high = box.max;
+            if (!SlabRange(a.x, delta.x, low.x, high.x, ref tMin, ref tMax)
+                || !SlabRange(a.y, delta.y, low.y, high.y, ref tMin, ref tMax)
+                || !SlabRange(a.z, delta.z, low.z, high.z, ref tMin, ref tMax))
+            {
+                return false;
+            }
+
+            entry = tMin;
+            return true;
+        }
+
+        private static bool SlabRange(
+            float origin, float delta, float low, float high, ref float tMin, ref float tMax)
+        {
+            if (Mathf.Abs(delta) < 1e-6f)
+            {
+                return origin >= low && origin <= high;
+            }
+
+            float t1 = (low - origin) / delta;
+            float t2 = (high - origin) / delta;
+            if (t1 > t2)
+            {
+                float swap = t1;
+                t1 = t2;
+                t2 = swap;
+            }
+
+            tMin = Mathf.Max(tMin, t1);
+            tMax = Mathf.Min(tMax, t2);
+            return tMin <= tMax;
+        }
+
+        private static void PlayBang(NPC npc)
+        {
+            SoundObject bang = FindBangSound();
+            if (bang == null)
+            {
+                return;
+            }
+
+            // Played by the character's own audio manager, like 1st Prize plays its audBang.
+            AudioManager manager = npc.GetComponentInChildren<AudioManager>();
+            if (manager != null)
+            {
+                manager.PlaySingle(bang);
+            }
+        }
+
+        /// <summary>
+        /// The Bang sound: the SoundObject named "Bang", otherwise 1st Prize's audBang (it plays it when it slams
+        /// into a wall). Found once; a failed search is repeated after NpcBangRetryInterval seconds.
+        /// </summary>
+        private static SoundObject FindBangSound()
+        {
+            if (_bangSound != null || Time.unscaledTime < _nextBangSearchTime)
+            {
+                return _bangSound;
+            }
+
+            _nextBangSearchTime = Time.unscaledTime + NpcBangRetryInterval;
+            SoundObject[] sounds = Resources.FindObjectsOfTypeAll<SoundObject>();
+            for (int i = 0; i < sounds.Length && _bangSound == null; i++)
+            {
+                if (sounds[i] != null
+                    && string.Equals(sounds[i].name, BangSoundName, StringComparison.OrdinalIgnoreCase))
+                {
+                    _bangSound = sounds[i];
+                }
+            }
+
+            if (_bangSound == null)
+            {
+                FirstPrize[] prizes = Resources.FindObjectsOfTypeAll<FirstPrize>();
+                for (int i = 0; i < prizes.Length && _bangSound == null; i++)
+                {
+                    if (prizes[i] != null && prizes[i].audBang != null)
+                    {
+                        _bangSound = prizes[i].audBang;
+                    }
+                }
+            }
+
+            Debug.Log(_bangSound != null
+                ? "[Rebuild the School] Bang sound found: " + _bangSound.name
+                : "[Rebuild the School] The Bang sound was not found; characters are pushed without it.");
+            return _bangSound;
         }
 
         private void SettleThrown(CarryState state, Cell target)
         {
+            InvalidateAim();
             if (state == null || state.Root == null || target == null)
             {
                 ReturnToOrigin(state);
@@ -1393,19 +3130,26 @@ namespace RebuildTheSchool
             // Some BB+ props (for example, carousel bases) are intentionally authored above ground.
             Vector3 landingPosition = state.Root.position;
             landingPosition.y = target.FloorWorldPosition.y + initialCellY;
+
+            // A THROWN prop settles where it actually came to rest, even in another room: a broken window
+            // or an open doorway lets a throw cross a wall, and walls themselves stop it (see
+            // StepFlight). Moving it to the thrower's side of the wall is what made a prop thrown
+            // through a window end up in the room it was thrown from. A DROPPED prop (LMB) keeps the
+            // older rule and settles in the player's room.
             RoomController placementRoom = target.room;
             Cell playerCell;
-            if (state.Player != null
+            if (!state.Thrown && state.Player != null
                 && TryGetCell(state.Environment, state.Player.transform.position, out playerCell))
             {
                 placementRoom = playerCell.room;
             }
 
             state.PreferredRoom = placementRoom;
+            bool placed = false;
             try
             {
                 state.PlacementWalkabilityCache = new Dictionary<Cell, bool>();
-                // If physics carried the prop through a wall, keep it on the player's side of that wall.
+                // A dropped prop that physics carried over a wall line stays on the player's side of it.
                 if (placementRoom != null && target.room != placementRoom)
                 {
                     Cell nearestRoomCell = NearestCellInRoom(placementRoom, landingPosition);
@@ -1418,10 +3162,7 @@ namespace RebuildTheSchool
                 }
 
                 state.CellOffset = landingPosition - target.FloorWorldPosition;
-                if (TryPlace(state, target) || TryPlaceNearby(state, landingPosition))
-                {
-                    return;
-                }
+                placed = TryPlace(state, target) || TryPlaceNearby(state, landingPosition);
             }
             finally
             {
@@ -1429,7 +3170,42 @@ namespace RebuildTheSchool
                 state.PreferredRoom = null;
             }
 
+            if (placed)
+            {
+                LogLanding(state);
+                return;
+            }
+
+            Debug.LogWarning("[Rebuild the School] No free spot for the prop near " + landingPosition
+                + " in " + DescribeRoom(placementRoom) + "; it went back to where it came from.");
             ReturnToOrigin(state);
+        }
+
+        private static string DescribeRoom(RoomController room)
+        {
+            return room == null ? "no room" : room.name + " (" + room.category + ")";
+        }
+
+        private static void LogLanding(CarryState state)
+        {
+            string landed = "an unknown place";
+            Cell landedCell;
+            if (state.Root != null && TryGetCell(state.Environment, state.Root.position, out landedCell))
+            {
+                landed = DescribeRoom(landedCell.room) + ", cell " + landedCell.position;
+            }
+
+            string standing = "an unknown place";
+            Cell playerCell;
+            if (state.Player != null
+                && TryGetCell(state.Environment, state.Player.transform.position, out playerCell))
+            {
+                standing = DescribeRoom(playerCell.room);
+            }
+
+            Debug.Log("[Rebuild the School] Prop '" + (state.Root != null ? state.Root.name : "?") + "' "
+                + (state.Thrown ? "thrown" : "dropped") + " came to rest in " + landed
+                + "; the player is in " + standing + "; wall impacts on the way: " + state.WallHits + ".");
         }
 
         private bool TryPlaceNearby(CarryState state, Vector3 landingPosition)
@@ -1583,7 +3359,9 @@ namespace RebuildTheSchool
                 return false;
             }
 
-            if (!PlayerCanReachCell(state, target))
+            // A thrown prop may land somewhere the player cannot walk to (that is the point of throwing
+            // it through a window), so only dropped props must be reachable.
+            if (!state.Thrown && !PlayerCanReachCell(state, target))
             {
                 return false;
             }
@@ -1858,6 +3636,7 @@ namespace RebuildTheSchool
 
         private void ReturnToOrigin(CarryState state)
         {
+            InvalidateAim();
             if (state == null || state.Root == null)
             {
                 return;
@@ -2025,8 +3804,11 @@ namespace RebuildTheSchool
                     state.Body.collisionDetectionMode = state.OriginalCollisionMode;
                     state.Body.interpolation = state.OriginalInterpolation;
                     state.Body.isKinematic = state.OriginalIsKinematic;
-                    state.Body.velocity = restoreVelocity ? state.OriginalVelocity : Vector3.zero;
-                    state.Body.angularVelocity = restoreVelocity ? state.OriginalAngularVelocity : Vector3.zero;
+                    if (!state.Body.isKinematic)
+                    {
+                        state.Body.velocity = restoreVelocity ? state.OriginalVelocity : Vector3.zero;
+                        state.Body.angularVelocity = restoreVelocity ? state.OriginalAngularVelocity : Vector3.zero;
+                    }
                 }
             }
 
@@ -2152,36 +3934,6 @@ namespace RebuildTheSchool
             return false;
         }
 
-        private static bool TryGetCenterRayBoundsDistance(
-            Renderer[] renderers, Ray ray, out float distance)
-        {
-            distance = float.MaxValue;
-            if (renderers == null)
-            {
-                return false;
-            }
-
-            bool found = false;
-            for (int i = 0; i < renderers.Length; i++)
-            {
-                Renderer renderer = renderers[i];
-                if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy)
-                {
-                    continue;
-                }
-
-                float rendererDistance;
-                if (renderer.bounds.IntersectRay(ray, out rendererDistance)
-                    && rendererDistance >= 0f && rendererDistance < distance)
-                {
-                    distance = rendererDistance;
-                    found = true;
-                }
-            }
-
-            return found;
-        }
-
         internal static bool BoundsIntersectPickupCorridor(
             Renderer[] renderers,
             Ray ray,
@@ -2236,26 +3988,6 @@ namespace RebuildTheSchool
 
             distance = Mathf.Max(0f, entryDistance);
             return true;
-        }
-
-        private static bool VisibleBeforeBlocker(
-            float candidateDistance,
-            RaycastHit nearestHit,
-            bool hasHit,
-            Transform candidate)
-        {
-            if (!hasHit || nearestHit.collider == null)
-            {
-                return true;
-            }
-
-            Transform blocker = nearestHit.collider.transform;
-            if (candidate != null && (blocker == candidate || blocker.IsChildOf(candidate)))
-            {
-                return true;
-            }
-
-            return candidateDistance <= nearestHit.distance + HitPadding;
         }
 
         private static bool CombinedBounds(Renderer[] renderers, out Bounds bounds)
@@ -2360,26 +4092,78 @@ namespace RebuildTheSchool
                 || root.GetComponentInParent<Activity>() != null;
         }
 
+        private static readonly string[] ForbiddenNameParts =
+        {
+            "elevator", "lift", "lamp", "light", "chandelier", "sconce",
+            "bsoda", "no squee", "nosquee", "covercloud", "chalkcloud"
+        };
+
         private static bool IsForbiddenPickupRoot(Transform root)
         {
-            if (root == null
-                || root.GetComponentInParent<Elevator>() != null
-                || root.GetComponentInChildren<Elevator>(true) != null
-                || root.GetComponentInParent<Item>() != null
-                || root.GetComponentInChildren<Item>(true) != null
-                || root.GetComponentInParent<CoverCloud>() != null
-                || root.GetComponentInChildren<CoverCloud>(true) != null
-                || root.GetComponentInChildren<Light>(true) != null)
+            return ForbiddenPickupReason(root) != null;
+        }
+
+        /// <summary>Why a root must never be carried (elevators, items, clouds, real lights...), or null.</summary>
+        private static string ForbiddenPickupReason(Transform root)
+        {
+            if (root == null)
             {
-                return true;
+                return "missing object";
+            }
+
+            if (root.GetComponentInParent<Elevator>() != null
+                || root.GetComponentInChildren<Elevator>(true) != null)
+            {
+                return "elevator";
+            }
+
+            if (root.GetComponentInParent<Item>() != null
+                || root.GetComponentInChildren<Item>(true) != null)
+            {
+                return "item";
+            }
+
+            if (root.GetComponentInParent<CoverCloud>() != null
+                || root.GetComponentInChildren<CoverCloud>(true) != null)
+            {
+                return "cover cloud";
+            }
+
+            if (HasForeignLight(root))
+            {
+                return "contains a light (lamp or fixture)";
             }
 
             string name = root.name.ToLowerInvariant();
-            return name.Contains("elevator") || name.Contains("lift")
-                || name.Contains("lamp") || name.Contains("light")
-                || name.Contains("chandelier") || name.Contains("sconce")
-                || name.Contains("bsoda") || name.Contains("no squee") || name.Contains("nosquee")
-                || name.Contains("covercloud") || name.Contains("chalkcloud");
+            for (int i = 0; i < ForbiddenNameParts.Length; i++)
+            {
+                if (name.Contains(ForbiddenNameParts[i]))
+                {
+                    return "name contains '" + ForbiddenNameParts[i] + "'";
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// A real light under the root marks a lamp or fixture. The glow this runtime attaches to the very
+        /// prop it highlights or carries is also a Light; it must never make that prop "forbidden",
+        /// otherwise a highlighted prop could not be picked up.
+        /// </summary>
+        private static bool HasForeignLight(Transform root)
+        {
+            Light[] lights = root.GetComponentsInChildren<Light>(true);
+            for (int i = 0; i < lights.Length; i++)
+            {
+                Light light = lights[i];
+                if (light != null && light.gameObject.name != GlowObjectName)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static bool IsLocker(Transform root)
@@ -2629,6 +4413,19 @@ namespace RebuildTheSchool
             public Renderer[] Renderers;
             public Cell Cell;
             public ParentKind ParentKind;
+            public float AimDistance;
+            public string AimSource;
+        }
+
+        /// <summary>A movable prop in the aim-assist registry, matched by the boxes of its meshes.</summary>
+        private sealed class ProxyProp
+        {
+            public Transform Root;
+            public EnvironmentObject EnvironmentObject;
+            public bool HasSolidCollider;
+            public Renderer[] Renderers;
+            public Bounds[] LocalBounds;
+            public bool[] HasLocalBounds;
         }
 
         private enum ParentKind
@@ -2656,7 +4453,11 @@ namespace RebuildTheSchool
             private readonly Color[][] _baseColors;
             private readonly GameObject _lightObject;
             private readonly Light _light;
+            private const float ReapplyInterval = 0.15f;
             private bool _restored;
+            private Color _appliedColor;
+            private bool _hasAppliedColor;
+            private float _appliedTime;
 
             public GlowState(Transform root, Renderer[] renderers)
             {
@@ -2733,7 +4534,7 @@ namespace RebuildTheSchool
 
                 if (_root != null && hasBounds)
                 {
-                    _lightObject = new GameObject("Carry placement glow");
+                    _lightObject = new GameObject(GlowObjectName);
                     _lightObject.transform.SetParent(_root, false);
                     _lightObject.transform.localPosition = _root.InverseTransformPoint(bounds.center);
                     _light = _lightObject.AddComponent<Light>();
@@ -2751,6 +4552,17 @@ namespace RebuildTheSchool
                     return;
                 }
 
+                // The highlight is now refreshed every frame; only touch the property blocks when the
+                // color changes or periodically (other systems may rewrite the blocks), not 60x a second.
+                float now = Time.unscaledTime;
+                if (_hasAppliedColor && color == _appliedColor && now - _appliedTime < ReapplyInterval)
+                {
+                    return;
+                }
+
+                _hasAppliedColor = true;
+                _appliedColor = color;
+                _appliedTime = now;
                 if (_light != null)
                 {
                     _light.color = color;
@@ -2927,6 +4739,19 @@ namespace RebuildTheSchool
             public Vector3 OriginalVelocity;
             public Vector3 OriginalAngularVelocity;
             public float Age;
+            public bool Thrown;
+            public int WallHits;
+            // Characters this thrown prop has already pushed (each is pushed once per flight).
+            public List<NPC> PushedNpcs;
+            // Flight of a released prop (see StepFlight): the body is kinematic and moved from here.
+            public Vector3 FlightPosition;
+            public Vector3 FlightVelocity;
+            public Vector3 FlightCenterOffset;
+            public Vector3 FlightFullHalf;
+            public Vector3 FlightHalf;
+            public float FlightDrag;
+            public float FlightFloorY;
+            public bool Landed;
         }
 
         private sealed class RayHitComparer : IComparer<RaycastHit>

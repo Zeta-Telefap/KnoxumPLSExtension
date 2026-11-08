@@ -39,6 +39,15 @@ namespace RebuildTheSchool
             "aMapTile", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly FieldInfo WindowBMapTileField = typeof(Window).GetField(
             "bMapTile", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo StandardDoorBgField = typeof(StandardDoor).GetField(
+            "bg", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly Dictionary<Type, FieldInfo[]> DoorMapTileFields =
+            new Dictionary<Type, FieldInfo[]>();
+        // Walls that a moved door took away when it landed on a wall edge, keyed by the edge (EdgeKey).
+        // When that door leaves the edge, exactly the faces recorded here are walled up again. An edge
+        // that had no wall when the door arrived (a vanilla doorway, or any open edge) has no entry and
+        // stays open. Entries only change after a move succeeded, and belong to one level.
+        private static readonly Dictionary<long, RemovedWall> RemovedWalls = new Dictionary<long, RemovedWall>();
         private static Elevator[] ElevatorCache = new Elevator[0];
         private static float NextElevatorRefreshTime;
 
@@ -95,10 +104,20 @@ namespace RebuildTheSchool
             if (_player != null && _player.ec != null && Time.timeScale > 0f
                 && (g.Instance == null || !g.Instance.IsHoldingObject))
             {
-                UpdateStructuralHighlight();
-                if (PickupPressed())
+                if (g.Instance != null && g.Instance.HasPropTarget(_player))
                 {
-                    TryBeginDragThisFrame(_player);
+                    // A prop under the crosshair always wins over walls/doors behind it: its glow
+                    // replaces the structural glow and G is left to g. Without this both glows showed
+                    // at once and the winner depended on which Update ran first.
+                    ClearStructuralHighlight();
+                }
+                else
+                {
+                    UpdateStructuralHighlight();
+                    if (PickupPressed())
+                    {
+                        TryBeginDragThisFrame(_player);
+                    }
                 }
             }
             else
@@ -117,7 +136,7 @@ namespace RebuildTheSchool
             }
         }
 
-        /// <summary>Called by g before furniture selection so structural targets get first refusal.</summary>
+        /// <summary>Called by g after its prop query found nothing under the crosshair.</summary>
         internal bool HandlePickupRequest(PlayerManager player)
         {
             if (_held != null)
@@ -830,6 +849,11 @@ namespace RebuildTheSchool
 
             if (state.SourceCell == target && state.SourceDirection == targetDirection)
             {
+                // Put back on its own edge: nothing structural changes. During the drag the door hung
+                // under the environment root, so hand it back to the tile it was picked up from.
+                door.transform.SetParent(state.OriginalParent, true);
+                door.transform.position = state.OriginalPosition;
+                door.transform.rotation = state.OriginalRotation;
                 RestoreDoorAppearance(state);
                 RestoreDoorState(state);
                 return true;
@@ -849,7 +873,33 @@ namespace RebuildTheSchool
             bool targetHadWall = target.HasWallInDirection(targetDirection);
             bool targetNeighbourHadWall = targetNeighbour.HasWallInDirection(targetDirection.GetOpposite());
             Window movingWindow = door as Window;
+            PurgeRemovedWalls(state.Environment);
+            long sourceKey = EdgeKey(sourcePosition, sourceDirection);
+            long targetKey = EdgeKey(targetPosition, targetDirection);
+            // The same physical edge approached from its other side: the door only turns around.
+            bool sameEdge = sourceKey == targetKey;
+            RemovedWall remembered = null;
+            if (!sameEdge)
+            {
+                RemovedWalls.TryGetValue(sourceKey, out remembered);
+            }
+
+            // The edge the door leaves:
+            //  - a wall this door removed when it landed there is rebuilt, exactly the faces that stood;
+            //  - a window with no record (a vanilla window) always stood in a wall, so it is walled up;
+            //  - any other doorway (a vanilla door, or an edge that was open when the door arrived) stays open.
+            bool restoreRemembered = remembered != null;
+            bool sealOldEdge = !sameEdge && !restoreRemembered && movingWindow != null;
+            string oldEdgeNote = sameEdge
+                ? "same edge, the door only turned around"
+                : (restoreRemembered
+                    ? "wall rebuilt on " + (remembered.CellHadWall && remembered.NeighbourHadWall
+                        ? "both faces" : "one face")
+                    : (sealOldEdge ? "walled up (window)" : "left open (it was a doorway)"));
             bool windowMapUpdated = false;
+            bool oneWayReleased = false;
+            bool initializedAtTarget = false;
+            int replacedMarkers = 0;
             List<CellSnapshot> snapshots = new List<CellSnapshot>();
             AddSnapshot(snapshots, state.SourceCell);
             AddSnapshot(snapshots, state.SourceNeighbour);
@@ -858,52 +908,63 @@ namespace RebuildTheSchool
 
             try
             {
+                // 1. Let go of everything the door holds on the SOURCE edge while its aTile/bTile still
+                //    point there. Door.Block caches its last value: releasing after SetupDoor has moved
+                //    the door would decrement the NEW cells and leave a permanent block at the old doorway.
+                door.Block(false);
                 SetOneWayDoorBlock(door, state.SourceNeighbour, sourceDirection, false);
-                RemoveDoorReferences(state.SourceCell, sourceDirection, door);
-                RemoveDoorReferences(state.SourceNeighbour, sourceDirection.GetOpposite(), door);
+                oneWayReleased = true;
+                replacedMarkers = ClearDoorMapMarkers(door);
+                UnregisterDoorFromCell(state.SourceCell, door);
+                UnregisterDoorFromCell(state.SourceNeighbour, door);
                 ClearDoorCoverage(state.SourceCell, sourceDirection, door);
                 ClearDoorCoverage(state.SourceNeighbour, sourceDirection.GetOpposite(), door);
 
-                // A removed door leaves its former opening connected; a removed window must
-                // restore the solid wall that the window originally occupied.
-                if (door is Window)
+                // 2. The edge the door leaves (see oldEdgeNote above). UpdateCell must not run here: vanilla
+                //    AssignDoor stores the direction pointing away from the doorway on the far cell, so
+                //    UpdateCell re-walls the doorway and opens the far cell's other wall instead.
+                if (sameEdge)
+                {
+                    // Nothing structural changes on the edge the door keeps.
+                }
+                else if (restoreRemembered)
+                {
+                    RebuildRemovedWall(state.Environment, remembered);
+                }
+                else if (sealOldEdge)
                 {
                     state.Environment.CloseCell(sourcePosition, sourceDirection);
                     state.Environment.CloseCell(sourceNeighbourPosition, sourceDirection.GetOpposite());
                 }
                 else
                 {
-                    // A doorway is represented on both adjoining cells. ConnectCells only
-                    // clears the requested cell face, so clear both faces explicitly or a
-                    // wall can remain visible from the neighbouring side of the old doorway.
                     ConnectDoorEdge(state.Environment, sourcePosition, sourceDirection);
                 }
 
-                // Prepare both faces of the destination edge before registering the door.
-                // This prevents a one-sided wall from being left behind at the new doorway.
+                // 3. The edge the door lands on: take the wall away on BOTH faces, then register the door.
                 if (targetHadWall || targetNeighbourHadWall)
                 {
                     ConnectDoorEdge(state.Environment, targetPosition, targetDirection);
                 }
 
                 target = state.Environment.CellFromPosition(targetPosition);
+                targetNeighbour = state.Environment.CellFromPosition(targetNeighbourPosition);
                 state.Environment.SetupDoor(door, target, targetDirection);
-                SetOneWayDoorBlock(door, targetNeighbour, targetDirection, true);
                 InitializeMovedDoor(door);
+                initializedAtTarget = true;
                 if (movingWindow != null)
                 {
-                    // Windows keep a wall surface on both adjoining cell faces even though
-                    // their edge is connected for pathing.
+                    // Like BuildWindow, cover the wall slot on both faces (coverage only: the faces
+                    // themselves stay open for pathing).
                     target.HardCoverWall(targetDirection, true);
                     targetNeighbour.HardCoverWall(targetDirection.GetOpposite(), true);
                 }
 
                 // Refresh every subtype's own renderer when it provides an UpdateTextures method.
                 UpdateDoorTextures(door);
-                state.Environment.UpdateCell(sourcePosition);
-                state.Environment.UpdateCell(sourceNeighbourPosition);
-                state.Environment.UpdateCell(targetPosition);
-                state.Environment.UpdateCell(targetNeighbourPosition);
+                EnsureDoorEdgeOpen(state.Environment, targetPosition, targetDirection);
+                RefreshMapTiles(state.Environment, sourcePosition, sourceNeighbourPosition,
+                    targetPosition, targetNeighbourPosition);
                 SynchronizeDoorBlocking(state);
                 RestoreDoorAppearance(state);
                 RestoreDoorState(state);
@@ -913,6 +974,33 @@ namespace RebuildTheSchool
                         targetPosition, targetDirection, movingWindow);
                     windowMapUpdated = true;
                 }
+
+                // Nothing below can fail any more, so the wall memory may change now (a rollback above
+                // restores the wall bits from the snapshots and never touches the memory).
+                if (!sameEdge)
+                {
+                    if (restoreRemembered)
+                    {
+                        RemovedWalls.Remove(sourceKey);
+                    }
+
+                    if (targetHadWall || targetNeighbourHadWall)
+                    {
+                        RemovedWalls[targetKey] = new RemovedWall(
+                            state.Environment, targetPosition, targetDirection,
+                            targetHadWall, targetNeighbourHadWall);
+                    }
+                    else
+                    {
+                        RemovedWalls.Remove(targetKey);
+                    }
+                }
+
+                Debug.Log("[Rebuild the School] Door move (" + door.GetType().Name + "): "
+                    + sourcePosition + "/" + sourceDirection + " -> " + targetPosition + "/" + targetDirection
+                    + "; old edge: " + oldEdgeNote
+                    + "; wall removed at the new edge: " + (targetHadWall || targetNeighbourHadWall)
+                    + "; minimap markers replaced: " + replacedMarkers + ".");
                 return true;
             }
             catch
@@ -921,18 +1009,34 @@ namespace RebuildTheSchool
                 {
                     Cell failedTarget = state.Environment.CellFromPosition(targetPosition);
                     Cell failedTargetNeighbour = state.Environment.CellFromPosition(targetNeighbourPosition);
-                    SetOneWayDoorBlock(door, failedTargetNeighbour, targetDirection, false);
-                    RemoveDoorReferences(failedTarget, targetDirection, door);
-                    RemoveDoorReferences(failedTargetNeighbour, targetDirection.GetOpposite(), door);
+                    Cell restoredSource = state.Environment.CellFromPosition(sourcePosition);
+                    Cell restoredSourceNeighbour = state.Environment.CellFromPosition(sourceNeighbourPosition);
+
+                    // Release whatever the door holds right now (it may already point at the target).
+                    door.Block(false);
+                    if (initializedAtTarget)
+                    {
+                        SetOneWayDoorBlock(door, failedTargetNeighbour, targetDirection, false);
+                    }
+                    else if (!oneWayReleased)
+                    {
+                        SetOneWayDoorBlock(door, state.SourceNeighbour, sourceDirection, false);
+                    }
+
+                    ClearDoorMapMarkers(door);
+                    UnregisterDoorFromCell(failedTarget, door);
+                    UnregisterDoorFromCell(failedTargetNeighbour, door);
+                    UnregisterDoorFromCell(restoredSource, door);
+                    UnregisterDoorFromCell(restoredSourceNeighbour, door);
                     RestoreCellSnapshots(state.Environment, snapshots);
 
-                    Cell restoredSource = state.Environment.CellFromPosition(sourcePosition);
+                    // Back on the source edge with exactly one pair of markers; Initialize re-applies
+                    // the one-way block itself.
                     state.Environment.SetupDoor(door, restoredSource, sourceDirection);
-                    SetOneWayDoorBlock(door, state.SourceNeighbour, sourceDirection, true);
                     InitializeMovedDoor(door);
                     UpdateDoorTextures(door);
-                    state.Environment.UpdateCell(sourcePosition);
-                    state.Environment.UpdateCell(sourceNeighbourPosition);
+                    RefreshMapTiles(state.Environment, sourcePosition, sourceNeighbourPosition,
+                        targetPosition, targetNeighbourPosition);
                     SynchronizeDoorBlocking(state);
                     RestoreDoorAppearance(state);
                     RestoreDoorState(state);
@@ -971,10 +1075,12 @@ namespace RebuildTheSchool
                 state.Environment.ConnectCells(state.SourceCell.position, state.SourceDirection);
                 state.Environment.CloseCell(target.position, state.TargetDirection);
                 state.Environment.CloseCell(targetNeighbour.position, state.TargetDirection.GetOpposite());
-                state.Environment.UpdateCell(state.SourceCell.position);
-                state.Environment.UpdateCell(state.SourceNeighbour.position);
-                state.Environment.UpdateCell(target.position);
-                state.Environment.UpdateCell(targetNeighbour.position);
+                // UpdateCellSafely, not UpdateCell: a wall that is moved next to a door must not
+                // re-wall that doorway (see UpdateCellSafely).
+                UpdateCellSafely(state.Environment, state.SourceCell.position);
+                UpdateCellSafely(state.Environment, state.SourceNeighbour.position);
+                UpdateCellSafely(state.Environment, target.position);
+                UpdateCellSafely(state.Environment, targetNeighbour.position);
 
                 Cell openedSource = state.Environment.CellFromPosition(state.SourceCell.position);
                 Cell openedSourceNeighbour = state.Environment.CellFromPosition(state.SourceNeighbour.position);
@@ -996,6 +1102,10 @@ namespace RebuildTheSchool
                     return false;
                 }
 
+                // The minimap only draws a tile's walls when the tile is first found, so redraw the four
+                // tiles whose walls just changed.
+                RefreshMapTiles(state.Environment, state.SourceCell.position, state.SourceNeighbour.position,
+                    target.position, targetNeighbour.position);
                 return true;
             }
             catch
@@ -1077,9 +1187,10 @@ namespace RebuildTheSchool
                 return;
             }
 
-            // Door.Block caches its last value, while ConnectCells/UpdateCell rebuild the grid.
-            // Force a fresh transition on the destination cells before applying the saved state.
-            door.Block(true);
+            // CommitDoorMove released the old cells BEFORE the door moved, so Door's cached flag is
+            // already false here and the new cells are blocked from scratch. (A Block(true)+Block(false)
+            // pair after the move decremented the NEW cells while the old ones kept their counters, which
+            // left a locked door's old doorway blocked for navigation for good.)
             door.Block(false);
             bool shouldBlock = (state.WasLocked && door.lockBlocks)
                 || (!state.WasOpen && door.closeBlocks);
@@ -1293,13 +1404,31 @@ namespace RebuildTheSchool
                 return;
             }
 
+            StandardDoor standard = door as StandardDoor;
+            if (standard != null)
+            {
+                // StandardDoor.Initialize() only subscribes the "temporarily open/close locked doors"
+                // events, so running it again would subscribe the door twice. Its textures and minimap
+                // markers come from the private Start(), which already ran for this door and must not run
+                // again (it reads startingLayer from the door, which may be open right now). Redo the part
+                // that depends on the two rooms by hand.
+                RefreshStandardDoorTextures(standard);
+                EnsureDoorMapMarkers(door);
+                return;
+            }
+
             MethodInfo initialize = door.GetType().GetMethod("Initialize",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                 null, Type.EmptyTypes, null);
             if (initialize != null && initialize.DeclaringType != typeof(Door))
             {
+                // SwingDoor, FacultyOnlyDoor, LockdownDoor... create a NEW pair of minimap markers on
+                // every call. CommitDoorMove removed the old pair first, so exactly one pair is left.
                 initialize.Invoke(door, null);
             }
+
+            // A door type that has marker fields but does not fill them in Initialize gets a pair here.
+            EnsureDoorMapMarkers(door);
         }
 
         private static void SetOneWayDoorBlock(Door door, Cell neighbour,
@@ -1342,7 +1471,306 @@ namespace RebuildTheSchool
             environment.ConnectCells(position + direction.ToIntVector2(), direction.GetOpposite());
         }
 
-        private static void RemoveDoorReferences(Cell cell, Direction direction, Door door)
+        /// <summary>One key per physical edge, whichever of its two cells it is addressed from.</summary>
+        private static long EdgeKey(IntVector2 position, Direction direction)
+        {
+            if (direction == Direction.Null)
+            {
+                return long.MinValue;
+            }
+
+            int x = position.x;
+            int z = position.z;
+            if (direction == Direction.West)
+            {
+                x -= 1;
+                direction = Direction.East;
+            }
+            else if (direction == Direction.South)
+            {
+                z -= 1;
+                direction = Direction.North;
+            }
+
+            int axis = direction == Direction.North ? 1 : 0;
+            return (((long)(x + 1000)) * 100000L + (long)(z + 1000)) * 2L + axis;
+        }
+
+        /// <summary>Forget the walls of other levels (an environment that was destroyed compares equal to null).</summary>
+        private static void PurgeRemovedWalls(EnvironmentController environment)
+        {
+            if (RemovedWalls.Count == 0)
+            {
+                return;
+            }
+
+            List<long> stale = null;
+            foreach (KeyValuePair<long, RemovedWall> pair in RemovedWalls)
+            {
+                if (pair.Value == null || pair.Value.Environment != environment)
+                {
+                    if (stale == null)
+                    {
+                        stale = new List<long>();
+                    }
+
+                    stale.Add(pair.Key);
+                }
+            }
+
+            for (int i = 0; stale != null && i < stale.Count; i++)
+            {
+                RemovedWalls.Remove(stale[i]);
+            }
+        }
+
+        /// <summary>Walls the edge back up on exactly the faces that stood before the door arrived.</summary>
+        private static void RebuildRemovedWall(EnvironmentController environment, RemovedWall wall)
+        {
+            if (environment == null || wall == null)
+            {
+                return;
+            }
+
+            // The cells may have changed since the wall was taken away (the wall tool can remove a cell),
+            // so a face is only rebuilt on a cell that still exists. CloseCell recreates the cell, hence the
+            // fresh CellFromPosition before each face.
+            IntVector2 neighbourPosition = wall.Position + wall.Direction.ToIntVector2();
+            if (wall.CellHadWall && environment.ContainsCoordinates(wall.Position)
+                && UsableCell(environment.CellFromPosition(wall.Position)))
+            {
+                environment.CloseCell(wall.Position, wall.Direction);
+            }
+
+            if (wall.NeighbourHadWall && environment.ContainsCoordinates(neighbourPosition)
+                && UsableCell(environment.CellFromPosition(neighbourPosition)))
+            {
+                environment.CloseCell(neighbourPosition, wall.Direction.GetOpposite());
+            }
+        }
+
+        private static void RefreshStandardDoorTextures(StandardDoor door)
+        {
+            if (door == null)
+            {
+                return;
+            }
+
+            try
+            {
+                Cell aCell = door.aTile;
+                Cell bCell = door.bTile;
+                if (aCell == null || bCell == null || aCell.room == null || bCell.room == null)
+                {
+                    return;
+                }
+
+                // Mirrors the first half of StandardDoor.Start(): the wall texture behind each door
+                // panel and the door-hole materials belong to the room on that side.
+                Texture2D[] background = StandardDoorBgField != null
+                    ? StandardDoorBgField.GetValue(door) as Texture2D[] : null;
+                if (background != null && background.Length >= 2)
+                {
+                    background[0] = aCell.room.wallTex;
+                    background[1] = bCell.room.wallTex;
+                }
+
+                StandardDoorMats aMats = aCell.room.doorMats;
+                StandardDoorMats bMats = bCell.room.doorMats;
+                if (aMats != null && bMats != null && door.overlayShut != null && door.overlayOpen != null
+                    && door.overlayShut.Length >= 2 && door.overlayOpen.Length >= 2)
+                {
+                    door.overlayShut[1] = aMats.shut;
+                    door.overlayShut[0] = bMats.shut;
+                    door.overlayOpen[1] = aMats.open;
+                    door.overlayOpen[0] = bMats.open;
+                }
+
+                door.UpdateTextures();
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[Rebuild the School] Door texture refresh failed: " + exception.Message);
+            }
+        }
+
+        private static FieldInfo[] GetDoorMapTileFields(Type doorType)
+        {
+            FieldInfo[] cached;
+            if (DoorMapTileFields.TryGetValue(doorType, out cached))
+            {
+                return cached;
+            }
+
+            // Each Door family keeps its own pair of MapTile fields (SwingDoor: protected, StandardDoor:
+            // private, LockdownDoor: its own), so collect every MapTile field along the type chain.
+            List<FieldInfo> fields = new List<FieldInfo>();
+            for (Type level = doorType; level != null && level != typeof(MonoBehaviour); level = level.BaseType)
+            {
+                FieldInfo[] declared = level.GetFields(BindingFlags.Instance | BindingFlags.Public
+                    | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                for (int i = 0; i < declared.Length; i++)
+                {
+                    if (declared[i].FieldType == typeof(MapTile))
+                    {
+                        fields.Add(declared[i]);
+                    }
+                }
+            }
+
+            cached = fields.ToArray();
+            DoorMapTileFields[doorType] = cached;
+            return cached;
+        }
+
+        private static FieldInfo FindFieldInHierarchy(Type type, string name)
+        {
+            for (Type level = type; level != null && level != typeof(MonoBehaviour); level = level.BaseType)
+            {
+                FieldInfo field = level.GetField(name, BindingFlags.Instance | BindingFlags.Public
+                    | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (field != null)
+                {
+                    return field;
+                }
+            }
+
+            return null;
+        }
+
+        private static void DestroyMapMarker(MapTile marker)
+        {
+            if (marker == null || marker.gameObject == null)
+            {
+                return;
+            }
+
+            // Deactivate first: Destroy only takes effect at the end of the frame.
+            marker.gameObject.SetActive(false);
+            UnityEngine.Object.Destroy(marker.gameObject);
+        }
+
+        /// <summary>
+        /// Removes the minimap markers a door created for its old position. Map has no API for this, and
+        /// the markers are plain children of the map tiles, so they stayed on the map after the move.
+        /// Windows are left alone: UpdateWindowMap rebuilds theirs.
+        /// </summary>
+        private static int ClearDoorMapMarkers(Door door)
+        {
+            if (door == null || door is Window)
+            {
+                return 0;
+            }
+
+            int removed = 0;
+            FieldInfo[] fields = GetDoorMapTileFields(door.GetType());
+            for (int i = 0; i < fields.Length; i++)
+            {
+                MapTile marker = fields[i].GetValue(door) as MapTile;
+                if (marker != null)
+                {
+                    DestroyMapMarker(marker);
+                    removed++;
+                }
+
+                fields[i].SetValue(door, null);
+            }
+
+            return removed;
+        }
+
+        private static Sprite ReadDoorMapSprite(Door door)
+        {
+            FieldInfo field = FindFieldInHierarchy(door.GetType(),
+                door.locked ? "mapLockedSprite" : "mapUnlockedSprite");
+            return field != null ? field.GetValue(door) as Sprite : null;
+        }
+
+        private static void ConfigureDoorMarker(MapTile marker, Sprite sprite, Color color, Quaternion rotation)
+        {
+            if (marker == null)
+            {
+                return;
+            }
+
+            if (marker.SpriteRenderer != null)
+            {
+                if (sprite != null)
+                {
+                    marker.SpriteRenderer.sprite = sprite;
+                }
+
+                marker.SpriteRenderer.color = color;
+            }
+
+            marker.transform.rotation = rotation;
+        }
+
+        /// <summary>
+        /// Makes sure the door owns exactly one A and one B minimap marker at its CURRENT cells. Doors whose
+        /// Initialize builds the markers (SwingDoor family) already satisfy this; StandardDoor builds them
+        /// in its private Start(), which must not run again, so they are created here the same way.
+        /// </summary>
+        private static void EnsureDoorMapMarkers(Door door)
+        {
+            if (door == null || door is Window || door.ec == null || door.ec.map == null)
+            {
+                return;
+            }
+
+            FieldInfo aField = null;
+            FieldInfo bField = null;
+            FieldInfo[] fields = GetDoorMapTileFields(door.GetType());
+            for (int i = 0; i < fields.Length; i++)
+            {
+                if (fields[i].Name == "aMapTile")
+                {
+                    aField = fields[i];
+                }
+                else if (fields[i].Name == "bMapTile")
+                {
+                    bField = fields[i];
+                }
+            }
+
+            if (aField == null || bField == null)
+            {
+                return;
+            }
+
+            MapTile aMarker = aField.GetValue(door) as MapTile;
+            MapTile bMarker = bField.GetValue(door) as MapTile;
+            if (aMarker != null && bMarker != null)
+            {
+                return;
+            }
+
+            // Half a pair is as wrong as none: start over so exactly one pair exists afterwards.
+            DestroyMapMarker(aMarker);
+            DestroyMapMarker(bMarker);
+            Cell aCell = door.aTile;
+            Cell bCell = door.bTile;
+            if (aCell == null || bCell == null || aCell.room == null || bCell.room == null)
+            {
+                return;
+            }
+
+            Sprite sprite = ReadDoorMapSprite(door);
+            aMarker = door.ec.map.AddExtraTile(aCell.position);
+            ConfigureDoorMarker(aMarker, sprite, aCell.room.color, door.direction.ToUiRotation());
+            bMarker = door.ec.map.AddExtraTile(bCell.position);
+            ConfigureDoorMarker(bMarker, sprite, bCell.room.color, door.direction.GetOpposite().ToUiRotation());
+            aField.SetValue(door, aMarker);
+            bField.SetValue(door, bMarker);
+        }
+
+        /// <summary>
+        /// Takes the door out of the cell's bookkeeping. Vanilla AssignDoor stores the door's own direction
+        /// in doorDirsSpace/doorDirs of BOTH cells of the doorway (not the opposite direction on the far
+        /// cell), so removing one direction per cell left stale entries behind. The three fields are rebuilt
+        /// from the doors that are still registered instead.
+        /// </summary>
+        private static void UnregisterDoorFromCell(Cell cell, Door door)
         {
             if (cell == null)
             {
@@ -1355,14 +1783,134 @@ namespace RebuildTheSchool
                 RemoveAll(cell.room.doors, door);
             }
 
-            RemoveAll(cell.doorDirsSpace, direction);
-            bool stillHasDoor = HasOtherDoorOnEdge(cell, direction, null);
-            if (!stillHasDoor)
+            if (cell.doorDirsSpace != null)
             {
-                RemoveAll(cell.doorDirs, direction);
+                cell.doorDirsSpace.Clear();
             }
 
-            cell.doorHere = cell.doorDirsSpace != null && cell.doorDirsSpace.Count > 0;
+            if (cell.doorDirs != null)
+            {
+                cell.doorDirs.Clear();
+            }
+
+            bool any = false;
+            if (cell.doors != null)
+            {
+                for (int i = 0; i < cell.doors.Count; i++)
+                {
+                    Door other = cell.doors[i];
+                    if (other == null)
+                    {
+                        continue;
+                    }
+
+                    any = true;
+                    if (cell.doorDirsSpace != null)
+                    {
+                        cell.doorDirsSpace.Add(other.direction);
+                    }
+
+                    if (cell.doorDirs != null && !cell.doorDirs.Contains(other.direction))
+                    {
+                        cell.doorDirs.Add(other.direction);
+                    }
+                }
+            }
+
+            cell.doorHere = any;
+        }
+
+        /// <summary>The door must end up exactly where it was placed: no wall may remain on either face.</summary>
+        private static void EnsureDoorEdgeOpen(EnvironmentController environment,
+            IntVector2 position, Direction direction)
+        {
+            Cell cell = environment.CellFromPosition(position);
+            Cell neighbour = environment.CellFromPosition(position + direction.ToIntVector2());
+            if (cell != null && neighbour != null
+                && (cell.HasWallInDirection(direction) || neighbour.HasWallInDirection(direction.GetOpposite())))
+            {
+                Debug.LogWarning("[Rebuild the School] A wall was still standing in the new doorway at "
+                    + position + " / " + direction + "; removing it.");
+                ConnectDoorEdge(environment, position, direction);
+            }
+        }
+
+        /// <summary>
+        /// UpdateCell for a cell that may have doors. UpdateCell only skips the wall on a face listed in the
+        /// cell's doorDirs, but vanilla fills the FAR cell's doorDirs with the direction pointing away from
+        /// the doorway, so a plain UpdateCell re-walls the doorway and opens that cell's far wall. The list is
+        /// replaced by each cell's own view of its doors for the call and restored afterwards.
+        /// </summary>
+        private static void UpdateCellSafely(EnvironmentController environment, IntVector2 position)
+        {
+            Cell cell = environment.CellFromPosition(position);
+            if (cell == null || cell.Null || cell.doors == null || cell.doors.Count == 0
+                || cell.doorDirs == null)
+            {
+                environment.UpdateCell(position);
+                return;
+            }
+
+            List<Direction> savedDirs = new List<Direction>(cell.doorDirs);
+            bool savedHere = cell.doorHere;
+            try
+            {
+                cell.doorDirs.Clear();
+                for (int i = 0; i < cell.doors.Count; i++)
+                {
+                    Door door = cell.doors[i];
+                    if (door == null)
+                    {
+                        continue;
+                    }
+
+                    Direction face = door.position == cell.position
+                        ? door.direction : door.direction.GetOpposite();
+                    if (!cell.doorDirs.Contains(face))
+                    {
+                        cell.doorDirs.Add(face);
+                    }
+                }
+
+                cell.doorHere = cell.doorDirs.Count > 0;
+                environment.UpdateCell(position);
+            }
+            finally
+            {
+                cell.doorDirs.Clear();
+                cell.doorDirs.AddRange(savedDirs);
+                cell.doorHere = savedHere;
+            }
+        }
+
+        /// <summary>
+        /// Map.Find draws a tile's walls once, when the player first sees it, so a wall that appears or
+        /// disappears on an already-found tile has to be pushed to the minimap explicitly.
+        /// </summary>
+        private static void RefreshMapTiles(EnvironmentController environment, params IntVector2[] positions)
+        {
+            if (environment == null || environment.map == null || positions == null)
+            {
+                return;
+            }
+
+            try
+            {
+                for (int i = 0; i < positions.Length; i++)
+                {
+                    Cell cell = environment.CellFromPosition(positions[i]);
+                    if (cell == null || cell.Null || cell.hideFromMap || cell.room == null)
+                    {
+                        continue;
+                    }
+
+                    environment.map.UpdateTile(positions[i].x, positions[i].z, cell.ConstBin, cell.room);
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[Rebuild the School] Minimap tile refresh failed: " + exception.Message);
+            }
         }
 
         private static bool HasWallRenderer(Cell cell, Direction direction, Door movingDoor)
@@ -2047,6 +2595,25 @@ namespace RebuildTheSchool
             public Direction TargetDirection;
             public bool TargetValid;
             public GameObject Ghost;
+        }
+
+        private sealed class RemovedWall
+        {
+            public readonly EnvironmentController Environment;
+            public readonly IntVector2 Position;
+            public readonly Direction Direction;
+            public readonly bool CellHadWall;
+            public readonly bool NeighbourHadWall;
+
+            public RemovedWall(EnvironmentController environment, IntVector2 position, Direction direction,
+                bool cellHadWall, bool neighbourHadWall)
+            {
+                Environment = environment;
+                Position = position;
+                Direction = direction;
+                CellHadWall = cellHadWall;
+                NeighbourHadWall = neighbourHadWall;
+            }
         }
 
         private sealed class CellSnapshot
