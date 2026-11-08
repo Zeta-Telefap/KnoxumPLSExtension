@@ -9,11 +9,12 @@ namespace RebuildTheSchool
     /// <summary>
     /// Runtime for picking up, carrying, placing, and throwing movable school props.
     /// </summary>
-    public sealed class g : MonoBehaviour
+    public sealed partial class g : MonoBehaviour
     {
         private const float PickupRange = 16f;
         private const float CarryOrbitRadius = 6f;
-        private const float ThrowSpeed = 20f;
+        // RMB throw and wheel-click kick (20 in the first version): a long, hard throw.
+        private const float ThrowSpeed = 40f;
         private const float CarryRotationSpeed = 720f;
         private const float CarryMoveSmoothTime = 0.08f;
         private const float DoorWidthTolerance = 0.05f;
@@ -223,7 +224,7 @@ namespace RebuildTheSchool
 
         private void Start()
         {
-            Debug.Log("[Rebuild the School] Carry runtime started. Controls: G, LMB, RMB, R + mouse wheel.");
+            Debug.Log("[Rebuild the School] Carry runtime started. Controls: G, LMB, RMB, wheel click (kick), R + mouse wheel.");
         }
 
         private void Update()
@@ -258,6 +259,9 @@ namespace RebuildTheSchool
                 // The prop comes from the same fresh query that drives the glow.
                 TryPickupHighlighted(_player);
             }
+
+            // Wheel-click kick, event squishers, characters that kick props out of their way (g.Events.cs).
+            UpdateEvents();
         }
 
         private void FixedUpdate()
@@ -619,12 +623,13 @@ namespace RebuildTheSchool
                 return true;
             }
 
-            // Prefer LMB when both buttons are pressed in the same frame: LMB drops, RMB throws.
+            // Prefer LMB when both buttons are pressed in the same frame: LMB drops, RMB (or the wheel
+            // click, the kick) throws.
             if (PlacePressed())
             {
                 DropHeld();
             }
-            else if (Input.GetMouseButtonDown(1))
+            else if (Input.GetMouseButtonDown(1) || Input.GetMouseButtonDown(2))
             {
                 ThrowHeld();
             }
@@ -1834,7 +1839,7 @@ namespace RebuildTheSchool
             ReleaseHeld(true);
         }
 
-        private void ReleaseHeld(bool throwForward)
+        private void ReleaseHeld(bool throwForward, bool kick = false)
         {
             if (_held == null || _held.Root == null || _held.Body == null)
             {
@@ -1842,7 +1847,11 @@ namespace RebuildTheSchool
             }
 
             CarryState state = _held;
-            BlockGameMouseBriefly();
+            if (!kick)
+            {
+                BlockGameMouseBriefly();
+            }
+
             try
             {
                 Ray ray;
@@ -1857,11 +1866,20 @@ namespace RebuildTheSchool
                 // The body stays kinematic and keeps ignoring the player (both set up while carried); the
                 // landing (RestoreBody) gives the prop its original body settings back.
                 BeginFlight(state, ray, throwForward);
+                if (kick)
+                {
+                    // A prop on the floor would land again in the first step: the kick goes a little upward.
+                    state.FlightVelocity = KickVelocity(state, ray);
+                }
+
                 state.Age = 0f;
                 state.Thrown = throwForward;
                 state.WallHits = 0;
                 state.PushedNpcs = null;
+                state.NpcLaunched = false;
                 state.NextImpactSoundTime = 0f;
+                _lastReleaseFrame = Time.frameCount;
+                FxOnRelease(state, true);
                 _airborne.Add(state);
                 if (throwForward)
                 {
@@ -1870,9 +1888,11 @@ namespace RebuildTheSchool
 
                 _held = null;
                 InvalidateAim();
-                Debug.Log(throwForward
-                    ? "[Rebuild the School] Prop thrown; it flies on a swept path that cannot pass walls, doors or the floor."
-                    : "[Rebuild the School] Prop dropped; it falls on a swept path and settles on contact.");
+                Debug.Log(kick
+                    ? "[Rebuild the School] Prop kicked (wheel click); it flies like a thrown one."
+                    : throwForward
+                        ? "[Rebuild the School] Prop thrown; it flies on a swept path that cannot pass walls, doors or the floor."
+                        : "[Rebuild the School] Prop dropped; it falls on a swept path and settles on contact.");
             }
             catch (Exception exception)
             {
@@ -1896,12 +1916,19 @@ namespace RebuildTheSchool
                 }
 
                 state.Age += Time.deltaTime;
+                if (FxKeepsAirborne(state))
+                {
+                    // On the ceiling, on a student's head or in a whirlpool: not a lost prop.
+                    state.Age = 0f;
+                }
+
                 BreakWindowsTouchingProp(state);
 
                 if (state.Landed)
                 {
                     // StepFlight put the prop on the floor (or on a support); settle it into the world.
                     _airborne.RemoveAt(i);
+                    FxBeforeSettle(state);
                     try
                     {
                         Cell supportCell;
@@ -1920,6 +1947,8 @@ namespace RebuildTheSchool
                         Debug.LogError("[Rebuild the School] Settling a landed prop failed; it went back to where it came from: " + exception);
                         ReturnToOrigin(state);
                     }
+
+                    FxAfterSettle(state);
                 }
                 else if (state.Age >= ReleaseTimeout)
                 {
@@ -2150,6 +2179,12 @@ namespace RebuildTheSchool
         /// </summary>
         private void StepFlight(CarryState state, float dt)
         {
+            // Riding a student or sinking into a whirlpool replace the flight (g.Events.cs).
+            if (FxStepSpecial(state, dt))
+            {
+                return;
+            }
+
             Vector3 c = state.FlightPosition + state.FlightCenterOffset;
             Vector3 stepStart = c;
             Vector3 v = state.FlightVelocity;
@@ -2160,7 +2195,9 @@ namespace RebuildTheSchool
                 gravity = FlightGravityFallback;
             }
 
-            v.y += gravity * dt;
+            // Gravity Chaos: +1 pulls down, -1 up (the factor turns over smoothly).
+            float gravityScale = FxGravityScale(state, c, half, dt);
+            v.y += gravity * gravityScale * dt;
             v *= Mathf.Max(0f, 1f - state.FlightDrag * dt);
             float speed = v.magnitude;
             if (speed > FlightMaxSpeed)
@@ -2168,10 +2205,14 @@ namespace RebuildTheSchool
                 v *= FlightMaxSpeed / speed;
             }
 
+            // Flood: the pull of a whirlpool is a drift on top of the velocity, taken off again after the step.
+            Vector3 drift = FxDrift(state, c, half, dt);
+            v += drift;
             Vector3 impactVelocity = v;
             float remaining = 1f;
             bool settled = false;
             bool landed = false;
+            bool pinned = false;
             for (int iteration = 0; iteration <= FlightMaxBounces; iteration++)
             {
                 if (remaining <= 0.001f)
@@ -2190,16 +2231,37 @@ namespace RebuildTheSchool
                 }
 
                 c += d * hit.T;
-                if (hit.Kind == FlightHitKind.Floor)
+                if (hit.Kind == FlightHitKind.Floor && gravityScale >= GravityLandFactor)
                 {
                     c.y = state.FlightFloorY + half.y;
+                    if (FxHoldsOnFloor(state))
+                    {
+                        // In a whirlpool the prop slides to the middle instead of settling.
+                        v.y = 0f;
+                        float keep = Mathf.Max(0f, 1f - WhirlpoolSlideFriction * dt);
+                        v.x *= keep;
+                        v.z *= keep;
+                        settled = true;
+                        break;
+                    }
+
                     landed = true;
                     v = Vector3.zero;
                     settled = true;
                     break;
                 }
 
-                if (hit.Kind == FlightHitKind.Support)
+                if (hit.Kind == FlightHitKind.Ceiling && gravityScale <= -GravityLandFactor)
+                {
+                    // Gravity Chaos: gravity points up, the prop sticks to the ceiling until it changes.
+                    c.y = state.FlightFloorY + FlightCeilingHeight - half.y;
+                    pinned = true;
+                    v = Vector3.zero;
+                    settled = true;
+                    break;
+                }
+
+                if (hit.Kind == FlightHitKind.Support && gravityScale >= GravityLandFactor)
                 {
                     c += hit.Normal * FlightSkin;
                     landed = true;
@@ -2223,8 +2285,13 @@ namespace RebuildTheSchool
                 // Wedged between surfaces: stop here; gravity takes over on the next step.
                 v = Vector3.zero;
             }
+            else if (!landed && !pinned)
+            {
+                v -= drift;
+            }
 
-            if (state.Thrown)
+            // A prop that a character kicked out of its way does not push the other characters.
+            if (state.Thrown && !state.NpcLaunched)
             {
                 HitNpcs(state, stepStart, c, half, impactVelocity, ref v);
             }
@@ -2240,9 +2307,10 @@ namespace RebuildTheSchool
                 state.FlightSoundObject.transform.position = c;
             }
 
+            FxNotePinned(state, pinned, c);
             state.FlightVelocity = landed ? Vector3.zero : v;
             state.FlightPosition = c - state.FlightCenterOffset;
-            state.Body.MovePosition(state.FlightPosition);
+            FxApplyPose(state, c);
             if (landed)
             {
                 state.Landed = true;
@@ -2333,6 +2401,13 @@ namespace RebuildTheSchool
                 }
 
                 return window.open;
+            }
+
+            if (door is LockdownDoor)
+            {
+                // A super door is closed by its event or its lever and a prop never opens it: open it is
+                // a doorway, shut a wall (the slab squishes a prop that is under it, see TickSuperDoors).
+                return door.open;
             }
 
             if (door.open)
@@ -3890,6 +3965,7 @@ namespace RebuildTheSchool
         {
             InvalidateAim();
             StopFlightSound(state);
+            FxResetScale(state);
             if (state == null || state.Root == null)
             {
                 return;
@@ -4952,6 +5028,9 @@ namespace RebuildTheSchool
             public float FlightDrag;
             public float FlightFloorY;
             public bool Landed;
+            // What the vanilla events did to this prop (g.Events.cs) and whether a character launched it.
+            public EventFx Fx;
+            public bool NpcLaunched;
         }
 
         private sealed class RayHitComparer : IComparer<RaycastHit>
