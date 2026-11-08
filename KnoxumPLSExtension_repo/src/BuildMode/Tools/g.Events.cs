@@ -91,6 +91,8 @@ namespace RebuildTheSchool
         private const float AvoidLoopWindow = 25f;
         private const int AvoidLoopVisits = 2;
         private const float AvoidLoopPause = 10f;
+        // A blocked leg with no way round is looked at again after this long, not every frame.
+        private const float AvoidRetryDelay = 0.15f;
         private const int AvoidForgetFrames = 600;
         // A detour point must keep this half width clear of the walls.
         private const float AvoidWallClearance = 0.6f;
@@ -180,6 +182,7 @@ namespace RebuildTheSchool
             public int Changes;
             public float WindowEnd;
             public float BlockedUntil;
+            public float RetryAt;
             public readonly Vector3[] Reached = new Vector3[8];
             public readonly float[] ReachedAt = new float[8];
             public int ReachedCount;
@@ -1334,7 +1337,7 @@ namespace RebuildTheSchool
 
             AvoidState state = StateOf(npc);
             float now = Time.time;
-            if (now < state.BlockedUntil)
+            if (now < state.BlockedUntil || now < state.RetryAt)
             {
                 return;
             }
@@ -1460,9 +1463,15 @@ namespace RebuildTheSchool
                 }
             }
 
-            if (bestFirst < 0 || !ChangeAllowed(state, now))
+            if (bestFirst < 0)
             {
                 // Wall to wall, or a cluster of props: no way round, so the character walks on as it always did.
+                state.RetryAt = now + AvoidRetryDelay;
+                return;
+            }
+
+            if (!ChangeAllowed(state, now))
+            {
                 return;
             }
 
