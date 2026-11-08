@@ -232,7 +232,9 @@ namespace RebuildTheSchool
             RefreshPlayer();
             UpdateThrownProps();
 
-            if (_held != null && !IsInCurrentLevel(_held))
+            // A carried prop whose root or body is gone can neither follow the camera nor be released:
+            // without this it would block every later pickup, drop and throw.
+            if (_held != null && (!IsInCurrentLevel(_held) || _held.Body == null))
             {
                 ReturnToOrigin(_held);
                 _held = null;
@@ -260,7 +262,7 @@ namespace RebuildTheSchool
                 TryPickupHighlighted(_player);
             }
 
-            // Wheel-click kick, event squishers, characters that kick props out of their way (g.Events.cs).
+            // Wheel-click kick, event squishers, characters that walk around props (g.Events.cs).
             UpdateEvents();
         }
 
@@ -1629,7 +1631,12 @@ namespace RebuildTheSchool
             return CombinedBounds(candidate.Renderers, out bounds);
         }
 
-        private bool BeginCarry(Candidate candidate, PlayerManager player, Ray ray, out CarryState state)
+        /// <summary>
+        /// Takes the prop out of the world. keepRotation (the kick) leaves it exactly as it stands: it is not
+        /// turned toward the camera, so its bounds, footprint and landing orientation stay the ones it had.
+        /// </summary>
+        private bool BeginCarry(
+            Candidate candidate, PlayerManager player, Ray ray, out CarryState state, bool keepRotation = false)
         {
             state = null;
             if (candidate == null || candidate.Root == null || IsForbiddenPickupRoot(candidate.Root)
@@ -1657,7 +1664,9 @@ namespace RebuildTheSchool
             Quaternion originalRotation = candidate.Root.rotation;
             Quaternion cardinalFallback = DirectionFromRotation(originalRotation).ToRotation();
             // Quantize camera facing once on pickup; while carried, facing follows camera yaw continuously.
-            Quaternion carryRotation = CameraCardinalRotation(-ray.direction, cardinalFallback);
+            Quaternion carryRotation = keepRotation
+                ? originalRotation
+                : CameraCardinalRotation(-ray.direction, cardinalFallback);
             Direction originDirection = DirectionFromRotation(originalRotation);
             Direction carryDirection = DirectionFromRotation(carryRotation);
             bool isLocker = candidate.EnvironmentObject == null && IsLocker(candidate.Root);
@@ -1841,8 +1850,16 @@ namespace RebuildTheSchool
 
         private void ReleaseHeld(bool throwForward, bool kick = false)
         {
-            if (_held == null || _held.Root == null || _held.Body == null)
+            if (_held == null)
             {
+                return;
+            }
+
+            if (_held.Root == null || _held.Body == null)
+            {
+                // Nothing left to release; leaving it set would block every later pickup, drop and throw.
+                ReturnToOrigin(_held);
+                _held = null;
                 return;
             }
 
@@ -1865,7 +1882,8 @@ namespace RebuildTheSchool
                 _suppressHoverRoot = state.Root;
                 // The body stays kinematic and keeps ignoring the player (both set up while carried); the
                 // landing (RestoreBody) gives the prop its original body settings back.
-                BeginFlight(state, ray, throwForward);
+                // A kick starts where the prop stands (atRest); a carried prop starts at the camera.
+                BeginFlight(state, ray, throwForward, kick);
                 if (kick)
                 {
                     // A prop on the floor would land again in the first step: the kick goes a little upward.
@@ -1876,7 +1894,6 @@ namespace RebuildTheSchool
                 state.Thrown = throwForward;
                 state.WallHits = 0;
                 state.PushedNpcs = null;
-                state.NpcLaunched = false;
                 state.NextImpactSoundTime = 0f;
                 _lastReleaseFrame = Time.frameCount;
                 FxOnRelease(state, true);
@@ -2005,8 +2022,11 @@ namespace RebuildTheSchool
         /// and StepFlight moves it from FixedUpdate. The start is resolved against the walls first: the
         /// camera is in free space, so the prop never starts on the far side of a wall, and a prop that
         /// does not fit between the camera and a wall gets a smaller collision box until it has room.
+        /// atRest (the kick) skips that: the prop stands where the level or the player put it, a place that
+        /// is valid by definition, so it keeps its place and its full-size box. The wall sweeps never move
+        /// a box that already touches a wall deeper into it, so it can only leave.
         /// </summary>
-        private void BeginFlight(CarryState state, Ray ray, bool throwForward)
+        private void BeginFlight(CarryState state, Ray ray, bool throwForward, bool atRest = false)
         {
             Rigidbody body = state.Body;
             Bounds bounds;
@@ -2031,7 +2051,15 @@ namespace RebuildTheSchool
             Vector3 desiredCenter = body.position + state.FlightCenterOffset;
             Vector3 center;
             Vector3 half;
-            ResolveFlightStart(state, ray.origin, desiredCenter, fullHalf, out center, out half);
+            if (atRest)
+            {
+                center = desiredCenter;
+                half = fullHalf;
+            }
+            else
+            {
+                ResolveFlightStart(state, ray.origin, desiredCenter, fullHalf, out center, out half);
+            }
 
             state.FlightFullHalf = fullHalf;
             state.FlightHalf = half;
@@ -2290,8 +2318,7 @@ namespace RebuildTheSchool
                 v -= drift;
             }
 
-            // A prop that a character kicked out of its way does not push the other characters.
-            if (state.Thrown && !state.NpcLaunched)
+            if (state.Thrown)
             {
                 HitNpcs(state, stepStart, c, half, impactVelocity, ref v);
             }
@@ -2689,6 +2716,83 @@ namespace RebuildTheSchool
                     if (plane - FlightWallHalfThickness - half.z < c.z && c.z < plane + FlightWallHalfThickness + half.z
                         && i * WorldTileWidth - half.x < c.x && c.x < (i + 1) * WorldTileWidth + half.x
                         && FlightEdgeSolid(environment, i, m - 1, 1))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Where a landed prop may rest: its full-size box overlaps no wall, void edge, door or window edge.
+        /// A flight can end with a smaller box than the prop's (it started squeezed against a wall), the
+        /// placement can turn the prop, and a doorway that is open now closes again with the prop in it, so
+        /// the check uses the largest footprint the prop can have at that spot. Doors count open or shut.
+        /// </summary>
+        private bool FlightBoxClear(CarryState state, Vector3 rootPosition)
+        {
+            Vector3 half = state.FlightFullHalf;
+            if (state.Environment == null || half.x <= 0f || half.z <= 0f)
+            {
+                return true;
+            }
+
+            Vector3 offset = state.FlightCenterOffset;
+            if (state.Root != null && Quaternion.Angle(state.Root.rotation, state.TargetRotation) > 1f)
+            {
+                // Turned on landing: a square that holds the footprint at any angle, centred on the pivot.
+                float reach = Mathf.Sqrt(half.x * half.x + half.z * half.z)
+                    + new Vector2(offset.x, offset.z).magnitude;
+                half.x = reach;
+                half.z = reach;
+                offset = Vector3.zero;
+            }
+
+            Vector3 centre = rootPosition + offset;
+            return !FlightOverlaps(state.Environment, centre, half) && !FlightDoorSlabOverlaps(centre, half);
+        }
+
+        /// <summary>Like FlightOverlaps, but for the slab of every door and window edge, open or closed.</summary>
+        private bool FlightDoorSlabOverlaps(Vector3 c, Vector3 half)
+        {
+            if (_flightDoors.Count == 0)
+            {
+                return false;
+            }
+
+            float margin = FlightSkin + FlightWallHalfThickness;
+            int k0 = Mathf.CeilToInt((c.x - half.x - margin) / WorldTileWidth);
+            int k1 = Mathf.FloorToInt((c.x + half.x + margin) / WorldTileWidth);
+            int j0 = Mathf.FloorToInt((c.z - half.z - margin) / WorldTileWidth);
+            int j1 = Mathf.FloorToInt((c.z + half.z + margin) / WorldTileWidth);
+            for (int k = k0; k <= k1; k++)
+            {
+                for (int j = j0; j <= j1; j++)
+                {
+                    float plane = k * WorldTileWidth;
+                    if (plane - FlightWallHalfThickness - half.x < c.x && c.x < plane + FlightWallHalfThickness + half.x
+                        && j * WorldTileWidth - half.z < c.z && c.z < (j + 1) * WorldTileWidth + half.z
+                        && _flightDoors.ContainsKey(FlightEdgeKey(k - 1, j, 0)))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            int m0 = Mathf.CeilToInt((c.z - half.z - margin) / WorldTileWidth);
+            int m1 = Mathf.FloorToInt((c.z + half.z + margin) / WorldTileWidth);
+            int i0 = Mathf.FloorToInt((c.x - half.x - margin) / WorldTileWidth);
+            int i1 = Mathf.FloorToInt((c.x + half.x + margin) / WorldTileWidth);
+            for (int m = m0; m <= m1; m++)
+            {
+                for (int i = i0; i <= i1; i++)
+                {
+                    float plane = m * WorldTileWidth;
+                    if (plane - FlightWallHalfThickness - half.z < c.z && c.z < plane + FlightWallHalfThickness + half.z
+                        && i * WorldTileWidth - half.x < c.x && c.x < (i + 1) * WorldTileWidth + half.x
+                        && _flightDoors.ContainsKey(FlightEdgeKey(i, m - 1, 1)))
                     {
                         return true;
                     }
@@ -3476,6 +3580,10 @@ namespace RebuildTheSchool
             try
             {
                 state.PlacementWalkabilityCache = new Dictionary<Cell, bool>();
+                // The prop may rest only where its full-size box clears every wall and doorway (a flight can
+                // end with a smaller box, in a doorway that is about to close, or with a turned footprint).
+                state.CheckFlightBox = true;
+                RefreshFlightDoors(state.Environment);
                 // A dropped prop that physics carried over a wall line stays on the player's side of it.
                 if (placementRoom != null && target.room != placementRoom)
                 {
@@ -3495,6 +3603,7 @@ namespace RebuildTheSchool
             {
                 state.PlacementWalkabilityCache = null;
                 state.PreferredRoom = null;
+                state.CheckFlightBox = false;
             }
 
             if (placed)
@@ -3696,6 +3805,11 @@ namespace RebuildTheSchool
             // Player-sized capsule/path tests decide reachability; this separate physics test
             // prevents the actual prop colliders from being committed through a wall or solid prop.
             Vector3 proposedPosition = target.FloorWorldPosition + state.CellOffset;
+            if (state.CheckFlightBox && !FlightBoxClear(state, proposedPosition))
+            {
+                return false;
+            }
+
             if (!PropPlacementCollisionFree(state, proposedPosition, state.CarryRotation))
             {
                 return false;
@@ -5028,9 +5142,11 @@ namespace RebuildTheSchool
             public float FlightDrag;
             public float FlightFloorY;
             public bool Landed;
-            // What the vanilla events did to this prop (g.Events.cs) and whether a character launched it.
+            // True while a landed prop is being settled: the placement then also tests the full-size box
+            // against the walls and doors (see FlightBoxClear).
+            public bool CheckFlightBox;
+            // What the vanilla events did to this prop (g.Events.cs).
             public EventFx Fx;
-            public bool NpcLaunched;
         }
 
         private sealed class RayHitComparer : IComparer<RaycastHit>

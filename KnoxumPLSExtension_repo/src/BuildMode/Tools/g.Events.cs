@@ -9,7 +9,7 @@ namespace RebuildTheSchool
     /// What the vanilla BB+ events and characters do to props (the part of g that reacts to the game world):
     /// Flood (Whirlpool), Gravity Chaos (GravityFlipper), Balder Dash (Balder), Dr Reflex's hammer,
     /// the "super doors" (LockdownDoor), Student Shuffle (StudentCrowd), the wheel-click kick and characters
-    /// that shove props out of their way. g.cs only calls the Fx* hooks; every hook is guarded, so a failing
+    /// that walk around props. g.cs only calls the Fx* hooks; every hook is guarded, so a failing
     /// event is logged (throttled) and never breaks the base flight.
     /// </summary>
     public sealed partial class g
@@ -62,15 +62,40 @@ namespace RebuildTheSchool
         private const float CrowdLiftSpeed = 20f;
         private const float CrowdCenterSpeed = 4f;
 
-        // Characters that are after the player shove a prop that stands in their way.
-        private const float NpcObstacleInterval = 0.15f;
-        private const float NpcChaseRadius = 25f;
-        private const float NpcProbeAhead = 1.5f;
-        private const float NpcPropNear = 16f;
-        private const float NpcShoveSpeed = 22f;
-        private const float NpcShoveLift = 6f;
-        private const float NpcShoveCooldown = 2f;
-        private const int NpcShovesPerTick = 2;
+        // Characters walk around props (see TickNpcAvoidance).
+        private const float AvoidScanInterval = 0.4f;
+        private const float AvoidScanRadius = 60f;
+        private const float AvoidMaxSize = 25f;
+        // A prop only matters to a character if it reaches into this band above the floor.
+        private const float AvoidBandBottom = 0.6f;
+        private const float AvoidBandTop = 7f;
+        // Clearance = the character's radius (limited to this range) + the margin. A leg only counts as blocked
+        // when it comes closer to a prop than clearance - slack, so legs that run along a detour (at clearance)
+        // never are and a character brushing a prop does not flip between plans.
+        private const float AvoidMinClearance = 0.8f;
+        private const float AvoidMaxClearance = 1.5f;
+        private const float AvoidMargin = 0.15f;
+        private const float AvoidSlack = 0.3f;
+        // A character already closer to a prop than that keeps the margin it has minus the shrink; one that
+        // touches the prop (closer than the touch distance) ignores it.
+        private const float AvoidShrink = 0.1f;
+        private const float AvoidTouch = 0.1f;
+        // Detour points lie this far outside the clearance rectangle, so legs along it never count as inside.
+        private const float AvoidPad = 0.05f;
+        private const float AvoidEpsilon = 0.01f;
+        // Guards against detours that never end (see ChangeAllowed and ReachedAgain).
+        private const float AvoidReach = 1f;
+        private const float AvoidSameCorner = 0.75f;
+        private const float AvoidWindow = 3f;
+        private const int AvoidMaxChanges = 8;
+        private const float AvoidLoopWindow = 25f;
+        private const int AvoidLoopVisits = 2;
+        private const float AvoidLoopPause = 10f;
+        private const int AvoidForgetFrames = 600;
+        // A detour point must keep this half width clear of the walls.
+        private const float AvoidWallClearance = 0.6f;
+        private const int AvoidMaxPoints = 16;
+        private const float AvoidLogInterval = 3f;
 
         private static readonly FieldInfo ReflexSquishTimeField = typeof(DrReflex).GetField(
             "squishTime", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -78,6 +103,12 @@ namespace RebuildTheSchool
             "door", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly FieldInfo WhirlpoolSphereField = typeof(Whirlpool).GetField(
             "sphereCollider", BindingFlags.Instance | BindingFlags.NonPublic);
+        // Navigator.destinationPoints is protected: the list is read and edited through reflection.
+        private static readonly FieldInfo NavigatorPointsField = typeof(Navigator).GetField(
+            "destinationPoints", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly Vector3 AvoidWallHalf = new Vector3(AvoidWallClearance, 1f, AvoidWallClearance);
+        private static readonly float[] AvoidCornerX = new float[4];
+        private static readonly float[] AvoidCornerZ = new float[4];
         private static readonly List<Collider> EventColliders = new List<Collider>();
         private static float _nextEventErrorLogTime;
 
@@ -123,11 +154,45 @@ namespace RebuildTheSchool
             public Renderer[] Renderers;
         }
 
+        /// <summary>The footprint of a prop on the floor plane (world x/z).</summary>
+        private struct PropRect
+        {
+            public Transform Root;
+            public float MinX;
+            public float MaxX;
+            public float MinZ;
+            public float MaxZ;
+        }
+
+        /// <summary>A prop near a character: its footprint, the zone a leg must stay out of, and whether it is part of the obstacle being walked around.</summary>
+        private struct AvoidNearProp
+        {
+            public PropRect Raw;
+            public PropRect Hard;
+            public bool InCluster;
+        }
+
+        /// <summary>What the walk-around remembers about one character.</summary>
+        private sealed class AvoidState
+        {
+            public bool HasCommit;
+            public Vector3 Commit;
+            public int Changes;
+            public float WindowEnd;
+            public float BlockedUntil;
+            public readonly Vector3[] Reached = new Vector3[8];
+            public readonly float[] ReachedAt = new float[8];
+            public int ReachedCount;
+            public int ReachedNext;
+            public int LastFrame;
+        }
+
         private float _nextEventScanTime;
         // The frame a carried prop was thrown or dropped: a wheel click in that frame was that throw, not a kick.
         private int _lastReleaseFrame = -1;
         private float _nextSquishTickTime;
-        private float _nextNpcObstacleTime;
+        private float _nextAvoidScanTime;
+        private float _nextAvoidLogTime;
         private float _crowdHeadOffset = CrowdHeadOffsetDefault;
         private GravityEvent _gravityEvent;
         private Whirlpool[] _whirlpools = new Whirlpool[0];
@@ -143,7 +208,12 @@ namespace RebuildTheSchool
         private readonly Dictionary<LockdownDoor, MeshRenderer> _superDoorSlabs =
             new Dictionary<LockdownDoor, MeshRenderer>();
         private readonly Dictionary<LockdownDoor, float> _superDoorBottoms = new Dictionary<LockdownDoor, float>();
-        private readonly Dictionary<Transform, float> _shoveUntil = new Dictionary<Transform, float>();
+        // Footprints of the props near any character (refreshed a few times per second) and, per character
+        // and frame, the ones its next leg can touch.
+        private readonly List<PropRect> _avoidProps = new List<PropRect>();
+        private readonly List<AvoidNearProp> _avoidNear = new List<AvoidNearProp>();
+        private readonly Dictionary<int, AvoidState> _avoidStates = new Dictionary<int, AvoidState>();
+        private readonly List<int> _avoidForget = new List<int>();
 
         private static void LogEventError(string what, Exception exception)
         {
@@ -176,7 +246,7 @@ namespace RebuildTheSchool
 
                 RefreshEventRegistries(false);
                 TickSquishers();
-                TickNpcObstacles();
+                TickNpcAvoidance();
             }
             catch (Exception exception)
             {
@@ -305,9 +375,10 @@ namespace RebuildTheSchool
         // ------------------------------------------------------------------------------------------
 
         /// <summary>
-        /// Not carrying: the prop under the crosshair is picked up and thrown in the same call, exactly like an
-        /// RMB throw (speed, push of a hit character, Bullying rule, Whoosh and Bang). Carrying: the wheel click
-        /// throws the carried prop (see HandlePlayerClick).
+        /// Not carrying: the prop under the crosshair is kicked where it stands. It is not turned and keeps its
+        /// full-size collision box (BeginCarry keepRotation, BeginFlight atRest), then flies like an RMB throw
+        /// (speed, push of a hit character, Bullying rule, Whoosh and Bang) and settles through the same landing
+        /// as every throw. Carrying: the wheel click throws the carried prop (see HandlePlayerClick).
         /// </summary>
         private void TryKick()
         {
@@ -326,7 +397,8 @@ namespace RebuildTheSchool
 
             ClearPickupHighlight();
             CarryState state;
-            if (!BeginCarry(target, _player, ray, out state))
+            // keepRotation: the prop is not turned toward the camera first (see BeginCarry).
+            if (!BeginCarry(target, _player, ray, out state, true))
             {
                 return;
             }
@@ -1137,161 +1209,686 @@ namespace RebuildTheSchool
         }
 
         // ------------------------------------------------------------------------------------------
-        // Characters do not ignore props that block their way to the player
+        // Characters walk around props
         // ------------------------------------------------------------------------------------------
+        // The vanilla Navigator moves a character along its path points by plain transform.position changes,
+        // so nothing but the walls ever stopped it and props were simply walked through. A character whose next
+        // leg crosses a prop now gets a detour: one or two corner points of the obstacle's rectangle (the
+        // prop, or props standing too close together to pass between, plus the character's radius) are put in
+        // front of that leg in Navigator.destinationPoints (a protected list). Every leg of the detour is
+        // checked against the walls and against the other props; when no such detour exists the character
+        // walks on as before. A detour is left alone until its first point is reached, and a character that
+        // keeps circling (or changes plan too often) walks on straight for a while. Nobody kicks, pushes or
+        // launches a prop.
 
-        /// <summary>
-        /// A character that is after the player (its destination is near the player) looks a few units ahead,
-        /// along the way to its next path point. A prop in that box blocks it: the character kicks the prop
-        /// out of the way, with the flight of a thrown prop that pushes nobody and that the player is not
-        /// blamed for (NpcLaunched). Doors and windows already have their own reactions (open, break); props
-        /// had none.
-        /// </summary>
-        private void TickNpcObstacles()
+        private void TickNpcAvoidance()
         {
-            float now = Time.unscaledTime;
-            if (now < _nextNpcObstacleTime)
-            {
-                return;
-            }
-
-            _nextNpcObstacleTime = now + NpcObstacleInterval;
             EnvironmentController environment = _player.ec;
-            if (environment == null || environment.Npcs == null || _proxies.Count == 0)
+            if (NavigatorPointsField == null || environment == null || environment.Npcs == null
+                || environment.Npcs.Count == 0)
             {
                 return;
             }
 
-            if (_shoveUntil.Count > 64)
+            float now = Time.unscaledTime;
+            if (now >= _nextAvoidScanTime)
             {
-                _shoveUntil.Clear();
+                _nextAvoidScanTime = now + AvoidScanInterval;
+                RefreshAvoidProps(environment);
+                ForgetAvoidStates();
             }
 
-            Vector3 playerPosition = _player.transform.position;
-            List<NPC> npcs = environment.Npcs;
-            int shoved = 0;
-            for (int i = 0; i < npcs.Count && shoved < NpcShovesPerTick; i++)
+            if (_avoidProps.Count == 0)
             {
-                NPC npc = npcs[i];
-                Entity entity;
-                Bounds ignored;
-                if (!TryGetPushableNpc(npc, out entity, out ignored) || !npc.Navigator.HasDestination)
-                {
-                    continue;
-                }
+                return;
+            }
 
-                Vector3 toPlayer = playerPosition - npc.Navigator.CurrentDestination;
-                toPlayer.y = 0f;
-                Vector3 position = entity.transform.position;
-                Vector3 heading = npc.Navigator.NextPoint - position;
-                heading.y = 0f;
-                if (toPlayer.sqrMagnitude > NpcChaseRadius * NpcChaseRadius || heading.sqrMagnitude < 0.04f)
+            List<NPC> npcs = environment.Npcs;
+            for (int i = 0; i < npcs.Count; i++)
+            {
+                try
                 {
-                    continue;
+                    DetourAroundProps(npcs[i], environment);
                 }
-
-                heading.Normalize();
-                float radius = Mathf.Max(1f, npc.Navigator.Radius);
-                Vector3 ahead = position + heading * (radius + NpcProbeAhead);
-                float side = 2f * (radius + 0.5f);
-                Bounds probe = new Bounds(new Vector3(ahead.x, position.y, ahead.z), new Vector3(side, 8f, side));
-                ProxyProp blocker = FindBlockingProp(probe, position, now);
-                if (blocker != null && ShoveProp(blocker, npc, position, heading))
+                catch (Exception exception)
                 {
-                    shoved++;
+                    LogEventError("character walking around a prop", exception);
                 }
             }
         }
 
-        private ProxyProp FindBlockingProp(Bounds probe, Vector3 from, float now)
+        /// <summary>
+        /// The footprints (renderer bounds on the floor plane) of the props near any character, a couple of
+        /// times per second. Props that are carried or in the air are not obstacles; they are when they land.
+        /// </summary>
+        private void RefreshAvoidProps(EnvironmentController environment)
         {
-            ProxyProp best = null;
-            float bestSqr = float.MaxValue;
+            _avoidProps.Clear();
+            List<NPC> npcs = environment.Npcs;
+            float reachSqr = AvoidScanRadius * AvoidScanRadius;
             for (int i = 0; i < _proxies.Count; i++)
             {
                 ProxyProp proxy = _proxies[i];
                 if (proxy == null || proxy.Root == null || !proxy.Root.gameObject.activeInHierarchy
-                    || (_held != null && proxy.Root == _held.Root)
-                    || (proxy.Root.position - from).sqrMagnitude > NpcPropNear * NpcPropNear)
+                    || (_held != null && proxy.Root == _held.Root) || IsAirborneRoot(proxy.Root))
                 {
                     continue;
                 }
 
-                float until;
+                Vector3 position = proxy.Root.position;
+                bool near = false;
+                for (int n = 0; n < npcs.Count && !near; n++)
+                {
+                    NPC npc = npcs[n];
+                    if (npc == null)
+                    {
+                        continue;
+                    }
+
+                    Vector3 delta = npc.transform.position - position;
+                    delta.y = 0f;
+                    near = delta.sqrMagnitude <= reachSqr;
+                }
+
                 Bounds bounds = new Bounds();
-                if ((_shoveUntil.TryGetValue(proxy.Root, out until) && now < until)
-                    || IsAirborneRoot(proxy.Root)
-                    || !CombinedBounds(proxy.Renderers, out bounds) || !bounds.Intersects(probe))
+                if (!near || !CombinedBounds(proxy.Renderers, out bounds)
+                    || bounds.max.y < AvoidBandBottom || bounds.min.y > AvoidBandTop
+                    || bounds.size.x > AvoidMaxSize || bounds.size.z > AvoidMaxSize)
                 {
                     continue;
                 }
 
-                float sqr = bounds.SqrDistance(from);
-                if (sqr < bestSqr)
+                PropRect rect = new PropRect();
+                rect.Root = proxy.Root;
+                rect.MinX = bounds.min.x;
+                rect.MaxX = bounds.max.x;
+                rect.MinZ = bounds.min.z;
+                rect.MaxZ = bounds.max.z;
+                _avoidProps.Add(rect);
+            }
+        }
+
+        /// <summary>
+        /// One character, every frame: look at the leg it is walking (its position to its next path point)
+        /// and, when a prop is in the way, put the corner points of a detour in front of it.
+        /// </summary>
+        private void DetourAroundProps(NPC npc, EnvironmentController environment)
+        {
+            Navigator navigator = npc != null && npc.isActiveAndEnabled ? npc.Navigator : null;
+            if (navigator == null || !navigator.HasDestination)
+            {
+                return;
+            }
+
+            Entity entity = navigator.Entity;
+            if (entity == null || !entity.isActiveAndEnabled || entity.Frozen || entity.InteractionDisabled)
+            {
+                return;
+            }
+
+            List<Vector3> points = NavigatorPointsField.GetValue(navigator) as List<Vector3>;
+            if (points == null || points.Count == 0 || points.Count > AvoidMaxPoints)
+            {
+                return;
+            }
+
+            AvoidState state = StateOf(npc);
+            float now = Time.time;
+            if (now < state.BlockedUntil)
+            {
+                return;
+            }
+
+            Vector3 start = navigator.transform.position;
+            if (state.HasCommit)
+            {
+                // The detour put in front of this character is still being walked: leave it alone.
+                if (Distance2D(points[0], state.Commit) < 0.0001f)
                 {
-                    best = proxy;
-                    bestSqr = sqr;
+                    return;
+                }
+
+                // Its first point is gone: reached, or the Navigator built a new path.
+                state.HasCommit = false;
+                if (Distance2D(start, state.Commit) < AvoidReach && ReachedAgain(npc, state, state.Commit, now))
+                {
+                    return;
                 }
             }
 
-            return best;
+            Vector3 next = points[0];
+            float clearance = Mathf.Clamp(navigator.Radius, AvoidMinClearance, AvoidMaxClearance) + AvoidMargin;
+            float hard = clearance - AvoidSlack;
+
+            // The props this leg can touch. A prop blocks the leg when the leg comes closer to it than `hard`;
+            // props whose zones overlap form one obstacle (nobody fits between them) and a detour goes round
+            // all of it. The detour leaves the leg's box, so the box grows until the obstacle fits in it.
+            float segLowX = Mathf.Min(start.x, next.x) - clearance;
+            float segHighX = Mathf.Max(start.x, next.x) + clearance;
+            float segLowZ = Mathf.Min(start.z, next.z) - clearance;
+            float segHighZ = Mathf.Max(start.z, next.z) + clearance;
+            float lowX = segLowX;
+            float highX = segHighX;
+            float lowZ = segLowZ;
+            float highZ = segHighZ;
+            int blocker = -1;
+            PropRect corners = new PropRect();
+            for (int expand = 0; expand < 3; expand++)
+            {
+                CollectNearProps(start, hard, lowX, highX, lowZ, highZ);
+                blocker = FirstBlocker(start, next);
+                if (blocker < 0)
+                {
+                    return;
+                }
+
+                corners = ClusterBounds(blocker, clearance + AvoidPad);
+                float boxLowX = Mathf.Min(segLowX, corners.MinX - clearance);
+                float boxHighX = Mathf.Max(segHighX, corners.MaxX + clearance);
+                float boxLowZ = Mathf.Min(segLowZ, corners.MinZ - clearance);
+                float boxHighZ = Mathf.Max(segHighZ, corners.MaxZ + clearance);
+                if (boxLowX >= lowX && boxHighX <= highX && boxLowZ >= lowZ && boxHighZ <= highZ)
+                {
+                    break;
+                }
+
+                lowX = Mathf.Min(lowX, boxLowX);
+                highX = Mathf.Max(highX, boxHighX);
+                lowZ = Mathf.Min(lowZ, boxLowZ);
+                highZ = Mathf.Max(highZ, boxHighZ);
+            }
+
+            if (InsideCluster(next.x, next.z))
+            {
+                // The next path point lies inside the obstacle (a cell centre under a table). The destination
+                // itself cannot be moved; any other point is skipped if the next one can be walked to
+                // straight, else it moves to the nearest free spot beside the obstacle.
+                if (points.Count < 2 || !ChangeAllowed(state, now))
+                {
+                    return;
+                }
+
+                if (LegClear(environment, start, points[1], false))
+                {
+                    points.RemoveAt(0);
+                }
+                else
+                {
+                    Vector3 moved;
+                    if (TryPushOut(environment, start, next, corners, out moved))
+                    {
+                        points[0] = moved;
+                        state.Commit = moved;
+                        state.HasCommit = true;
+                    }
+                }
+
+                return;
+            }
+
+            AvoidCornerX[0] = corners.MinX;
+            AvoidCornerZ[0] = corners.MinZ;
+            AvoidCornerX[1] = corners.MaxX;
+            AvoidCornerZ[1] = corners.MinZ;
+            AvoidCornerX[2] = corners.MaxX;
+            AvoidCornerZ[2] = corners.MaxZ;
+            AvoidCornerX[3] = corners.MinX;
+            AvoidCornerZ[3] = corners.MaxZ;
+
+            // One corner, or two neighbouring ones: the shortest way around that is clear all along. When the
+            // far end of the leg is cluttered with other props, the second pass accepts a way that is clear up
+            // to the last corner and past this obstacle; the next one gets its own detour when the character is there.
+            float bestLength = float.MaxValue;
+            int bestFirst = -1;
+            int bestSecond = -1;
+            for (int pass = 0; pass < 2 && bestFirst < 0; pass++)
+            {
+                for (int first = 0; first < 4; first++)
+                {
+                    for (int variant = 0; variant < 3; variant++)
+                    {
+                        int second = variant == 0 ? -1 : (variant == 1 ? (first + 1) & 3 : (first + 3) & 3);
+                        float length;
+                        if (DetourClear(environment, start, next, first, second, pass == 1, out length)
+                            && length < bestLength)
+                        {
+                            bestLength = length;
+                            bestFirst = first;
+                            bestSecond = second;
+                        }
+                    }
+                }
+            }
+
+            if (bestFirst < 0 || !ChangeAllowed(state, now))
+            {
+                // Wall to wall, or a cluster of props: no way round, so the character walks on as it always did.
+                return;
+            }
+
+            if (bestSecond >= 0)
+            {
+                points.Insert(0, new Vector3(AvoidCornerX[bestSecond], next.y, AvoidCornerZ[bestSecond]));
+            }
+
+            Vector3 firstPoint = new Vector3(AvoidCornerX[bestFirst], next.y, AvoidCornerZ[bestFirst]);
+            points.Insert(0, firstPoint);
+            state.Commit = firstPoint;
+            state.HasCommit = true;
+            if (Time.unscaledTime >= _nextAvoidLogTime)
+            {
+                _nextAvoidLogTime = Time.unscaledTime + AvoidLogInterval;
+                Transform blockRoot = _avoidNear[blocker].Raw.Root;
+                Debug.Log("[Rebuild the School] " + npc.name + " walks around "
+                    + (blockRoot != null ? blockRoot.name : "a prop") + " (" + (bestSecond >= 0 ? 2 : 1)
+                    + " detour point(s), " + bestLength.ToString("0.0") + " units).");
+            }
         }
 
-        private bool ShoveProp(ProxyProp proxy, NPC npc, Vector3 origin, Vector3 heading)
+        private AvoidState StateOf(NPC npc)
         {
-            // Also when the prop turns out to be unmovable: do not look at it again for a moment.
-            _shoveUntil[proxy.Root] = Time.unscaledTime + NpcShoveCooldown;
-            Candidate candidate;
-            if (!TryBuildCandidate(_player, proxy.Root, proxy.EnvironmentObject, out candidate)
-                || !CanBeginCarry(candidate, _player))
+            int id = npc.GetInstanceID();
+            AvoidState state;
+            if (!_avoidStates.TryGetValue(id, out state))
+            {
+                state = new AvoidState();
+                _avoidStates[id] = state;
+            }
+
+            state.LastFrame = Time.frameCount;
+            return state;
+        }
+
+        private void ForgetAvoidStates()
+        {
+            if (_avoidStates.Count == 0)
+            {
+                return;
+            }
+
+            _avoidForget.Clear();
+            foreach (KeyValuePair<int, AvoidState> pair in _avoidStates)
+            {
+                if (Time.frameCount - pair.Value.LastFrame > AvoidForgetFrames)
+                {
+                    _avoidForget.Add(pair.Key);
+                }
+            }
+
+            for (int i = 0; i < _avoidForget.Count; i++)
+            {
+                _avoidStates.Remove(_avoidForget[i]);
+            }
+        }
+
+        /// <summary>
+        /// Guard against detours that never end: a character has only so many plan changes per window, and a
+        /// corner it keeps coming back to means it is circling. Either way it walks on straight for a while.
+        /// </summary>
+        private static bool ChangeAllowed(AvoidState state, float now)
+        {
+            if (now > state.WindowEnd)
+            {
+                state.WindowEnd = now + AvoidWindow;
+                state.Changes = 0;
+            }
+
+            if (state.Changes >= AvoidMaxChanges)
+            {
+                state.BlockedUntil = state.WindowEnd;
+                return false;
+            }
+
+            state.Changes++;
+            return true;
+        }
+
+        private bool ReachedAgain(NPC npc, AvoidState state, Vector3 corner, float now)
+        {
+            int visits = 0;
+            for (int i = 0; i < state.ReachedCount; i++)
+            {
+                if (now - state.ReachedAt[i] < AvoidLoopWindow && Distance2D(state.Reached[i], corner) < AvoidSameCorner)
+                {
+                    visits++;
+                }
+            }
+
+            state.Reached[state.ReachedNext] = corner;
+            state.ReachedAt[state.ReachedNext] = now;
+            state.ReachedNext = (state.ReachedNext + 1) % state.Reached.Length;
+            state.ReachedCount = Mathf.Min(state.ReachedCount + 1, state.Reached.Length);
+            if (visits < AvoidLoopVisits)
             {
                 return false;
             }
 
-            if (_hoveredRoot == proxy.Root)
+            state.BlockedUntil = now + AvoidLoopPause;
+            if (Time.unscaledTime >= _nextAvoidLogTime)
             {
-                ClearPickupHighlight();
+                _nextAvoidLogTime = Time.unscaledTime + AvoidLogInterval;
+                Debug.Log("[Rebuild the School] " + npc.name + " keeps circling props; it walks on straight for "
+                    + AvoidLoopPause.ToString("0") + " s.");
             }
 
-            CarryState state = null;
-            try
+            return true;
+        }
+
+        /// <summary>
+        /// The props within the box, each with the zone a leg must stay out of. A character that already stands
+        /// closer to a prop than that keeps the margin it has (a prop it touches is ignored), so it is never
+        /// forced the long way round a prop it is next to.
+        /// </summary>
+        private void CollectNearProps(Vector3 start, float hard, float lowX, float highX, float lowZ, float highZ)
+        {
+            _avoidNear.Clear();
+            for (int i = 0; i < _avoidProps.Count; i++)
             {
-                Ray ray = new Ray(origin, heading);
-                if (!BeginCarry(candidate, _player, ray, out state))
+                PropRect prop = _avoidProps[i];
+                if (prop.MaxX < lowX || prop.MinX > highX || prop.MaxZ < lowZ || prop.MinZ > highZ)
+                {
+                    continue;
+                }
+
+                float zone = hard;
+                float away = DistanceToRect(prop, start.x, start.z);
+                if (away < hard + AvoidEpsilon)
+                {
+                    if (away < AvoidTouch)
+                    {
+                        continue;
+                    }
+
+                    zone = away - AvoidShrink;
+                }
+
+                AvoidNearProp item = new AvoidNearProp();
+                item.Raw = prop;
+                item.Hard = GrowRect(prop, zone);
+                _avoidNear.Add(item);
+            }
+        }
+
+        /// <summary>The prop whose zone the leg enters first, or -1.</summary>
+        private int FirstBlocker(Vector3 start, Vector3 next)
+        {
+            int blocker = -1;
+            float blockerEntry = float.MaxValue;
+            for (int i = 0; i < _avoidNear.Count; i++)
+            {
+                float entry;
+                if (SegmentEntersRect(start.x, start.z, next.x, next.z, _avoidNear[i].Hard, out entry)
+                    && entry < blockerEntry)
+                {
+                    blocker = i;
+                    blockerEntry = entry;
+                }
+            }
+
+            return blocker;
+        }
+
+        /// <summary>
+        /// Marks the obstacle the blocking prop belongs to (props whose zones overlap, transitively) and returns
+        /// its outline: the footprints' bounds grown by offset. A detour uses the corners of that rectangle.
+        /// </summary>
+        private PropRect ClusterBounds(int blocker, float offset)
+        {
+            for (int i = 0; i < _avoidNear.Count; i++)
+            {
+                SetCluster(i, i == blocker);
+            }
+
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                for (int i = 0; i < _avoidNear.Count; i++)
+                {
+                    if (_avoidNear[i].InCluster)
+                    {
+                        continue;
+                    }
+
+                    for (int j = 0; j < _avoidNear.Count; j++)
+                    {
+                        if (_avoidNear[j].InCluster && RectsOverlap(_avoidNear[i].Hard, _avoidNear[j].Hard))
+                        {
+                            SetCluster(i, true);
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            PropRect bounds = _avoidNear[blocker].Raw;
+            for (int i = 0; i < _avoidNear.Count; i++)
+            {
+                if (!_avoidNear[i].InCluster)
+                {
+                    continue;
+                }
+
+                PropRect raw = _avoidNear[i].Raw;
+                bounds.MinX = Mathf.Min(bounds.MinX, raw.MinX);
+                bounds.MaxX = Mathf.Max(bounds.MaxX, raw.MaxX);
+                bounds.MinZ = Mathf.Min(bounds.MinZ, raw.MinZ);
+                bounds.MaxZ = Mathf.Max(bounds.MaxZ, raw.MaxZ);
+            }
+
+            return GrowRect(bounds, offset);
+        }
+
+        private void SetCluster(int index, bool value)
+        {
+            AvoidNearProp item = _avoidNear[index];
+            item.InCluster = value;
+            _avoidNear[index] = item;
+        }
+
+        private bool InsideCluster(float x, float z)
+        {
+            for (int i = 0; i < _avoidNear.Count; i++)
+            {
+                if (_avoidNear[i].InCluster && InsideRect(_avoidNear[i].Hard, x, z))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool LegEntersCluster(Vector3 origin, Vector3 target)
+        {
+            for (int i = 0; i < _avoidNear.Count; i++)
+            {
+                float entry;
+                if (_avoidNear[i].InCluster
+                    && SegmentEntersRect(origin.x, origin.z, target.x, target.z, _avoidNear[i].Hard, out entry))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// start -> corner (-> second corner) -> next: every point and every leg is clear. With relaxed, the last
+        /// leg only has to clear the walls and the obstacle that is being walked around, not the other props.
+        /// </summary>
+        private bool DetourClear(
+            EnvironmentController environment, Vector3 start, Vector3 next, int first, int second,
+            bool relaxed, out float length)
+        {
+            length = 0f;
+            Vector3 a = new Vector3(AvoidCornerX[first], start.y, AvoidCornerZ[first]);
+            if (!PointClear(environment, a) || !LegClear(environment, start, a, true))
+            {
+                return false;
+            }
+
+            length = Distance2D(start, a);
+            Vector3 last = a;
+            if (second >= 0)
+            {
+                Vector3 b = new Vector3(AvoidCornerX[second], start.y, AvoidCornerZ[second]);
+                if (!PointClear(environment, b) || !LegClear(environment, a, b, true))
                 {
                     return false;
                 }
 
-                state.Root.SetParent(state.Environment.transform, true);
-                RestoreVisualGlow(state);
-                BeginFlight(state, ray, true);
-                state.FlightVelocity = heading * NpcShoveSpeed + Vector3.up * NpcShoveLift;
-                state.FlightDrag = 0.15f;
-                state.Age = 0f;
-                state.Thrown = true;
-                state.NpcLaunched = true;
-                state.WallHits = 0;
-                state.PushedNpcs = null;
-                state.NextImpactSoundTime = 0f;
-                FxOnRelease(state, false);
-                _airborne.Add(state);
-                StartFlightSound(state);
-                InvalidateAim();
-                PlaySoundAt(state.FlightPosition + state.FlightCenterOffset, BangSoundName, 1f);
-                Debug.Log("[Rebuild the School] " + npc.name + " kicked " + proxy.Root.name
-                    + ", which stood in its way to the player.");
-                return true;
+                length += Distance2D(a, b);
+                last = b;
             }
-            catch (Exception exception)
-            {
-                if (state != null)
-                {
-                    ReturnToOrigin(state);
-                }
 
-                LogEventError("character kicking a prop", exception);
+            bool finalLegClear = relaxed
+                ? LegClear(environment, last, next, false) && !LegEntersCluster(last, next)
+                : LegClear(environment, last, next, true);
+            if (!finalLegClear)
+            {
                 return false;
             }
+
+            length += Distance2D(last, next);
+            return true;
+        }
+
+        /// <summary>The nearest point on the rectangle's edge that is clear and can be walked to.</summary>
+        private bool TryPushOut(
+            EnvironmentController environment, Vector3 start, Vector3 inside, PropRect corners, out Vector3 moved)
+        {
+            moved = inside;
+            float bestDistance = float.MaxValue;
+            for (int side = 0; side < 4; side++)
+            {
+                float x = inside.x;
+                float z = inside.z;
+                if (side == 0)
+                {
+                    x = corners.MinX;
+                }
+                else if (side == 1)
+                {
+                    x = corners.MaxX;
+                }
+                else if (side == 2)
+                {
+                    z = corners.MinZ;
+                }
+                else
+                {
+                    z = corners.MaxZ;
+                }
+
+                Vector3 candidate = new Vector3(x, inside.y, z);
+                float distance = Distance2D(inside, candidate);
+                if (distance < bestDistance && PointClear(environment, candidate)
+                    && LegClear(environment, start, candidate, true))
+                {
+                    bestDistance = distance;
+                    moved = candidate;
+                }
+            }
+
+            return bestDistance < float.MaxValue;
+        }
+
+        /// <summary>A spot a character may stand on: clear of the walls and outside every near prop's zone.</summary>
+        private bool PointClear(EnvironmentController environment, Vector3 point)
+        {
+            if (FlightOverlaps(environment, point, AvoidWallHalf))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < _avoidNear.Count; i++)
+            {
+                if (InsideRect(_avoidNear[i].Hard, point.x, point.z))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>A straight leg that crosses no wall (doors are passable) and, if asked, no near prop's zone.</summary>
+        private bool LegClear(EnvironmentController environment, Vector3 origin, Vector3 target, bool checkProps)
+        {
+            FlightHit wall;
+            if (FlightGridSweep(environment, origin, AvoidWallHalf, target - origin, false, out wall))
+            {
+                return false;
+            }
+
+            if (checkProps)
+            {
+                for (int i = 0; i < _avoidNear.Count; i++)
+                {
+                    float entry;
+                    if (SegmentEntersRect(origin.x, origin.z, target.x, target.z, _avoidNear[i].Hard, out entry))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static float Distance2D(Vector3 a, Vector3 b)
+        {
+            float dx = b.x - a.x;
+            float dz = b.z - a.z;
+            return Mathf.Sqrt(dx * dx + dz * dz);
+        }
+
+        private static float DistanceToRect(PropRect rect, float x, float z)
+        {
+            float dx = Mathf.Max(Mathf.Max(rect.MinX - x, 0f), x - rect.MaxX);
+            float dz = Mathf.Max(Mathf.Max(rect.MinZ - z, 0f), z - rect.MaxZ);
+            return Mathf.Sqrt(dx * dx + dz * dz);
+        }
+
+        private static PropRect GrowRect(PropRect rect, float amount)
+        {
+            rect.MinX -= amount;
+            rect.MaxX += amount;
+            rect.MinZ -= amount;
+            rect.MaxZ += amount;
+            return rect;
+        }
+
+        private static bool RectsOverlap(PropRect a, PropRect b)
+        {
+            return a.MinX < b.MaxX && b.MinX < a.MaxX && a.MinZ < b.MaxZ && b.MinZ < a.MaxZ;
+        }
+
+        /// <summary>Strictly inside (the edge itself, where a detour runs, is outside).</summary>
+        private static bool InsideRect(PropRect rect, float x, float z)
+        {
+            return x > rect.MinX + AvoidEpsilon && x < rect.MaxX - AvoidEpsilon
+                && z > rect.MinZ + AvoidEpsilon && z < rect.MaxZ - AvoidEpsilon;
+        }
+
+        /// <summary>Does the segment run through the inside of the rectangle (touching its edge does not count)?</summary>
+        private static bool SegmentEntersRect(
+            float ax, float az, float bx, float bz, PropRect rect, out float entry)
+        {
+            entry = 0f;
+            float tMin = 0f;
+            float tMax = 1f;
+            if (!SlabRange(ax, bx - ax, rect.MinX + AvoidEpsilon, rect.MaxX - AvoidEpsilon, ref tMin, ref tMax)
+                || !SlabRange(az, bz - az, rect.MinZ + AvoidEpsilon, rect.MaxZ - AvoidEpsilon, ref tMin, ref tMax))
+            {
+                return false;
+            }
+
+            entry = tMin;
+            return tMax - tMin > 0.0005f;
         }
     }
 
@@ -1344,13 +1941,13 @@ namespace RebuildTheSchool
             Apply();
         }
 
-        public void BeginGrow(float from, float seconds)
+        public void BeginGrow(float startFactor, float seconds)
         {
             Capture();
-            _growFrom = from;
+            _growFrom = startFactor;
             _growDuration = Mathf.Max(0.01f, seconds);
             _growTime = _growDuration;
-            _uniform = from;
+            _uniform = startFactor;
             Apply();
         }
 
