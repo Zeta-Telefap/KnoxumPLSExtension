@@ -594,6 +594,7 @@ namespace RebuildTheSchool
                 }
 
                 return target != null && target.room == playerCell.room
+                    && target.room.category != RoomCategory.EventSpawner
                     && DestinationParent(state.ParentKind, target) != null
                     && PlayerCanReachCell(state, target)
                     && PropPlacementCollisionFree(state, proposedPosition, state.CarryRotation);
@@ -2214,8 +2215,11 @@ namespace RebuildTheSchool
             state.RemovedHardCoverage = removedHard;
             state.RemovedSoftCoverage = removedSoft;
             state.ParentKind = candidate.ParentKind;
-            state.Renderers = candidate.Renderers;
-            state.RegisteredRenderers = RegisteredRenderers(player.ec, candidate.Renderers);
+            // A locker is shown with a back from now on (the red and blue ones have none).
+            state.Renderers = isLocker
+                ? EnsureLockerBack(candidate.Cell, candidate.Root, candidate.Renderers)
+                : candidate.Renderers;
+            state.RegisteredRenderers = RegisteredRenderers(player.ec, state.Renderers);
             state.Body = body;
             state.AddedBody = addedBody;
             state.AddedCollider = generatedCollider;
@@ -2313,10 +2317,14 @@ namespace RebuildTheSchool
                 // landing (RestoreBody) gives the prop its original body settings back.
                 // A kick starts where the prop stands (atRest); a carried prop starts at the camera.
                 BeginFlight(state, ray, throwForward, kick);
+                // The event state comes first: it needs to know where the prop was (on the ceiling or not), and the
+                // kick needs the way the prop is pulled.
+                bool restedOnCeiling = state.Fx != null && state.Fx.Pinned;
+                FxOnRelease(state);
                 if (kick)
                 {
-                    // A prop on the floor would land again in the first step: the kick goes a little upward.
-                    state.FlightVelocity = KickVelocity(state, ray);
+                    // A prop would land again in the first step: the kick goes a little away from its surface.
+                    state.FlightVelocity = KickVelocity(state, ray, restedOnCeiling);
                 }
 
                 state.Age = 0f;
@@ -2325,7 +2333,6 @@ namespace RebuildTheSchool
                 state.PushedNpcs = null;
                 state.NextImpactSoundTime = 0f;
                 _lastReleaseFrame = Time.frameCount;
-                FxOnRelease(state, true);
                 _airborne.Add(state);
                 if (throwForward)
                 {
@@ -2393,8 +2400,6 @@ namespace RebuildTheSchool
                         Debug.LogError("[Rebuild the School] Settling a landed prop failed; it went back to where it came from: " + exception);
                         ReturnToOrigin(state);
                     }
-
-                    FxAfterSettle(state);
                 }
                 else if (state.Age >= ReleaseTimeout)
                 {
@@ -3062,7 +3067,8 @@ namespace RebuildTheSchool
             return false;
         }
 
-        // A cell that is outside the map, Null or an empty filler (ConstBin 16) is void: all its edges are solid.
+        // A cell that is outside the map, Null, an empty filler (ConstBin 16) or in an event spawner room (props never go
+        // there, not even through its open door) is void: all its edges are solid.
         private static Cell FlightCell(EnvironmentController environment, int x, int z)
         {
             IntVector2 position = new IntVector2(x, z);
@@ -3072,7 +3078,8 @@ namespace RebuildTheSchool
             }
 
             Cell cell = environment.CellFromPosition(position);
-            return cell == null || cell.Null || cell.room == null || cell.ConstBin == 16 ? null : cell;
+            return cell == null || cell.Null || cell.room == null || cell.ConstBin == 16
+                || cell.room.category == RoomCategory.EventSpawner ? null : cell;
         }
 
         private static bool FlightEdgeSolid(EnvironmentController environment, int ax, int az, int axis)
@@ -4220,7 +4227,7 @@ namespace RebuildTheSchool
         private bool TryPlace(CarryState state, Cell target)
         {
             if (state == null || state.Root == null || target == null || target.Null
-                || target.room == null
+                || target.room == null || target.room.category == RoomCategory.EventSpawner
                 || (state.PreferredRoom != null && target.room != state.PreferredRoom)
                 || DestinationParent(state.ParentKind, target) == null)
             {
@@ -4511,7 +4518,7 @@ namespace RebuildTheSchool
         {
             InvalidateAim();
             StopFlightSound(state);
-            FxResetScale(state);
+            FxAbortSink(state);
             if (state == null || state.Root == null)
             {
                 return;
@@ -5010,6 +5017,114 @@ namespace RebuildTheSchool
         private static bool IsLocker(Transform root)
         {
             return root != null && root.name.ToLowerInvariant().Contains("locker");
+        }
+
+        // The name of the copy that gives a locker its back (it must stay free of the words IsSupportedPropName and
+        // ForbiddenNameParts look for).
+        private const string LockerBackName = "BackFace";
+
+        // The turned copy is a hair smaller than the locker, so the edges of the real sides cover it.
+        private const float LockerBackScale = 0.996f;
+
+        /// <summary>
+        /// The red and blue lockers (LockerBuilder: lockerPre and hideLockerPre) have no back; the game never shows
+        /// it because they stand against a wall. A carried locker shows it, so the front is copied onto the back: a
+        /// copy of every mesh of the locker, turned half a circle around the vertical axis through its middle (the
+        /// copy of the front faces back, the two sides swap and lie on each other). It is made once, stays part of
+        /// the locker and is listed in the cell like the locker's own renderers, so the chunk culling shows and hides
+        /// it with them. Returns every renderer of the locker, the copy included.
+        /// </summary>
+        private static Renderer[] EnsureLockerBack(Cell cell, Transform root, Renderer[] renderers)
+        {
+            try
+            {
+                if (root.Find(LockerBackName) != null)
+                {
+                    return root.GetComponentsInChildren<Renderer>(true);
+                }
+
+                // The middle of the locker in its own coordinates, from the meshes (a culled renderer has no bounds).
+                Bounds local = new Bounds();
+                bool hasBounds = false;
+                List<MeshRenderer> sources = new List<MeshRenderer>();
+                for (int i = 0; i < renderers.Length; i++)
+                {
+                    MeshRenderer source = renderers[i] as MeshRenderer;
+                    Bounds mesh;
+                    if (source == null || !TryGetLocalMeshBounds(source, out mesh))
+                    {
+                        continue;
+                    }
+
+                    sources.Add(source);
+                    for (int corner = 0; corner < 8; corner++)
+                    {
+                        Vector3 point = mesh.center + new Vector3(
+                            (corner & 1) == 0 ? -mesh.extents.x : mesh.extents.x,
+                            (corner & 2) == 0 ? -mesh.extents.y : mesh.extents.y,
+                            (corner & 4) == 0 ? -mesh.extents.z : mesh.extents.z);
+                        point = root.InverseTransformPoint(source.transform.TransformPoint(point));
+                        if (hasBounds)
+                        {
+                            local.Encapsulate(point);
+                        }
+                        else
+                        {
+                            local = new Bounds(point, Vector3.zero);
+                            hasBounds = true;
+                        }
+                    }
+                }
+
+                if (!hasBounds)
+                {
+                    return renderers;
+                }
+
+                // p -> c + R * s * (p - c), written as the pose of the holder (the copies keep their own pose
+                // relative to the locker, which the holder then turns).
+                Vector3 c = local.center;
+                float s = LockerBackScale;
+                Transform holder = new GameObject(LockerBackName).transform;
+                holder.SetParent(root, false);
+                holder.localRotation = Quaternion.Euler(0f, 180f, 0f);
+                holder.localScale = new Vector3(s, s, s);
+                holder.localPosition = new Vector3(c.x * (1f + s), c.y * (1f - s), c.z * (1f + s));
+
+                Vector3 rootScale = root.lossyScale;
+                List<Renderer> copies = new List<Renderer>();
+                for (int i = 0; i < sources.Count; i++)
+                {
+                    MeshRenderer source = sources[i];
+                    MeshFilter filter = source.GetComponent<MeshFilter>();
+                    Vector3 sourceScale = source.transform.lossyScale;
+                    GameObject part = new GameObject(LockerBackName + " Mesh");
+                    part.layer = source.gameObject.layer;
+                    Transform partTransform = part.transform;
+                    partTransform.SetParent(holder, false);
+                    partTransform.localPosition = root.InverseTransformPoint(source.transform.position);
+                    partTransform.localRotation = Quaternion.Inverse(root.rotation) * source.transform.rotation;
+                    partTransform.localScale = new Vector3(
+                        rootScale.x != 0f ? sourceScale.x / rootScale.x : sourceScale.x,
+                        rootScale.y != 0f ? sourceScale.y / rootScale.y : sourceScale.y,
+                        rootScale.z != 0f ? sourceScale.z / rootScale.z : sourceScale.z);
+                    part.AddComponent<MeshFilter>().sharedMesh = filter.sharedMesh;
+                    MeshRenderer copy = part.AddComponent<MeshRenderer>();
+                    copy.sharedMaterials = source.sharedMaterials;
+                    copy.shadowCastingMode = source.shadowCastingMode;
+                    copy.receiveShadows = source.receiveShadows;
+                    copies.Add(copy);
+                }
+
+                AddRendererReferences(cell, copies);
+                Debug.Log("[Rebuild the School] " + root.name + " got a back (" + copies.Count + " mesh copies).");
+                return root.GetComponentsInChildren<Renderer>(true);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[Rebuild the School] The locker back could not be made: " + exception.Message);
+                return renderers;
+            }
         }
 
         private static CellCoverage LockerCoverage(Quaternion rotation)

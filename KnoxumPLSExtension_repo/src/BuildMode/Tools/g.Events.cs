@@ -43,12 +43,15 @@ namespace RebuildTheSchool
         private const float GravityRollRate = 360f;
         private const float GravityLandFactor = 0.9f;
 
-        // Flood: the numbers of Whirlpool (maxForce 20, sinks at 5 units, sinkSpeed 2, down to 20%).
+        // Flood: the numbers of Whirlpool (maxForce 20, catches at 5 units, sinkSpeed 2, down to 20%, an exit
+        // whirlpool that forms for 3 s).
         private const float WhirlpoolPull = 20f;
         private const float WhirlpoolSinkDistance = 5f;
         private const float WhirlpoolSinkSpeed = 2f;
         private const float WhirlpoolSinkFloor = 0.2f;
-        private const float WhirlpoolRiseSeconds = 0.5f;
+        private const float WhirlpoolExitFormSeconds = 3f;
+        // The prop goes down by its own height plus this (the floor hides it) while the sink percent goes to 20%.
+        private const float WhirlpoolDropMargin = 0.3f;
         private const float WhirlpoolGlideSpeed = 12f;
         private const float WhirlpoolFloorTolerance = 0.3f;
         private const float WhirlpoolMinHoldPull = 0.3f;
@@ -116,6 +119,11 @@ namespace RebuildTheSchool
         private static readonly FieldInfo GravityFlippersField = typeof(GravityEvent).GetField(
             "flippers", BindingFlags.Instance | BindingFlags.NonPublic);
 
+        // Whirlpool.Close() (private) shrinks the pool and destroys it; Whirlpool.Update starts it when it catches
+        // an entity, so a pool that has caught a prop does the same.
+        private static readonly MethodInfo WhirlpoolCloseMethod = typeof(Whirlpool).GetMethod(
+            "Close", BindingFlags.Instance | BindingFlags.NonPublic);
+
         private static readonly FieldInfo WhirlpoolSphereField = typeof(Whirlpool).GetField(
             "sphereCollider", BindingFlags.Instance | BindingFlags.NonPublic);
         // Navigator.destinationPoints is protected: the list is read and edited through reflection.
@@ -151,8 +159,12 @@ namespace RebuildTheSchool
             public bool Sinking;
             public Whirlpool SinkPool;
             public Vector3 SinkCentre;
+            // 1 -> 0.2 going down into the pool that caught the prop, 0.2 -> 1 coming up out of the exit pool.
             public float SinkPercent = 1f;
-            public bool PlayRise;
+            public bool SinkRising;
+            public bool HasExit;
+            public Vector3 ExitFloor;
+            public Whirlpool ExitPool;
 
             // Student Shuffle.
             public bool Riding;
@@ -160,6 +172,9 @@ namespace RebuildTheSchool
             public Vector3 RideOffset;
             public Vector3 RideLast;
             public Vector3 RideVelocity;
+
+            // A prop that was let go at the edge of an event spawner room does not ride again.
+            public bool RideBlocked;
 
             // A prop that went through an event settles where it ends up, like a thrown one.
             public bool KeepLanding;
@@ -525,15 +540,32 @@ namespace RebuildTheSchool
         }
 
         /// <summary>
-        /// A prop lying on the floor would land again in the very first step, so the kick goes a little upward
-        /// and never down into the floor.
+        /// A prop lying on the floor would land again in the very first step, so the kick goes a little away from
+        /// the surface it lies on and never into it. That is up for a prop on the floor and down for one that is
+        /// pinned to the ceiling (Gravity Chaos), whichever way the player's own gravity points: a player on the
+        /// ceiling looks "down" at the floor props, and the kick still goes along the way he looks, level.
         /// </summary>
-        private static Vector3 KickVelocity(CarryState state, Ray ray)
+        private static Vector3 KickVelocity(CarryState state, Ray ray, bool fromCeiling)
         {
+            Vector3 away = fromCeiling ? Vector3.down : Vector3.up;
             Vector3 direction = ray.direction;
-            direction.y = Mathf.Max(direction.y, 0f) + KickUpward;
-            direction.Normalize();
-            return PlayerVelocity(state.Player) * 0.35f + direction * ThrowSpeed + Vector3.up * KickLift;
+            if (Vector3.Dot(direction, away) < 0f)
+            {
+                // Aimed toward the surface the prop rests on: kick along the heading, level.
+                direction = Vector3.ProjectOnPlane(direction, away);
+                if (direction.sqrMagnitude < 0.0001f)
+                {
+                    direction = Vector3.ProjectOnPlane(state.Player.transform.forward, away);
+                }
+
+                if (direction.sqrMagnitude < 0.0001f)
+                {
+                    direction = Vector3.forward;
+                }
+            }
+
+            direction = (direction.normalized + away * KickUpward).normalized;
+            return PlayerVelocity(state.Player) * 0.35f + direction * ThrowSpeed + away * KickLift;
         }
 
         // ------------------------------------------------------------------------------------------
@@ -801,18 +833,22 @@ namespace RebuildTheSchool
         // ------------------------------------------------------------------------------------------
 
         /// <summary>
-        /// The state a released prop starts with. Gravity Chaos: a prop that is released while the player
-        /// stands on the ceiling falls up, to the ceiling (followPlayerGravity).
+        /// The state a released prop starts with. Gravity Chaos: a prop keeps the gravity it has. A floor prop
+        /// that a player on the ceiling picks up is still pulled to the floor when it is let go; only a prop that
+        /// was pinned to the ceiling and is let go by a player who stands on the ceiling too goes on falling up
+        /// (a flipper turns any prop over, FxTouchFlippers). Call it after BeginFlight, before the kick velocity.
         /// </summary>
-        private void FxOnRelease(CarryState state, bool followPlayerGravity)
+        private void FxOnRelease(CarryState state)
         {
+            EventFx previous = state.Fx;
+            bool ceilingBound = previous != null && (previous.Pinned || previous.GravityTarget < 0f);
             EventFx fx = new EventFx();
             fx.BaseRotation = state.Root.rotation;
             state.Fx = fx;
             try
             {
                 RefreshEventRegistries(false);
-                if (followPlayerGravity && _gravityEvent != null && _gravityEvent.Active
+                if (ceilingBound && _gravityEvent != null && _gravityEvent.Active
                     && PlayerIsFlipped(state.Player))
                 {
                     fx.GravityFactor = -1f;
@@ -855,49 +891,10 @@ namespace RebuildTheSchool
         private static void FxBeforeSettle(CarryState state)
         {
             EventFx fx = state.Fx;
-            if (fx == null)
+            if (fx != null && fx.KeepLanding)
             {
-                return;
-            }
-
-            try
-            {
-                if (fx.KeepLanding)
-                {
-                    state.Thrown = true;
-                }
-
-                if (fx.PlayRise && state.Root != null)
-                {
-                    // The placement is checked at full size; the rise starts after it (FxAfterSettle).
-                    PropFx.GetOrAdd(state.Root).SetUniform(1f);
-                }
-            }
-            catch (Exception exception)
-            {
-                LogEventError("before settling", exception);
-            }
-        }
-
-        private static void FxAfterSettle(CarryState state)
-        {
-            EventFx fx = state.Fx;
-            if (fx == null || !fx.PlayRise)
-            {
-                return;
-            }
-
-            fx.PlayRise = false;
-            try
-            {
-                if (state.Root != null)
-                {
-                    PropFx.GetOrAdd(state.Root).BeginGrow(WhirlpoolSinkFloor, WhirlpoolRiseSeconds);
-                }
-            }
-            catch (Exception exception)
-            {
-                LogEventError("after settling", exception);
+                // A prop that went through an event settles where it ended up, like a thrown one.
+                state.Thrown = true;
             }
         }
 
@@ -935,35 +932,41 @@ namespace RebuildTheSchool
             catch (Exception exception)
             {
                 LogEventError("special flight step", exception);
-                fx.Sinking = false;
                 fx.Riding = false;
                 fx.Follower = null;
-                FxResetScale(state);
+                FxAbortSink(state);
             }
 
             return false;
         }
 
-        /// <summary>A prop that leaves a whirlpool step half way (error, level change) must not stay shrunk.</summary>
-        private static void FxResetScale(CarryState state)
+        /// <summary>
+        /// A prop that leaves the whirlpool ride half way (error, level change, sent home) lets go of it and closes
+        /// the exit pool that was opened for it.
+        /// </summary>
+        private static void FxAbortSink(CarryState state)
         {
+            EventFx fx = state != null ? state.Fx : null;
+            if (fx == null)
+            {
+                return;
+            }
+
+            fx.Sinking = false;
+            fx.SinkRising = false;
+            fx.SinkPool = null;
+            Whirlpool exit = fx.ExitPool;
+            fx.ExitPool = null;
             try
             {
-                if (state != null && state.Fx != null)
+                if (exit != null)
                 {
-                    // Back at full size: no rise from 20% follows.
-                    state.Fx.PlayRise = false;
-                }
-
-                PropFx scale = state != null && state.Root != null ? state.Root.GetComponent<PropFx>() : null;
-                if (scale != null && scale.enabled)
-                {
-                    scale.SetUniform(1f);
+                    exit.StartClose();
                 }
             }
             catch (Exception)
             {
-                // Nothing is left to restore.
+                // The pool is gone already.
             }
         }
 
@@ -1327,13 +1330,7 @@ namespace RebuildTheSchool
 
                 if (bestFlat <= WhirlpoolSinkDistance && c.y - half.y <= state.FlightFloorY + WhirlpoolFloorTolerance)
                 {
-                    fx.Sinking = true;
-                    fx.SinkPool = _whirlpools[bestIndex];
-                    fx.SinkCentre = bestCentre;
-                    fx.SinkPercent = 1f;
-                    fx.KeepLanding = true;
-                    StopFlightSound(state);
-                    Debug.Log("[Rebuild the School] A whirlpool is sucking " + state.Root.name + " in.");
+                    FxBeginSink(state, fx, _whirlpools[bestIndex], bestCentre);
                     return Vector3.zero;
                 }
 
@@ -1394,62 +1391,252 @@ namespace RebuildTheSchool
         }
 
         /// <summary>
-        /// The prop slides to the middle of the pool and shrinks to 20% (0.4 s), then comes up at a random cell
-        /// (the exit of Whirlpool.Teleport) and grows back (FxAfterSettle) while it settles there.
+        /// What Whirlpool.Update does when it catches an entity, for a prop: the pool takes this one prop and
+        /// closes (layer 19, Close(): it shrinks and is destroyed), so a pool takes one prop; and, as
+        /// Whirlpool.Teleport starts, a new whirlpool forms at the place the prop will come out.
+        /// </summary>
+        private static void FxBeginSink(CarryState state, EventFx fx, Whirlpool pool, Vector3 centre)
+        {
+            fx.Sinking = true;
+            fx.SinkRising = false;
+            fx.SinkPool = pool;
+            fx.SinkCentre = centre;
+            fx.SinkPercent = 1f;
+            fx.KeepLanding = true;
+            fx.HasExit = false;
+            fx.ExitPool = null;
+            StopFlightSound(state);
+            CloseWhirlpool(pool);
+
+            Cell exit;
+            if (TryPickWhirlpoolExit(state.Environment, out exit))
+            {
+                fx.HasExit = true;
+                fx.ExitFloor = exit.FloorWorldPosition;
+                fx.ExitPool = CreateExitWhirlpool(pool, fx.ExitFloor);
+            }
+
+            Debug.Log("[Rebuild the School] A whirlpool took " + state.Root.name + (fx.HasExit
+                ? "; it comes out of a new whirlpool at " + fx.ExitFloor + "." : "; there is no other place to come out."));
+        }
+
+        /// <summary>A whirlpool that has caught something: no more catching (layer 19) and it shrinks away.</summary>
+        private static void CloseWhirlpool(Whirlpool pool)
+        {
+            if (pool == null)
+            {
+                return;
+            }
+
+            pool.gameObject.layer = WhirlpoolClosingLayer;
+            System.Collections.IEnumerator routine = null;
+            try
+            {
+                if (WhirlpoolCloseMethod != null)
+                {
+                    routine = WhirlpoolCloseMethod.Invoke(pool, null) as System.Collections.IEnumerator;
+                }
+            }
+            catch (Exception)
+            {
+                routine = null;
+            }
+
+            if (routine != null)
+            {
+                // Started next to whatever the pool already runs (StartClose would stop all of it).
+                pool.StartCoroutine(routine);
+            }
+            else
+            {
+                pool.StartClose();
+            }
+        }
+
+        /// <summary>
+        /// The new whirlpool of Whirlpool.Teleport: it forms for 3 s on layer 19 (it catches nothing), is listed in
+        /// the flood so the flood removes it at its end, and is closed (StartClose) when the prop is out.
+        /// </summary>
+        private static Whirlpool CreateExitWhirlpool(Whirlpool source, Vector3 floor)
+        {
+            try
+            {
+                if (source == null || source.whirlpoolPre == null)
+                {
+                    return null;
+                }
+
+                Whirlpool exit = UnityEngine.Object.Instantiate<Whirlpool>(source.whirlpoolPre);
+                exit.ec = source.ec;
+                exit.FormTime = WhirlpoolExitFormSeconds;
+                exit.transform.position = floor;
+                exit.whirlpoolPre = source.whirlpoolPre;
+                exit.flood = source.flood;
+                exit.gameObject.layer = WhirlpoolClosingLayer;
+                if (source.flood != null && source.flood.whirlpools != null)
+                {
+                    source.flood.whirlpools.Add(exit);
+                }
+
+                return exit;
+            }
+            catch (Exception exception)
+            {
+                LogEventError("exit whirlpool", exception);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// The prop slides to the middle of the pool and sinks (0.4 s, the sink speed of Whirlpool.Teleport; it
+        /// goes down by its own height, the floor hides it), jumps to the new whirlpool and rises out of it (0.4 s),
+        /// which then closes. It lands there like any thrown prop. Vanilla lowers the entity's height the same way.
         /// </summary>
         private bool FxStepSink(CarryState state, EventFx fx, float dt)
         {
             float timeScale = state.Environment != null ? state.Environment.EnvironmentTimeScale : 1f;
-            Vector3 centre = fx.SinkPool != null ? fx.SinkPool.transform.position : fx.SinkCentre;
-            fx.SinkCentre = centre;
+            Vector3 half = state.FlightFullHalf;
+            float fullDrop = 2f * half.y + WhirlpoolDropMargin;
+            float step = dt * timeScale * WhirlpoolSinkSpeed;
             Vector3 c = state.FlightPosition + state.FlightCenterOffset;
-            c.x = Mathf.MoveTowards(c.x, centre.x, WhirlpoolGlideSpeed * dt);
-            c.z = Mathf.MoveTowards(c.z, centre.z, WhirlpoolGlideSpeed * dt);
-            state.FlightPosition = c - state.FlightCenterOffset;
             state.FlightVelocity = Vector3.zero;
-            state.Body.MovePosition(state.FlightPosition);
 
-            fx.SinkPercent = Mathf.Max(WhirlpoolSinkFloor, fx.SinkPercent - dt * timeScale * WhirlpoolSinkSpeed);
-            PropFx.GetOrAdd(state.Root).SetUniform(fx.SinkPercent);
-            if (fx.SinkPercent > WhirlpoolSinkFloor + 0.0001f)
+            if (!fx.SinkRising)
+            {
+                Vector3 centre = fx.SinkPool != null ? fx.SinkPool.transform.position : fx.SinkCentre;
+                fx.SinkCentre = centre;
+                c.x = Mathf.MoveTowards(c.x, centre.x, WhirlpoolGlideSpeed * dt);
+                c.z = Mathf.MoveTowards(c.z, centre.z, WhirlpoolGlideSpeed * dt);
+                fx.SinkPercent = Mathf.Max(WhirlpoolSinkFloor, fx.SinkPercent - step);
+                c.y = state.FlightFloorY + half.y - fullDrop * SinkDepth(fx.SinkPercent);
+                FxMoveSinking(state, c);
+                if (fx.SinkPercent > WhirlpoolSinkFloor + 0.0001f)
+                {
+                    return true;
+                }
+
+                // At the bottom: the jump to the new whirlpool (Whirlpool.Teleport: subject.Teleport(newPos)).
+                fx.SinkRising = true;
+                if (fx.HasExit)
+                {
+                    state.FlightFloorY = fx.ExitFloor.y;
+                    c = new Vector3(fx.ExitFloor.x, fx.ExitFloor.y + half.y - fullDrop, fx.ExitFloor.z);
+                    FxMoveSinking(state, c);
+                }
+
+                return true;
+            }
+
+            fx.SinkPercent = Mathf.Min(1f, fx.SinkPercent + step);
+            c.y = state.FlightFloorY + half.y - fullDrop * SinkDepth(fx.SinkPercent);
+            FxMoveSinking(state, c);
+            if (fx.SinkPercent < 1f - 0.0001f)
             {
                 return true;
             }
 
+            // Out: the exit whirlpool closes (newPool.StartClose()) and the prop lands where it stands.
+            Whirlpool exit = fx.ExitPool;
+            fx.ExitPool = null;
             fx.Sinking = false;
+            fx.SinkRising = false;
             fx.SinkPool = null;
-            fx.PlayRise = true;
-            Vector3 landing = c;
-            Cell exit;
-            if (TryPickWhirlpoolExit(state.Environment, out exit))
+            if (exit != null)
             {
-                Vector3 floor = exit.FloorWorldPosition;
-                landing = new Vector3(floor.x, floor.y + state.FlightFullHalf.y, floor.z);
-                state.FlightFloorY = floor.y;
+                exit.StartClose();
             }
 
-            state.FlightPosition = landing - state.FlightCenterOffset;
             state.Landed = true;
-            PlaySoundAt(landing, FloorSoundName, FloorSoundVolume);
-            Debug.Log("[Rebuild the School] " + state.Root.name + " came up out of a whirlpool at " + landing + ".");
+            Debug.Log("[Rebuild the School] " + state.Root.name + " came up out of a whirlpool at " + c + ".");
             return true;
         }
 
+        /// <summary>1 at the top of the ride (sink percent 1), 0 at the bottom (the floor percent).</summary>
+        private static float SinkDepth(float percent)
+        {
+            return Mathf.Clamp01((1f - percent) / (1f - WhirlpoolSinkFloor));
+        }
+
+        private static void FxMoveSinking(CarryState state, Vector3 centre)
+        {
+            state.FlightPosition = centre - state.FlightCenterOffset;
+            state.Body.MovePosition(state.FlightPosition);
+        }
+
+        /// <summary>
+        /// The cell a prop comes out at: a random one, as Whirlpool.Teleport picks it (the cells that are not off
+        /// limits; ConvertEntityUnsafeCells moves it to a safe cell of its room), without the cells that have hard
+        /// coverage when there are others, and never in an event spawner room.
+        /// </summary>
         private static bool TryPickWhirlpoolExit(EnvironmentController environment, out Cell exit)
         {
             exit = null;
-            List<Cell> cells = environment != null ? environment.AllTilesNoGarbage(false, false) : null;
-            if (cells == null || cells.Count == 0)
+            if (environment == null)
             {
                 return false;
             }
 
-            // AllTilesNoGarbage hands out a shared buffer: take one cell at once and keep nothing else.
+            // AllTilesNoGarbage hands out a shared buffer (the flood itself uses it): it is copied before it is changed.
+            List<Cell> cells = new List<Cell>(environment.AllTilesNoGarbage(false, false));
+            if (cells.Count == 0)
+            {
+                cells = new List<Cell>(environment.AllTilesNoGarbage(false, true));
+            }
+
+            for (int i = cells.Count - 1; i >= 0; i--)
+            {
+                if (IsEventSpawnerCell(cells[i]))
+                {
+                    cells.RemoveAt(i);
+                }
+            }
+
+            if (cells.Count == 0)
+            {
+                return false;
+            }
+
             List<Cell> pick = new List<Cell>(1);
             pick.Add(cells[UnityEngine.Random.Range(0, cells.Count)]);
             pick.ConvertEntityUnsafeCells();
-            exit = pick.Count > 0 ? pick[0] : null;
+            exit = pick.Count > 0 && !IsEventSpawnerCell(pick[0]) ? pick[0] : null;
             return exit != null;
+        }
+
+        /// <summary>A cell of an event spawner room (where the Student Shuffle crowd comes from): no prop goes there.</summary>
+        private static bool IsEventSpawnerCell(Cell cell)
+        {
+            return cell != null && !cell.Null && cell.room != null && cell.room.category == RoomCategory.EventSpawner;
+        }
+
+        /// <summary>True when the floor plan of the box (its centre and half size) lies over a cell of an event spawner room.</summary>
+        private static bool BoxTouchesEventSpawner(EnvironmentController environment, Vector3 centre, Vector3 half)
+        {
+            if (environment == null)
+            {
+                return false;
+            }
+
+            // The corners and the points between them, never more than a cell apart.
+            int stepsX = Mathf.Max(1, Mathf.CeilToInt(2f * half.x / WorldTileWidth));
+            int stepsZ = Mathf.Max(1, Mathf.CeilToInt(2f * half.z / WorldTileWidth));
+            for (int i = 0; i <= stepsX; i++)
+            {
+                for (int j = 0; j <= stepsZ; j++)
+                {
+                    Vector3 point = new Vector3(
+                        centre.x - half.x + 2f * half.x * i / stepsX,
+                        centre.y,
+                        centre.z - half.z + 2f * half.z * j / stepsZ);
+                    Cell cell;
+                    if (TryGetCell(environment, point, out cell) && IsEventSpawnerCell(cell))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         // --- Student Shuffle ---
@@ -1476,12 +1663,12 @@ namespace RebuildTheSchool
             if (!fx.Riding)
             {
                 // A prop whose gravity points up (Gravity Chaos) does not come down on a head.
-                if (fx.Pinned || fx.GravityFactor < 0.5f)
+                if (fx.Pinned || fx.GravityFactor < 0.5f || fx.RideBlocked)
                 {
                     return false;
                 }
 
-                StudentCrowd_Follower follower = FindFollowerUnder(c, half);
+                StudentCrowd_Follower follower = FindFollowerUnder(state.Environment, c, half);
                 if (follower == null)
                 {
                     return false;
@@ -1511,16 +1698,30 @@ namespace RebuildTheSchool
             float wanted = Mathf.Min(head.y + _crowdHeadOffset + half.y, top);
             float y = Mathf.MoveTowards(c.y, wanted, CrowdLiftSpeed * dt);
             Vector3 next = new Vector3(head.x + fx.RideOffset.x, y, head.z + fx.RideOffset.z);
+            if (BoxTouchesEventSpawner(state.Environment, next, half))
+            {
+                // The crowd goes into its spawner room (or comes out of it): no prop goes there. This one stays where
+                // it is, falls, and does not ride again.
+                fx.Riding = false;
+                fx.Follower = null;
+                fx.RideBlocked = true;
+                state.FlightVelocity = Vector3.zero;
+                Debug.Log("[Rebuild the School] The student walks into an event spawner room; " + state.Root.name
+                    + " does not follow and falls.");
+                return false;
+            }
+
             state.FlightPosition = next - state.FlightCenterOffset;
             state.FlightVelocity = Vector3.zero;
             state.Body.MovePosition(state.FlightPosition);
             return true;
         }
 
-        private StudentCrowd_Follower FindFollowerUnder(Vector3 c, Vector3 half)
+        private StudentCrowd_Follower FindFollowerUnder(EnvironmentController environment, Vector3 c, Vector3 half)
         {
-            // A prop as tall as the room cannot sit on a head under the ceiling.
-            if (_followers.Length == 0 || 2f * half.y + 0.2f >= FlightCeilingHeight)
+            // A prop as tall as the room cannot sit on a head under the ceiling; nor one that is at a spawner room.
+            if (_followers.Length == 0 || 2f * half.y + 0.2f >= FlightCeilingHeight
+                || BoxTouchesEventSpawner(environment, c, half))
             {
                 return null;
             }
@@ -1540,7 +1741,9 @@ namespace RebuildTheSchool
                 float dx = position.x - c.x;
                 float dz = position.z - c.z;
                 float sqr = dx * dx + dz * dz;
-                if (sqr >= bestSqr || c.y - half.y > position.y + _crowdHeadOffset + CrowdCatchAbove)
+                Cell followerCell;
+                if (sqr >= bestSqr || c.y - half.y > position.y + _crowdHeadOffset + CrowdCatchAbove
+                    || (TryGetCell(environment, position, out followerCell) && IsEventSpawnerCell(followerCell)))
                 {
                     continue;
                 }
@@ -2254,9 +2457,8 @@ namespace RebuildTheSchool
     }
 
     /// <summary>
-    /// The scale effects an event puts on a prop: the squash of Entity.Squish (vertical scale 0.5; during the
-    /// last 3 s sin((3 - t) * 16 pi) * 0.2 + 0.5, as Entity.Update does) and the uniform shrink / grow of a prop
-    /// that goes down a whirlpool. It restores the original scale and removes itself when nothing is left.
+    /// The squash of Entity.Squish on a prop (vertical scale 0.5; during the last 3 s sin((3 - t) * 16 pi) * 0.2 + 0.5,
+    /// as Entity.Update does). It restores the original scale and removes itself when the time is up.
     /// </summary>
     internal sealed class PropFx : MonoBehaviour
     {
@@ -2266,10 +2468,6 @@ namespace RebuildTheSchool
         private Vector3 _baseScale = Vector3.one;
         private bool _captured;
         private float _squishTime;
-        private float _uniform = 1f;
-        private float _growTime;
-        private float _growDuration = 1f;
-        private float _growFrom = 1f;
 
         public bool Squished
         {
@@ -2294,24 +2492,6 @@ namespace RebuildTheSchool
             Apply();
         }
 
-        public void SetUniform(float factor)
-        {
-            Capture();
-            _growTime = 0f;
-            _uniform = factor;
-            Apply();
-        }
-
-        public void BeginGrow(float startFactor, float seconds)
-        {
-            Capture();
-            _growFrom = startFactor;
-            _growDuration = Mathf.Max(0.01f, seconds);
-            _growTime = _growDuration;
-            _uniform = startFactor;
-            Apply();
-        }
-
         private void Capture()
         {
             if (!_captured)
@@ -2323,19 +2503,12 @@ namespace RebuildTheSchool
 
         private void Update()
         {
-            float dt = Time.deltaTime;
             if (_squishTime > 0f)
             {
-                _squishTime -= dt;
+                _squishTime -= Time.deltaTime;
             }
 
-            if (_growTime > 0f)
-            {
-                _growTime -= dt;
-                _uniform = _growTime <= 0f ? 1f : Mathf.Lerp(1f, _growFrom, _growTime / _growDuration);
-            }
-
-            if (_squishTime <= 0f && _growTime <= 0f && _uniform >= 0.999f)
+            if (_squishTime <= 0f)
             {
                 if (_captured)
                 {
@@ -2353,17 +2526,10 @@ namespace RebuildTheSchool
 
         private void Apply()
         {
-            float vertical = _uniform;
-            if (_squishTime > 0f)
-            {
-                float squash = _squishTime <= WobbleSeconds
-                    ? Mathf.Sin((WobbleSeconds - _squishTime) * 16f * Mathf.PI) * 0.2f + SquishFactor
-                    : SquishFactor;
-                vertical *= squash;
-            }
-
-            transform.localScale = new Vector3(
-                _baseScale.x * _uniform, _baseScale.y * vertical, _baseScale.z * _uniform);
+            float squash = _squishTime <= WobbleSeconds
+                ? Mathf.Sin((WobbleSeconds - _squishTime) * 16f * Mathf.PI) * 0.2f + SquishFactor
+                : SquishFactor;
+            transform.localScale = new Vector3(_baseScale.x, _baseScale.y * squash, _baseScale.z);
         }
     }
 }
