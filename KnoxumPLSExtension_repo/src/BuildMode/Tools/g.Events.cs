@@ -40,6 +40,12 @@ namespace RebuildTheSchool
         private const float HammerRadius = 4f;
         private const float DoorSquishSeconds = 10f;
         private const float SlabDescendEpsilon = 0.002f;
+        // A super door looks at the props within its own size plus this much (a prop's pivot may be off its middle).
+        private const float SuperDoorNearMargin = 8f;
+        // A prop that does not reach higher than this above the closed slab's underside stops nothing.
+        private const float SuperDoorPropMinHeight = 0.05f;
+        // A lever door's slab is brought back up to a prop only when it sits lower than the prop's top by more than this.
+        private const float SuperDoorHoldSlack = 0.01f;
 
         // Gravity Chaos.
         private const float GravityFlipRate = 1.6f;
@@ -118,6 +124,12 @@ namespace RebuildTheSchool
             "squishTime", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly FieldInfo SuperDoorSlabField = typeof(LockdownDoor).GetField(
             "door", BindingFlags.Instance | BindingFlags.NonPublic);
+        // The levers and buttons wired to a super door (private list, filled by GameButtonBase.SetUp) and the height
+        // its slab is moving to (private; DoorMover moves the slab there from either side and stops).
+        private static readonly FieldInfo SuperDoorLeversField = typeof(LockdownDoor).GetField(
+            "connectedLevers", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo SuperDoorTargetField = typeof(LockdownDoor).GetField(
+            "targetHeight", BindingFlags.Instance | BindingFlags.NonPublic);
         // The flippers the gravity event keeps in a private list (they are children of floor tiles, not of the event).
         private static readonly FieldInfo GravityFlippersField = typeof(GravityEvent).GetField(
             "flippers", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -180,8 +192,10 @@ namespace RebuildTheSchool
             public bool HasExit;
             public Vector3 ExitFloor;
             // Only the new whirlpool that was formed for this prop (no other whirlpool was left): it is closed again
-            // when the prop is out. The other whirlpools of the flood that a prop comes out of are not touched.
+            // when the prop is out.
             public Whirlpool ExitPool;
+            // The other whirlpool of the flood the prop comes out of: it closes as well once the prop is out.
+            public Whirlpool ExitOther;
 
             // Student Shuffle.
             public bool Riding;
@@ -202,6 +216,24 @@ namespace RebuildTheSchool
         {
             public Transform Root;
             public Renderer[] Renderers;
+            // The registry entry of a prop that lies in the world (its box is worked out from its meshes, so it is
+            // right while its renderers are culled); null for a prop in flight.
+            public ProxyProp Proxy;
+        }
+
+        /// <summary>What a super door remembers between frames (TickSuperDoors).</summary>
+        private sealed class SuperDoorState
+        {
+            // The slab's world box when it was first looked at and the height of its transform then: the slab only
+            // moves up and down, so its box now is that box moved by the change of height (no renderer bounds,
+            // which a culled slab reports wrongly).
+            public bool HasBox;
+            public Bounds Box;
+            public float BoxY;
+            public bool HasBottom;
+            public float Bottom;
+            // A lever door that is stopped on a prop and waits for it to be taken away.
+            public bool Waiting;
         }
 
         /// <summary>The footprint of a prop on the floor plane (world x/z).</summary>
@@ -275,7 +307,11 @@ namespace RebuildTheSchool
         private readonly List<SquishTarget> _squishTargets = new List<SquishTarget>();
         private readonly Dictionary<LockdownDoor, MeshRenderer> _superDoorSlabs =
             new Dictionary<LockdownDoor, MeshRenderer>();
-        private readonly Dictionary<LockdownDoor, float> _superDoorBottoms = new Dictionary<LockdownDoor, float>();
+        private readonly Dictionary<LockdownDoor, SuperDoorState> _superDoorStates =
+            new Dictionary<LockdownDoor, SuperDoorState>();
+        // The lever doors that wait on a prop now: their collider does not hide that prop from the aim.
+        private readonly List<LockdownDoor> _waitingDoors = new List<LockdownDoor>();
+        private EnvironmentController _superDoorsEnvironment;
         // Footprints of the props near any character (refreshed a few times per second) and, per character
         // and frame, the ones its next leg can touch.
         private readonly List<Vector3> _avoidNpcPositions = new List<Vector3>();
@@ -352,6 +388,16 @@ namespace RebuildTheSchool
             catch (Exception exception)
             {
                 LogEventError("squish", exception);
+            }
+
+            try
+            {
+                // Every frame (a door that closes comes down fast); a door at rest costs one position read.
+                TickSuperDoors();
+            }
+            catch (Exception exception)
+            {
+                LogEventError("super door squish", exception);
             }
 
             try
@@ -685,6 +731,15 @@ namespace RebuildTheSchool
                 EnsureLevelDoors(environment);
             }
 
+            if (_superDoorsEnvironment != environment)
+            {
+                // A new floor: nothing is remembered about the doors of the old one.
+                _superDoorsEnvironment = environment;
+                _superDoorStates.Clear();
+                _superDoorSlabs.Clear();
+                _waitingDoors.Clear();
+            }
+
             _superDoorList.Clear();
             for (int i = 0; i < _floorEvents.Count; i++)
             {
@@ -879,12 +934,12 @@ namespace RebuildTheSchool
             }
 
             _nextSquishTickTime = now + SquishTickInterval;
-            if (_balders.Length == 0 && _reflexes.Length == 0 && _superDoors.Length == 0)
+            if (_balders.Length == 0 && _reflexes.Length == 0)
             {
                 return;
             }
 
-            // One that fails is logged and does not stop the other two.
+            // One that fails is logged and does not stop the other.
             try
             {
                 TickBalders();
@@ -901,15 +956,6 @@ namespace RebuildTheSchool
             catch (Exception exception)
             {
                 LogEventError("Dr Reflex's hammer", exception);
-            }
-
-            try
-            {
-                TickSuperDoors();
-            }
-            catch (Exception exception)
-            {
-                LogEventError("super door squish", exception);
             }
         }
 
@@ -934,6 +980,7 @@ namespace RebuildTheSchool
                 SquishTarget target;
                 target.Root = state.Root;
                 target.Renderers = state.Renderers;
+                target.Proxy = null;
                 _squishTargets.Add(target);
             }
 
@@ -950,6 +997,7 @@ namespace RebuildTheSchool
                 SquishTarget target;
                 target.Root = proxy.Root;
                 target.Renderers = proxy.Renderers;
+                target.Proxy = proxy;
                 _squishTargets.Add(target);
             }
         }
@@ -1050,8 +1098,13 @@ namespace RebuildTheSchool
         }
 
         /// <summary>
-        /// A super door (LockdownDoor) that is closing on a prop squishes it and goes straight back up. This
-        /// runs whenever such a door closes, not only during the Lockdown event.
+        /// The super doors (LockdownDoor), looked at every frame (a slab comes down fast) whenever one is closing
+        /// or is waiting on a prop; a door at rest costs one position read. A prop may stand under a super door:
+        ///   - a door that an event closes (Lockdown) and that has no lever: the prop is squished, the sound of
+        ///     putting a prop down plays and the door goes straight back up (CrushUnderSuperDoor);
+        ///   - a door that a lever (or a button) works: it stops on top of the prop and stays stuck there until the
+        ///     prop is taken away, then closes the rest of the way (TickLeverDoor).
+        /// This runs whenever such a door closes, not only during the Lockdown event.
         /// </summary>
         private void TickSuperDoors()
         {
@@ -1064,43 +1117,268 @@ namespace RebuildTheSchool
                     continue;
                 }
 
-                Bounds slabBounds = slab.bounds;
-                float bottom = slabBounds.min.y;
-                float previous;
-                bool known = _superDoorBottoms.TryGetValue(door, out previous);
-                _superDoorBottoms[door] = bottom;
-                if (!known || previous - bottom < SlabDescendEpsilon)
+                SuperDoorState state;
+                if (!_superDoorStates.TryGetValue(door, out state))
+                {
+                    state = new SuperDoorState();
+                    _superDoorStates[door] = state;
+                }
+
+                Bounds slabBox;
+                float slabY;
+                SuperDoorSlabBox(slab, state, out slabBox, out slabY);
+                // The slab came down since the last time its height was written down. The height is written down
+                // again only when it changed by a visible bit, so a slab that creeps (a slowed environment) is
+                // caught after a few frames instead of never.
+                float bottom = slabBox.min.y;
+                bool descending = false;
+                if (!state.HasBottom)
+                {
+                    state.HasBottom = true;
+                    state.Bottom = bottom;
+                }
+                else if (Mathf.Abs(state.Bottom - bottom) >= SlabDescendEpsilon)
+                {
+                    descending = state.Bottom > bottom;
+                    state.Bottom = bottom;
+                }
+
+                if (!descending && !state.Waiting)
                 {
                     continue;
                 }
 
-                float near = slabBounds.extents.magnitude + SquishNearMargin;
-                CollectSquishTargets(slabBounds.center, near);
-                bool crushed = false;
-                for (int j = 0; j < _squishTargets.Count; j++)
+                if (IsLeverDoor(door))
                 {
-                    SquishTarget target = _squishTargets[j];
-                    Bounds prop = new Bounds();
-                    if (target.Root == null
-                        || (target.Root.position - slabBounds.center).sqrMagnitude > near * near
-                        || !CombinedBounds(target.Renderers, out prop) || !prop.Intersects(slabBounds))
-                    {
-                        continue;
-                    }
-
-                    crushed = true;
-                    if (SquishProp(target.Root, DoorSquishSeconds))
-                    {
-                        Debug.Log("[Rebuild the School] A closing super door squished " + target.Root.name + ".");
-                    }
+                    TickLeverDoor(door, state, slabBox, slabY);
                 }
-
-                if (crushed)
+                else if (descending)
                 {
-                    // LockdownDoor.Open while the slab is moving only changes its target height: it rises at once.
-                    door.Open(true, false);
+                    CrushUnderSuperDoor(door, slabBox);
                 }
             }
+        }
+
+        /// <summary>
+        /// The slab's world box now: the box taken when the door was first looked at, moved by the change of the
+        /// slab's height (it only moves up and down). Without a mesh to measure, the renderer's own bounds.
+        /// </summary>
+        private static void SuperDoorSlabBox(
+            MeshRenderer slab, SuperDoorState state, out Bounds box, out float slabY)
+        {
+            slabY = slab.transform.position.y;
+            if (!state.HasBox)
+            {
+                Bounds first;
+                if (!TryGetMeshWorldBounds(slab, out first))
+                {
+                    box = slab.bounds;
+                    return;
+                }
+
+                state.Box = first;
+                state.BoxY = slabY;
+                state.HasBox = true;
+            }
+
+            box = state.Box;
+            Vector3 centre = box.center;
+            centre.y += slabY - state.BoxY;
+            box.center = centre;
+        }
+
+        /// <summary>
+        /// A door with a lever or a button wired to it (LockdownDoor.connectedLevers). If the game does not have
+        /// that list or the slab's target height any more, no door counts as one: they all squish (the event door rule).
+        /// </summary>
+        private static bool IsLeverDoor(LockdownDoor door)
+        {
+            if (SuperDoorLeversField == null || SuperDoorTargetField == null || door == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                System.Collections.ICollection levers = SuperDoorLeversField.GetValue(door) as System.Collections.ICollection;
+                return levers != null && levers.Count > 0;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// A door that closes on its own (an event) catches the props under its slab: each is squished (Entity.Squish
+        /// for DoorSquishSeconds), the sound of putting a prop down plays at it, and the door goes straight back up
+        /// (LockdownDoor.Open while the slab is moving only changes its target height).
+        /// </summary>
+        private void CrushUnderSuperDoor(LockdownDoor door, Bounds slabBox)
+        {
+            float near = slabBox.extents.magnitude + SuperDoorNearMargin;
+            CollectSquishTargets(slabBox.center, near);
+            bool crushed = false;
+            for (int j = 0; j < _squishTargets.Count; j++)
+            {
+                SquishTarget target = _squishTargets[j];
+                Bounds prop = new Bounds();
+                if (target.Root == null
+                    || (target.Root.position - slabBox.center).sqrMagnitude > near * near
+                    || !SquishTargetBox(target, out prop) || !prop.Intersects(slabBox))
+                {
+                    continue;
+                }
+
+                crushed = true;
+                bool fresh = SquishProp(target.Root, DoorSquishSeconds);
+                PlaySoundAt(prop.center, FloorSoundName, FloorSoundVolume);
+                if (fresh)
+                {
+                    Debug.Log("[Rebuild the School] A closing super door squished " + target.Root.name
+                        + " and went back up.");
+                }
+            }
+
+            if (crushed)
+            {
+                door.Open(true, false);
+            }
+        }
+
+        /// <summary>
+        /// A door that a lever works never squishes anything. Closing on a prop it comes to rest on the prop's top
+        /// (the slab's target height is held there, so the slab stops, or comes back up if the prop arrived under
+        /// it) and the door stays stuck for as long as the prop is under it. Once the prop is gone it closes the
+        /// rest of the way (Shut again); a lever that opens the door meanwhile is not held back.
+        /// </summary>
+        private void TickLeverDoor(LockdownDoor door, SuperDoorState state, Bounds slabBox, float slabY)
+        {
+            // Where the slab's underside is, measured from the slab's own height: constant, whatever the height.
+            float offset = slabBox.min.y - slabY;
+            float top = 0f;
+            Transform holder = null;
+            bool under = !door.open && TopOfPropUnderSuperDoor(slabBox, offset, out top, out holder);
+            if (under)
+            {
+                float hold = Mathf.Clamp(top - offset, 0f, Mathf.Max(0f, door.originalHeight));
+                if (slabY < hold - SuperDoorHoldSlack)
+                {
+                    // The slab is lower than the prop's top (the prop came under it): it comes up to rest on it.
+                    // Shut also starts the slab if it stands still.
+                    door.Shut();
+                }
+
+                SetSuperDoorTarget(door, hold);
+                if (!state.Waiting)
+                {
+                    state.Waiting = true;
+                    if (!_waitingDoors.Contains(door))
+                    {
+                        _waitingDoors.Add(door);
+                    }
+
+                    Debug.Log("[Rebuild the School] A lever door stopped on " + (holder != null ? holder.name : "a prop")
+                        + " and stays stuck until it is taken away.");
+                }
+
+                return;
+            }
+
+            if (!state.Waiting)
+            {
+                return;
+            }
+
+            state.Waiting = false;
+            _waitingDoors.Remove(door);
+            if (!door.open)
+            {
+                // The prop is gone: the door closes the rest of the way.
+                door.Shut();
+            }
+
+            Debug.Log("[Rebuild the School] The prop is gone from under a lever door; "
+                + (door.open ? "the door is open." : "it closes."));
+        }
+
+        /// <summary>
+        /// The top of the highest prop under the slab: one whose footprint overlaps the slab's and that reaches
+        /// higher than the closed slab's underside. Props in flight count; a prop that is carried does not.
+        /// </summary>
+        private bool TopOfPropUnderSuperDoor(
+            Bounds slabBox, float offset, out float top, out Transform holder)
+        {
+            top = 0f;
+            holder = null;
+            float near = slabBox.extents.magnitude + SuperDoorNearMargin;
+            CollectSquishTargets(slabBox.center, near);
+            for (int j = 0; j < _squishTargets.Count; j++)
+            {
+                SquishTarget target = _squishTargets[j];
+                Bounds prop = new Bounds();
+                if (target.Root == null
+                    || (target.Root.position - slabBox.center).sqrMagnitude > near * near
+                    || !SquishTargetBox(target, out prop)
+                    || prop.max.x <= slabBox.min.x || prop.min.x >= slabBox.max.x
+                    || prop.max.z <= slabBox.min.z || prop.min.z >= slabBox.max.z
+                    || prop.max.y <= offset + SuperDoorPropMinHeight)
+                {
+                    continue;
+                }
+
+                if (holder == null || prop.max.y > top)
+                {
+                    top = prop.max.y;
+                    holder = target.Root;
+                }
+            }
+
+            return holder != null;
+        }
+
+        /// <summary>
+        /// The world box of a squish target: a prop of the registry has its box worked out from its meshes (kept
+        /// until it moves), which is right even while its renderers are switched off by the game's culling;
+        /// a prop in flight has the box of its renderers.
+        /// </summary>
+        private static bool SquishTargetBox(SquishTarget target, out Bounds box)
+        {
+            box = new Bounds();
+            if (target.Proxy != null && ProxyBox(target.Proxy, out box))
+            {
+                return true;
+            }
+
+            return CombinedBounds(target.Renderers, out box);
+        }
+
+        /// <summary>The slab of a lever door moves to this height (LockdownDoor.targetHeight) and stops there.</summary>
+        private static void SetSuperDoorTarget(LockdownDoor door, float height)
+        {
+            try
+            {
+                SuperDoorTargetField.SetValue(door, height);
+            }
+            catch (Exception exception)
+            {
+                LogEventError("lever door", exception);
+            }
+        }
+
+        /// <summary>
+        /// True for a collider of a lever door that is stuck on a prop (see IsIgnoredForAim): while such a door
+        /// is stuck its collider is switched on and would hide the prop under it from the aim.
+        /// </summary>
+        private bool FxIsWaitingDoorCollider(Collider collider)
+        {
+            if (_waitingDoors.Count == 0 || collider == null)
+            {
+                return false;
+            }
+
+            LockdownDoor door = collider.GetComponentInParent<LockdownDoor>();
+            return door != null && _waitingDoors.Contains(door);
         }
 
         private MeshRenderer SuperDoorSlab(LockdownDoor door)
@@ -1286,6 +1564,8 @@ namespace RebuildTheSchool
             fx.Sinking = false;
             fx.SinkRising = false;
             fx.SinkPool = null;
+            // The other whirlpool of the flood is left as it is (only a pool made for this prop is closed).
+            fx.ExitOther = null;
             Whirlpool exit = fx.ExitPool;
             fx.ExitPool = null;
             try
@@ -1305,8 +1585,8 @@ namespace RebuildTheSchool
 
         /// <summary>
         /// +1 = gravity pulls down, -1 = up. A flipper the prop touches is used up (GravityEvent.DestroyFlipper,
-        /// like the player and the characters do) and turns the prop's gravity over smoothly; when the event
-        /// ends gravity returns to normal.
+        /// like the player and the characters do) and turns the prop over at once (FxTouchFlippers); when the
+        /// event ends gravity returns to normal, smoothly.
         /// </summary>
         private float FxGravityScale(CarryState state, Vector3 c, Vector3 half, float dt)
         {
@@ -1362,6 +1642,10 @@ namespace RebuildTheSchool
                 }
 
                 fx.GravityTarget = fx.GravityTarget > 0f ? -1f : 1f;
+                // At once: gravity and the pose go to the new side in this very step (like Entity.Flip of a
+                // character), no ramp. The ramps in FxGravityScale only carry the prop back when the event ends.
+                fx.GravityFactor = fx.GravityTarget;
+                fx.RollAngle = fx.GravityTarget < 0f ? 180f : 0f;
                 fx.KeepLanding = true;
                 _flippers[i] = null;
                 _flipperBounds[i] = new Bounds();
@@ -1743,9 +2027,9 @@ namespace RebuildTheSchool
         /// <summary>
         /// What Whirlpool.Update does when it catches an entity, for a prop: the pool takes this one prop and
         /// closes (layer 19, Close(): it shrinks and is destroyed), so a pool takes one prop. The prop comes out of
-        /// another whirlpool of the flood, picked at random; that pool stays open. Only when no other whirlpool is
-        /// left does it happen as in Whirlpool.Teleport: a new whirlpool forms at a random cell and closes again
-        /// when the prop is out.
+        /// another whirlpool of the flood, picked at random; that pool closes too once the prop is out (as the new
+        /// whirlpool of Whirlpool.Teleport does). Only when no other whirlpool is left does it happen as in
+        /// Whirlpool.Teleport: a new whirlpool forms at a random cell and closes again when the prop is out.
         /// </summary>
         private void FxBeginSink(CarryState state, EventFx fx, Whirlpool pool, Vector3 centre)
         {
@@ -1757,16 +2041,19 @@ namespace RebuildTheSchool
             fx.KeepLanding = true;
             fx.HasExit = false;
             fx.ExitPool = null;
+            fx.ExitOther = null;
             StopFlightSound(state);
             CloseWhirlpool(pool);
 
             string exitKind = null;
             Vector3 otherFloor;
+            Whirlpool otherPool;
             Cell exit;
-            if (TryPickOtherWhirlpool(state.Environment, pool, out otherFloor))
+            if (TryPickOtherWhirlpool(state.Environment, pool, out otherFloor, out otherPool))
             {
                 fx.HasExit = true;
                 fx.ExitFloor = otherFloor;
+                fx.ExitOther = otherPool;
                 exitKind = "another whirlpool";
             }
             else if (TryPickWhirlpoolExit(state.Environment, out exit))
@@ -1785,10 +2072,12 @@ namespace RebuildTheSchool
         /// One of the other whirlpools of the flood, at random: not the one that took the prop, none that is
         /// closing (layer 19: used up, or the exit of a character) and none in an event spawner room.
         /// </summary>
-        private bool TryPickOtherWhirlpool(EnvironmentController environment, Whirlpool taken, out Vector3 floor)
+        private bool TryPickOtherWhirlpool(
+            EnvironmentController environment, Whirlpool taken, out Vector3 floor, out Whirlpool pool)
         {
             floor = Vector3.zero;
-            List<Vector3> options = new List<Vector3>();
+            pool = null;
+            List<Whirlpool> options = new List<Whirlpool>();
             for (int i = 0; i < _whirlpools.Length; i++)
             {
                 Whirlpool other = _whirlpools[i];
@@ -1798,14 +2087,13 @@ namespace RebuildTheSchool
                     continue;
                 }
 
-                Vector3 position = other.transform.position;
                 Cell cell;
-                if (TryGetCell(environment, position, out cell) && IsEventSpawnerCell(cell))
+                if (TryGetCell(environment, other.transform.position, out cell) && IsEventSpawnerCell(cell))
                 {
                     continue;
                 }
 
-                options.Add(position);
+                options.Add(other);
             }
 
             if (options.Count == 0)
@@ -1813,7 +2101,8 @@ namespace RebuildTheSchool
                 return false;
             }
 
-            floor = options[UnityEngine.Random.Range(0, options.Count)];
+            pool = options[UnityEngine.Random.Range(0, options.Count)];
+            floor = pool.transform.position;
             return true;
         }
 
@@ -1932,15 +2221,24 @@ namespace RebuildTheSchool
                 return true;
             }
 
-            // Out: a whirlpool that was formed for this prop closes (newPool.StartClose()); the prop lands where it stands.
+            // Out: a whirlpool that was formed for this prop closes (newPool.StartClose()), and so does the other
+            // whirlpool of the flood it came up out of (unless it is closing already: two Close() would fight over
+            // its scale); the prop lands where it stands.
             Whirlpool exit = fx.ExitPool;
+            Whirlpool other = fx.ExitOther;
             fx.ExitPool = null;
+            fx.ExitOther = null;
             fx.Sinking = false;
             fx.SinkRising = false;
             fx.SinkPool = null;
             if (exit != null)
             {
                 exit.StartClose();
+            }
+
+            if (other != null && other.gameObject.layer != WhirlpoolClosingLayer)
+            {
+                CloseWhirlpool(other);
             }
 
             state.Landed = true;

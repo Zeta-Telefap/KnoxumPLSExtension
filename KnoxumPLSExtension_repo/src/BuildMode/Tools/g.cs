@@ -1381,7 +1381,8 @@ namespace RebuildTheSchool
                 }
             }
 
-            return false;
+            // A lever door that is stuck on a prop must not hide that prop: it could never be taken out from under it.
+            return FxIsWaitingDoorCollider(collider);
         }
 
         private bool IsAirborneRoot(Transform root)
@@ -3280,7 +3281,7 @@ namespace RebuildTheSchool
                     float plane = k * WorldTileWidth;
                     if (plane - FlightWallHalfThickness - half.x < c.x && c.x < plane + FlightWallHalfThickness + half.x
                         && j * WorldTileWidth - half.z < c.z && c.z < (j + 1) * WorldTileWidth + half.z
-                        && _flightDoors.ContainsKey(FlightEdgeKey(k - 1, j, 0)))
+                        && FlightDoorBlocksSettling(FlightEdgeKey(k - 1, j, 0)))
                     {
                         return true;
                     }
@@ -3298,10 +3299,35 @@ namespace RebuildTheSchool
                     float plane = m * WorldTileWidth;
                     if (plane - FlightWallHalfThickness - half.z < c.z && c.z < plane + FlightWallHalfThickness + half.z
                         && i * WorldTileWidth - half.x < c.x && c.x < (i + 1) * WorldTileWidth + half.x
-                        && _flightDoors.ContainsKey(FlightEdgeKey(i, m - 1, 1)))
+                        && FlightDoorBlocksSettling(FlightEdgeKey(i, m - 1, 1)))
                     {
                         return true;
                     }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// True when a door or window of this edge would be left with the prop in it. A super door (LockdownDoor)
+        /// is not one: closing on a prop it squishes it and goes back up, or (a lever door) waits on it
+        /// (TickSuperDoors in g.Events.cs), so a prop may be put in its doorway.
+        /// </summary>
+        private bool FlightDoorBlocksSettling(long key)
+        {
+            List<FlightDoor> list;
+            if (!_flightDoors.TryGetValue(key, out list))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < list.Count; i++)
+            {
+                FlightDoor entry = list[i];
+                if (entry != null && !(entry.Door is LockdownDoor))
+                {
+                    return true;
                 }
             }
 
