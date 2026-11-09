@@ -887,6 +887,12 @@ namespace RebuildTheSchool
                 return;
             }
 
+            // A crane carries the prop through the windows round its output cell: they stay whole.
+            if (state.Fx != null && state.Fx.Craned)
+            {
+                return;
+            }
+
             EnsureLevelDoors(state.Environment);
             if (_levelWindows.Length == 0 || _levelDoorsEnvironment != state.Environment)
             {
@@ -2690,6 +2696,7 @@ namespace RebuildTheSchool
                 try
                 {
                     RefreshFlightDoors(state.Environment);
+                    EnsureLevelFixtures(state.Environment);
                     StepFlight(state, dt);
                 }
                 catch (Exception exception)
@@ -2739,8 +2746,12 @@ namespace RebuildTheSchool
             // Flood: a whirlpool catches the prop's own speed (v) and pulls it in; the pull is a drift on top of
             // the velocity, taken off again after the step.
             Vector3 drift = FxDrift(state, c, half, dt, ref v);
+            // Conveyor belts: a prop that stands on a running belt is carried along; the push is a drift too, and
+            // it is not the speed the prop hits a character with.
+            Vector3 belt = FxBeltDrift(state, c, half, dt);
+            drift += belt;
             v += drift;
-            Vector3 impactVelocity = v;
+            Vector3 impactVelocity = v - belt;
             float remaining = 1f;
             bool settled = false;
             bool landed = false;
@@ -2766,7 +2777,7 @@ namespace RebuildTheSchool
                 if (hit.Kind == FlightHitKind.Floor && gravityScale >= GravityLandFactor)
                 {
                     c.y = state.FlightFloorY + half.y;
-                    if (FxHoldsOnFloor(state))
+                    if (FxHoldsOnFloor(state) || FxBeltLanding(state, c, half, dt, ref v, ref drift))
                     {
                         // In a whirlpool the prop slides along the floor to the middle instead of settling: only
                         // the vertical speed ends here, the rest of the step goes on (a prop that already lies on
@@ -2825,6 +2836,10 @@ namespace RebuildTheSchool
             if (state.Thrown)
             {
                 HitNpcs(state, stepStart, c, half, impactVelocity, ref v);
+                if (!landed && !pinned)
+                {
+                    HitCranes(state, stepStart, c, half);
+                }
             }
 
             if (landed)
@@ -3699,6 +3714,17 @@ namespace RebuildTheSchool
                 for (int i = 0; i < npcs.Count; i++)
                 {
                     NPC npc = npcs[i];
+                    if (IsHammerer(npc))
+                    {
+                        // A boulder and Dr Reflex are not pushed: they hammer the prop at once (g.Events.cs).
+                        if (HitHammerer(state, npc, start, end, half, flat))
+                        {
+                            hit = true;
+                        }
+
+                        continue;
+                    }
+
                     Entity entity;
                     Bounds bounds;
                     if (!TryGetPushableNpc(npc, out entity, out bounds)

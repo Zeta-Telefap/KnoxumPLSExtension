@@ -47,6 +47,19 @@ namespace RebuildTheSchool
         // A lever door's slab is brought back up to a prop only when it sits lower than the prop's top by more than this.
         private const float SuperDoorHoldSlack = 0.01f;
 
+        // Conveyor belts (BeltManager): a prop whose underside is this near the floor stands on it; a belt that is
+        // slower than this carries nothing.
+        private const float BeltFloorTolerance = 0.25f;
+        private const float BeltMinSpeed = 0.5f;
+
+        // Cranes (CraneController): the heights and waits of its own CarryEntityToTarget.
+        private const float CraneLowHeight = 5f;
+        private const float CraneHighHeight = 12.5f;
+        private const float CraneClawSeconds = 1.5f;
+        private const float CranePauseSeconds = 0.5f;
+        private const float CraneLiftSpeedFallback = 3f;
+        private const float CraneDropSpeedFallback = 10f;
+
         // Gravity Chaos.
         private const float GravityFlipRate = 1.6f;
         private const float GravityRollRate = 360f;
@@ -140,6 +153,38 @@ namespace RebuildTheSchool
         private static readonly FieldInfo EnvironmentEventsField = typeof(EnvironmentController).GetField(
             "events", BindingFlags.Instance | BindingFlags.NonPublic);
 
+        // A conveyor belt's MovementModifier: its movementAddend (direction * speed) is the push the game gives a
+        // character that stands on the belt, zero while the belt is stopped.
+        private static readonly FieldInfo BeltMoveModField = typeof(BeltManager).GetField(
+            "moveMod", BindingFlags.Instance | BindingFlags.NonPublic);
+        // What CraneController.EntityTriggerEnter and CarryEntityToTarget use (all private).
+        private static readonly FieldInfo CraneBalloonField = typeof(CraneController).GetField(
+            "balloon", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo CraneNavigatorField = typeof(CraneController).GetField(
+            "navigator", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo CraneRoomFunctionField = typeof(CraneController).GetField(
+            "craneRoom", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo CraneAudioField = typeof(CraneController).GetField(
+            "audioManager", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo CraneRunningLoopField = typeof(CraneController).GetField(
+            "audRunningLoop", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo CraneLiftingLoopField = typeof(CraneController).GetField(
+            "audLiftingLoop", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo CraneThunkField = typeof(CraneController).GetField(
+            "audThunk", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo CraneLiftSpeedField = typeof(CraneController).GetField(
+            "liftSpeed", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo CraneDropSpeedField = typeof(CraneController).GetField(
+            "dropSpeed", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo CraneCarryingField = typeof(CraneController).GetField(
+            "carryingEntity", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly MethodInfo CraneCloseClawMethod = typeof(CraneController).GetMethod(
+            "CloseClaw", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly MethodInfo CraneOpenClawMethod = typeof(CraneController).GetMethod(
+            "OpenClaw", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly MethodInfo CraneTargetCellMethod = typeof(CraneController).GetMethod(
+            "GetTargetCellFromOutputCell", BindingFlags.Instance | BindingFlags.NonPublic);
+
         // Whirlpool.Close() (private) shrinks the pool and destroys it; Whirlpool.Update starts it when it catches
         // an entity, so a pool that has caught a prop does the same.
         private static readonly MethodInfo WhirlpoolCloseMethod = typeof(Whirlpool).GetMethod(
@@ -207,18 +252,50 @@ namespace RebuildTheSchool
             // A prop that was let go at the edge of an event spawner room does not ride again.
             public bool RideBlocked;
 
+            // Conveyor belts: the prop stands on a running belt and is carried by it until it is off the belt.
+            public bool OnBelt;
+            public bool BeltLogged;
+
+            // Cranes: a crane holds the prop in its claw (the crane's own sequence runs, FxStepCrane follows it).
+            public bool Craned;
+            public CraneCarry Carry;
+
             // A prop that went through an event settles where it ends up, like a thrown one.
             public bool KeepLanding;
             public float SpecialSeconds;
+        }
+
+        /// <summary>A prop in a crane's claw. CraneCarryProp (the crane's sequence) keeps the height up to date.</summary>
+        private sealed class CraneCarry
+        {
+            public CraneController Crane;
+            // The height of the claw above the floor, as CraneController.CarryEntityToTarget counts it (Entity
+            // height: 5 hanging, 12.5 lifted).
+            public float Height;
+            // The claw opened: from here on the prop falls, at this speed to begin with (the crane's dropSpeed).
+            public bool Released;
+            public float DropSpeed;
+        }
+
+        /// <summary>The private parts of one crane that its sequence needs, taken once.</summary>
+        private sealed class CraneHandle
+        {
+            public CraneController Crane;
+            public Balloon Balloon;
+            public Navigator Navigator;
+            public CraneRoomFunction Room;
+            public AudioManager Audio;
+            public SoundObject RunningLoop;
+            public SoundObject LiftingLoop;
+            public SoundObject Thunk;
+            public float LiftSpeed;
+            public float DropSpeed;
         }
 
         private struct SquishTarget
         {
             public Transform Root;
             public Renderer[] Renderers;
-            // The registry entry of a prop that lies in the world (its box is worked out from its meshes, so it is
-            // right while its renderers are culled); null for a prop in flight.
-            public ProxyProp Proxy;
         }
 
         /// <summary>What a super door remembers between frames (TickSuperDoors).</summary>
@@ -312,6 +389,12 @@ namespace RebuildTheSchool
         // The lever doors that wait on a prop now: their collider does not hide that prop from the aim.
         private readonly List<LockdownDoor> _waitingDoors = new List<LockdownDoor>();
         private EnvironmentController _superDoorsEnvironment;
+        // The conveyor belts and the cranes of the floor (EnsureLevelFixtures), looked for once per floor.
+        private BeltManager[] _belts = new BeltManager[0];
+        private CraneController[] _cranes = new CraneController[0];
+        private EnvironmentController _fixturesEnvironment;
+        private readonly Dictionary<CraneController, CraneHandle> _craneHandles =
+            new Dictionary<CraneController, CraneHandle>();
         // Footprints of the props near any character (refreshed a few times per second) and, per character
         // and frame, the ones its next leg can touch.
         private readonly List<Vector3> _avoidNpcPositions = new List<Vector3>();
@@ -844,6 +927,526 @@ namespace RebuildTheSchool
         }
 
         // ------------------------------------------------------------------------------------------
+        // Conveyor belts and cranes
+        // ------------------------------------------------------------------------------------------
+
+        /// <summary>
+        /// The conveyor belts (BeltManager) and the cranes (CraneController) of the floor, looked up once per floor,
+        /// the first time a prop is in flight on it. FindObjectsOfType walks the whole scene: never every frame, and
+        /// never while the level is generated (no prop flies then).
+        /// </summary>
+        private void EnsureLevelFixtures(EnvironmentController environment)
+        {
+            if (environment == null || environment == _fixturesEnvironment)
+            {
+                return;
+            }
+
+            _fixturesEnvironment = environment;
+            _craneHandles.Clear();
+            _belts = FindObjectsOfType<BeltManager>();
+            _cranes = FindObjectsOfType<CraneController>();
+            if (_belts.Length > 0 || _cranes.Length > 0)
+            {
+                Debug.Log("[Rebuild the School] This floor has " + _belts.Length + " conveyor belt(s) and "
+                    + _cranes.Length + " crane(s).");
+            }
+        }
+
+        /// <summary>
+        /// The push of the running belts under the prop: BeltManager's movementAddend (direction * speed, the push
+        /// the game adds to a character's movement on a belt; zero while a belt is stopped). A belt acts on the
+        /// prop's footprint at any height, as its trigger acts on a character. False when no running belt is under the
+        /// prop, or when something (a wall, a closed door, another prop) stands in the way of the push: the prop then
+        /// does not ride on and lands. A door that gives way (a swinging one) opens for the prop here, as in flight.
+        /// </summary>
+        private bool FxBeltVelocity(CarryState state, Vector3 c, Vector3 half, float dt, out Vector3 velocity)
+        {
+            velocity = Vector3.zero;
+            if (_belts.Length == 0 || BeltMoveModField == null)
+            {
+                return false;
+            }
+
+            Bounds box = new Bounds(c, half * 2f);
+            Vector3 sum = Vector3.zero;
+            for (int i = 0; i < _belts.Length; i++)
+            {
+                BeltManager belt = _belts[i];
+                BoxCollider zone = belt != null && belt.isActiveAndEnabled ? belt.BoxCollider : null;
+                if (zone == null || !zone.enabled)
+                {
+                    continue;
+                }
+
+                Bounds area = zone.bounds;
+                if (box.max.x <= area.min.x || box.min.x >= area.max.x
+                    || box.max.z <= area.min.z || box.min.z >= area.max.z)
+                {
+                    continue;
+                }
+
+                MovementModifier push = BeltMoveModField.GetValue(belt) as MovementModifier;
+                if (push != null)
+                {
+                    sum.x += push.movementAddend.x;
+                    sum.z += push.movementAddend.z;
+                }
+            }
+
+            if (sum.magnitude < BeltMinSpeed)
+            {
+                return false;
+            }
+
+            FlightHit blocker;
+            if (FindFlightHit(state, c, half, sum * (dt * 1.5f), out blocker))
+            {
+                return false;
+            }
+
+            velocity = sum;
+            return true;
+        }
+
+        /// <summary>
+        /// Conveyor belts, at the start of a flight step: a prop that stands on the floor over a running belt is
+        /// carried by it. The push is a drift on top of the velocity (the caller adds it and takes it off again after
+        /// the step, like the whirlpool's pull). While it lasts the prop does not settle (FxHoldsOnFloor): it rides
+        /// until it is completely off the belts and lands where it is.
+        /// </summary>
+        private Vector3 FxBeltDrift(CarryState state, Vector3 c, Vector3 half, float dt)
+        {
+            EventFx fx = state.Fx;
+            if (fx == null)
+            {
+                return Vector3.zero;
+            }
+
+            fx.OnBelt = false;
+            if (_belts.Length == 0 || c.y - half.y > state.FlightFloorY + BeltFloorTolerance)
+            {
+                return Vector3.zero;
+            }
+
+            try
+            {
+                Vector3 velocity;
+                if (!FxBeltVelocity(state, c, half, dt, out velocity))
+                {
+                    return Vector3.zero;
+                }
+
+                fx.OnBelt = true;
+                fx.KeepLanding = true;
+                LogOnBelt(state, fx);
+                return velocity;
+            }
+            catch (Exception exception)
+            {
+                LogEventError("conveyor belt", exception);
+                return Vector3.zero;
+            }
+        }
+
+        /// <summary>
+        /// A prop that comes down on a running belt does not settle: it stops against the belt (a landing stops a
+        /// prop too) and the belt takes it from there (FxBeltDrift from the next step on).
+        /// </summary>
+        private bool FxBeltLanding(
+            CarryState state, Vector3 c, Vector3 half, float dt, ref Vector3 v, ref Vector3 drift)
+        {
+            EventFx fx = state.Fx;
+            if (fx == null || _belts.Length == 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                Vector3 velocity;
+                if (!FxBeltVelocity(state, c, half, dt, out velocity))
+                {
+                    return false;
+                }
+
+                fx.OnBelt = true;
+                fx.KeepLanding = true;
+                v.x = drift.x + velocity.x;
+                v.z = drift.z + velocity.z;
+                drift.x += velocity.x;
+                drift.z += velocity.z;
+                LogOnBelt(state, fx);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                LogEventError("conveyor belt", exception);
+                return false;
+            }
+        }
+
+        private static void LogOnBelt(CarryState state, EventFx fx)
+        {
+            if (fx.BeltLogged)
+            {
+                return;
+            }
+
+            fx.BeltLogged = true;
+            Debug.Log("[Rebuild the School] " + state.Root.name
+                + " is on a running conveyor belt and rides it until it is completely off the belts.");
+        }
+
+        // --- cranes ---
+
+        private CraneHandle GetCraneHandle(CraneController crane)
+        {
+            CraneHandle handle;
+            if (_craneHandles.TryGetValue(crane, out handle))
+            {
+                return handle;
+            }
+
+            handle = BuildCraneHandle(crane);
+            _craneHandles[crane] = handle;
+            return handle;
+        }
+
+        /// <summary>The private parts of a crane that its sequence needs; null when this game's crane does not have them.</summary>
+        private static CraneHandle BuildCraneHandle(CraneController crane)
+        {
+            try
+            {
+                if (CraneBalloonField == null || CraneNavigatorField == null || CraneRoomFunctionField == null
+                    || CraneAudioField == null || CraneRunningLoopField == null || CraneLiftingLoopField == null
+                    || CraneThunkField == null || CraneCarryingField == null || CraneCloseClawMethod == null
+                    || CraneOpenClawMethod == null || CraneTargetCellMethod == null)
+                {
+                    return null;
+                }
+
+                CraneHandle handle = new CraneHandle();
+                handle.Crane = crane;
+                handle.Balloon = CraneBalloonField.GetValue(crane) as Balloon;
+                handle.Navigator = CraneNavigatorField.GetValue(crane) as Navigator;
+                handle.Room = CraneRoomFunctionField.GetValue(crane) as CraneRoomFunction;
+                handle.Audio = CraneAudioField.GetValue(crane) as AudioManager;
+                handle.RunningLoop = CraneRunningLoopField.GetValue(crane) as SoundObject;
+                handle.LiftingLoop = CraneLiftingLoopField.GetValue(crane) as SoundObject;
+                handle.Thunk = CraneThunkField.GetValue(crane) as SoundObject;
+                handle.LiftSpeed = ReadFloatField(CraneLiftSpeedField, crane, CraneLiftSpeedFallback);
+                handle.DropSpeed = ReadFloatField(CraneDropSpeedField, crane, CraneDropSpeedFallback);
+                if (handle.Balloon == null || handle.Navigator == null || handle.Room == null
+                    || handle.Audio == null || handle.Balloon.Entity == null)
+                {
+                    return null;
+                }
+
+                return handle;
+            }
+            catch (Exception exception)
+            {
+                LogEventError("crane", exception);
+                return null;
+            }
+        }
+
+        private static float ReadFloatField(FieldInfo field, object owner, float fallback)
+        {
+            try
+            {
+                if (field != null)
+                {
+                    return (float)field.GetValue(owner);
+                }
+            }
+            catch (Exception)
+            {
+                // The fallback is the value the game ships with.
+            }
+
+            return fallback;
+        }
+
+        private static bool IsCraneBusy(CraneHandle handle)
+        {
+            try
+            {
+                return (bool)CraneCarryingField.GetValue(handle.Crane);
+            }
+            catch (Exception)
+            {
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// A thrown prop that flies into a crane's claw is grabbed (CraneController.EntityTriggerEnter does the same
+        /// for a character): the crane lifts it, carries it to the output of the conveyor belt and lets go. Nothing
+        /// pushes the crane. The crane takes what is in its room, when it is free, by the same trigger the game uses;
+        /// the swept path of the step is tested, so no speed gets past.
+        /// </summary>
+        private void HitCranes(CarryState state, Vector3 start, Vector3 end, Vector3 half)
+        {
+            EventFx fx = state.Fx;
+            if (_cranes.Length == 0 || fx == null || fx.Craned || fx.Pinned)
+            {
+                return;
+            }
+
+            try
+            {
+                Cell cell;
+                if (!TryGetCell(state.Environment, end, out cell))
+                {
+                    return;
+                }
+
+                for (int i = 0; i < _cranes.Length; i++)
+                {
+                    CraneController crane = _cranes[i];
+                    if (crane == null || !crane.isActiveAndEnabled)
+                    {
+                        continue;
+                    }
+
+                    CraneHandle handle = GetCraneHandle(crane);
+                    if (handle == null || IsCraneBusy(handle) || cell.room != handle.Room.Room)
+                    {
+                        continue;
+                    }
+
+                    Collider trigger = handle.Balloon.Entity.Trigger;
+                    if (trigger == null || !trigger.enabled)
+                    {
+                        continue;
+                    }
+
+                    Bounds volume = trigger.bounds;
+                    volume.Expand(half * 2f);
+                    float entry;
+                    if (SegmentHitsBounds(start, end, volume, out entry) && BeginCraneGrab(state, handle))
+                    {
+                        return;
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                LogEventError("crane grab", exception);
+            }
+        }
+
+        /// <summary>
+        /// What CraneController.EntityTriggerEnter does when it takes a character, for a prop: an output cell of the
+        /// room and the cell beside it, the crane stops wandering, finds its way and closes the claw. The rest is
+        /// CraneCarryProp, a copy of CarryEntityToTarget that carries the prop instead of an entity.
+        /// </summary>
+        private bool BeginCraneGrab(CarryState state, CraneHandle handle)
+        {
+            Cell output = handle.Room.GetRandomOutputCell();
+            Cell target = output != null
+                ? CraneTargetCellMethod.Invoke(handle.Crane, new object[] { output }) as Cell
+                : null;
+            if (output == null || target == null)
+            {
+                return false;
+            }
+
+            EventFx fx = state.Fx;
+            CraneCarry carry = new CraneCarry();
+            carry.Crane = handle.Crane;
+            carry.Height = CraneLowHeight;
+            carry.DropSpeed = handle.DropSpeed;
+            try
+            {
+                CraneCarryingField.SetValue(handle.Crane, true);
+                handle.Balloon.enabled = false;
+                handle.Balloon.Entity.UpdateInternalMovement(Vector3.zero);
+                handle.Navigator.FindPath(target.CenterWorldPosition);
+                handle.Navigator.ManuallyAppendDestinationPoints(output.CenterWorldPosition);
+                handle.Audio.FlushQueue(true);
+                handle.Audio.SetLoop(true);
+                handle.Audio.PlaySingle(handle.Thunk);
+                CraneCloseClawMethod.Invoke(handle.Crane, null);
+                handle.Crane.StartCoroutine(CraneCarryProp(handle, carry, state.Environment, target));
+            }
+            catch (Exception)
+            {
+                // Leave the crane as it was found; the prop flies on.
+                carry.Released = true;
+                CraneCarryingField.SetValue(handle.Crane, false);
+                handle.Balloon.enabled = true;
+                handle.Navigator.ClearDestination();
+                throw;
+            }
+
+            fx.Craned = true;
+            fx.Carry = carry;
+            fx.KeepLanding = true;
+            StopFlightSound(state);
+            state.FlightVelocity = Vector3.zero;
+            Debug.Log("[Rebuild the School] A crane grabbed " + state.Root.name
+                + " and carries it to the conveyor belt.");
+            return true;
+        }
+
+        /// <summary>
+        /// CraneController.CarryEntityToTarget with a prop in the claw: the claw closes, the crane lifts (height 5 to
+        /// 12.5), flies along its path to the output cell, opens the claw (the prop falls, FxStepCrane lets go of it)
+        /// and goes back to where it took the prop and down to its own height. The crane is free again at the end
+        /// (CraneController.ReInit), whatever happens on the way.
+        /// </summary>
+        private System.Collections.IEnumerator CraneCarryProp(
+            CraneHandle h, CraneCarry carry, EnvironmentController environment, Cell targetCell)
+        {
+            CraneController crane = h.Crane;
+            try
+            {
+                float delay = CraneClawSeconds;
+                while (delay > 0f)
+                {
+                    delay -= Time.deltaTime;
+                    yield return null;
+                }
+
+                crane.Entity.SetInteractionState(false);
+                float height = CraneLowHeight;
+                h.Audio.QueueAudio(h.LiftingLoop, true);
+                while (height < CraneHighHeight)
+                {
+                    carry.Height = height;
+                    crane.Entity.SetHeight(height);
+                    yield return null;
+                    height += Time.deltaTime * h.LiftSpeed;
+                }
+
+                height = CraneHighHeight;
+                carry.Height = height;
+                crane.Entity.SetHeight(height);
+                h.Audio.FlushQueue(true);
+                delay = CranePauseSeconds;
+                while (delay > 0f)
+                {
+                    delay -= Time.deltaTime;
+                    yield return null;
+                }
+
+                h.Audio.QueueAudio(h.RunningLoop, true);
+                while (h.Navigator.HasDestination)
+                {
+                    h.Navigator.MoveTowardsDestination(
+                        h.Balloon.speed * crane.Entity.ExternalActivity.Multiplier * Time.deltaTime
+                        * environment.EnvironmentTimeScale);
+                    yield return null;
+                }
+
+                h.Audio.FlushQueue(true);
+                h.Audio.PlaySingle(h.Thunk);
+                delay = CranePauseSeconds;
+                while (delay > 0f)
+                {
+                    delay -= Time.deltaTime;
+                    yield return null;
+                }
+
+                CraneOpenClawMethod.Invoke(crane, null);
+                carry.Released = true;
+                // The crane waits as long as a character takes to come down to the floor.
+                delay = (CraneHighHeight - CraneLowHeight) / Mathf.Max(0.1f, h.DropSpeed);
+                while (delay > 0f)
+                {
+                    delay -= Time.deltaTime;
+                    yield return null;
+                }
+
+                h.Navigator.ManuallyAppendDestinationPoints(targetCell.CenterWorldPosition);
+                delay = CraneClawSeconds;
+                while (delay > 0f)
+                {
+                    delay -= Time.deltaTime;
+                    yield return null;
+                }
+
+                height = CraneHighHeight;
+                crane.Entity.SetHeight(height);
+                h.Audio.QueueAudio(h.RunningLoop, true);
+                h.Audio.SetLoop(true);
+                while (h.Navigator.HasDestination)
+                {
+                    h.Navigator.MoveTowardsDestination(
+                        h.Balloon.speed * crane.Entity.ExternalActivity.Multiplier * Time.deltaTime
+                        * environment.EnvironmentTimeScale);
+                    yield return null;
+                }
+
+                h.Audio.QueueAudio(h.LiftingLoop, true);
+                h.Audio.PlaySingle(h.Thunk);
+                while (height > CraneLowHeight)
+                {
+                    crane.Entity.SetHeight(height);
+                    yield return null;
+                    height -= Time.deltaTime * h.LiftSpeed;
+                }
+
+                height = CraneLowHeight;
+                crane.Entity.SetHeight(height);
+            }
+            finally
+            {
+                // The prop never stays in the claw and the crane never stays busy.
+                carry.Released = true;
+                if (crane != null)
+                {
+                    crane.ReInit();
+                }
+            }
+        }
+
+        /// <summary>
+        /// A prop in a crane's claw hangs at the claw's place (the crane's x and z, the claw's height) while the
+        /// crane's own sequence runs. When the claw opens (or the crane is gone) the prop is let go and falls on at
+        /// the speed a character is dropped at; the ordinary flight takes over, and with it the belt below.
+        /// </summary>
+        private bool FxStepCrane(CarryState state, EventFx fx, float dt)
+        {
+            CraneCarry carry = fx.Carry;
+            if (carry == null || carry.Crane == null || carry.Released)
+            {
+                float drop = carry != null ? carry.DropSpeed : CraneDropSpeedFallback;
+                FxAbortCrane(state);
+                state.FlightVelocity = new Vector3(0f, -drop, 0f);
+                return false;
+            }
+
+            Vector3 crane = carry.Crane.transform.position;
+            Vector3 centre = new Vector3(crane.x, state.FlightFloorY + carry.Height, crane.z);
+            state.FlightVelocity = Vector3.zero;
+            state.FlightPosition = centre - state.FlightCenterOffset;
+            state.Body.MovePosition(state.FlightPosition);
+            return true;
+        }
+
+        /// <summary>The prop lets go of the crane (the claw opened, an error, the crane is gone).</summary>
+        private static void FxAbortCrane(CarryState state)
+        {
+            EventFx fx = state != null ? state.Fx : null;
+            if (fx == null)
+            {
+                return;
+            }
+
+            if (fx.Carry != null)
+            {
+                fx.Carry.Released = true;
+            }
+
+            fx.Craned = false;
+            fx.Carry = null;
+        }
+
+        // ------------------------------------------------------------------------------------------
         // Wheel click: kick
         // ------------------------------------------------------------------------------------------
 
@@ -980,7 +1583,6 @@ namespace RebuildTheSchool
                 SquishTarget target;
                 target.Root = state.Root;
                 target.Renderers = state.Renderers;
-                target.Proxy = null;
                 _squishTargets.Add(target);
             }
 
@@ -997,7 +1599,6 @@ namespace RebuildTheSchool
                 SquishTarget target;
                 target.Root = proxy.Root;
                 target.Renderers = proxy.Renderers;
-                target.Proxy = proxy;
                 _squishTargets.Add(target);
             }
         }
@@ -1095,6 +1696,85 @@ namespace RebuildTheSchool
             }
 
             return HammerSquishFallbackSeconds;
+        }
+
+        /// <summary>A boulder and Dr Reflex are not pushed by a thrown prop: they hammer it (HitHammerer).</summary>
+        private static bool IsHammerer(NPC npc)
+        {
+            return npc is Balder_Entity || npc is DrReflex;
+        }
+
+        /// <summary>
+        /// A thrown prop that touches a boulder (Balder_Entity) or Dr Reflex is hammered at once and the character
+        /// is not pushed. The boulder squishes it for BalderSquishSeconds and plays its squish sound, as
+        /// Balder_DefaultState does for any entity that touches it. Dr Reflex squishes it for his squishTime and
+        /// swings the hammer while he has it (DrReflex_Hunting); without the hammer only its sound plays (a swing
+        /// that nothing in his animation answers would stay queued). The prop bounces back like off any character.
+        /// Tested on the swept path of the step, so no speed gets past; a prop hits the same character once per flight.
+        /// </summary>
+        private bool HitHammerer(CarryState state, NPC npc, Vector3 start, Vector3 end, Vector3 half, Vector3 flat)
+        {
+            Balder_Entity balder = npc as Balder_Entity;
+            DrReflex reflex = npc as DrReflex;
+            if (npc == null || !npc.isActiveAndEnabled || (balder == null && reflex == null)
+                || (balder != null && balder.Crumbled)
+                || (state.PushedNpcs != null && state.PushedNpcs.Contains(npc)))
+            {
+                return false;
+            }
+
+            Bounds volume;
+            if (!TryGetCharacterVolume(npc, out volume))
+            {
+                return false;
+            }
+
+            volume.Expand(half * 2f);
+            float entry;
+            if (!SegmentHitsBounds(start, end, volume, out entry))
+            {
+                return false;
+            }
+
+            // Only a prop that is moving toward the character hits it.
+            Vector3 away = npc.transform.position - Vector3.Lerp(start, end, entry);
+            away.y = 0f;
+            if (Vector3.Dot(flat, away) <= 0f)
+            {
+                return false;
+            }
+
+            if (state.PushedNpcs == null)
+            {
+                state.PushedNpcs = new List<NPC>();
+            }
+
+            state.PushedNpcs.Add(npc);
+            if (balder != null)
+            {
+                SquishProp(state.Root, BalderSquishSeconds);
+                balder.Squish();
+                Debug.Log("[Rebuild the School] A thrown prop hit a Balder at " + flat.magnitude.ToString("0.0")
+                    + " u/s: the boulder squished " + state.Root.name + " at once and was not pushed.");
+                return true;
+            }
+
+            SquishProp(state.Root, HammerSquishSeconds(reflex));
+            bool hasHammer = reflex.behaviorStateMachine != null
+                && reflex.behaviorStateMachine.CurrentState is DrReflex_Hunting;
+            if (hasHammer)
+            {
+                reflex.Hammer(null);
+            }
+            else
+            {
+                reflex.HammerSound();
+            }
+
+            Debug.Log("[Rebuild the School] A thrown prop hit Dr Reflex at " + flat.magnitude.ToString("0.0")
+                + " u/s: he hammered " + state.Root.name + " at once and was not pushed"
+                + (hasHammer ? "." : " (no hammer yet: only its sound)."));
+            return true;
         }
 
         /// <summary>
@@ -1210,15 +1890,19 @@ namespace RebuildTheSchool
         }
 
         /// <summary>
-        /// A door that closes on its own (an event) catches the props under its slab: each is squished (Entity.Squish
-        /// for DoorSquishSeconds), the sound of putting a prop down plays at it, and the door goes straight back up
-        /// (LockdownDoor.Open while the slab is moving only changes its target height).
+        /// A door that closes on its own (an event) treats what is under its slab like the hammer and the boulder
+        /// do, in two steps. (1) The slab touches the top of a prop: the prop is squished at once (Entity.Squish for
+        /// DoorSquishSeconds, see PropFx) and the door goes on closing. (2) The slab comes down onto the top of the
+        /// squished prop: the sound of putting a prop down plays and the door goes straight back up
+        /// (LockdownDoor.Open while the slab is moving only changes its target height). The box of the prop is
+        /// measured from its meshes every time (SquishTargetBox), so after the squish it is the squished one. A prop
+        /// that was squished already (hammer, boulder) goes straight to step 2.
         /// </summary>
         private void CrushUnderSuperDoor(LockdownDoor door, Bounds slabBox)
         {
             float near = slabBox.extents.magnitude + SuperDoorNearMargin;
             CollectSquishTargets(slabBox.center, near);
-            bool crushed = false;
+            bool stopped = false;
             for (int j = 0; j < _squishTargets.Count; j++)
             {
                 SquishTarget target = _squishTargets[j];
@@ -1230,17 +1914,21 @@ namespace RebuildTheSchool
                     continue;
                 }
 
-                crushed = true;
-                bool fresh = SquishProp(target.Root, DoorSquishSeconds);
-                PlaySoundAt(prop.center, FloorSoundName, FloorSoundVolume);
-                if (fresh)
+                if (SquishProp(target.Root, DoorSquishSeconds))
                 {
-                    Debug.Log("[Rebuild the School] A closing super door squished " + target.Root.name
-                        + " and went back up.");
+                    // The first touch: squished now; the door goes on down to what is left of the prop.
+                    Debug.Log("[Rebuild the School] A closing super door touched " + target.Root.name
+                        + " and squished it; it goes on closing down to the top of the squished prop.");
+                    continue;
                 }
+
+                stopped = true;
+                PlaySoundAt(prop.center, FloorSoundName, FloorSoundVolume);
+                Debug.Log("[Rebuild the School] A closing super door came down onto the squished "
+                    + target.Root.name + " and went back up.");
             }
 
-            if (crushed)
+            if (stopped)
             {
                 door.Open(true, false);
             }
@@ -1338,19 +2026,51 @@ namespace RebuildTheSchool
         }
 
         /// <summary>
-        /// The world box of a squish target: a prop of the registry has its box worked out from its meshes (kept
-        /// until it moves), which is right even while its renderers are switched off by the game's culling;
-        /// a prop in flight has the box of its renderers.
+        /// The world box of a squish target, measured from its meshes now. Not the box the registry keeps until a
+        /// prop moves (ProxyBox): that is the unsquished one after a squish, and the renderers' own bounds are wrong
+        /// while the game's culling has them switched off. Right for a squished prop and for a culled one.
         /// </summary>
         private static bool SquishTargetBox(SquishTarget target, out Bounds box)
         {
             box = new Bounds();
-            if (target.Proxy != null && ProxyBox(target.Proxy, out box))
+            Renderer[] renderers = target.Renderers;
+            if (renderers == null)
             {
-                return true;
+                return false;
             }
 
-            return CombinedBounds(target.Renderers, out box);
+            bool found = false;
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                Renderer renderer = renderers[i];
+                if (renderer == null)
+                {
+                    continue;
+                }
+
+                Bounds one;
+                if (!TryGetMeshWorldBounds(renderer, out one))
+                {
+                    if (!renderer.enabled || !renderer.gameObject.activeInHierarchy)
+                    {
+                        continue;
+                    }
+
+                    one = renderer.bounds;
+                }
+
+                if (found)
+                {
+                    box.Encapsulate(one);
+                }
+                else
+                {
+                    box = one;
+                    found = true;
+                }
+            }
+
+            return found;
         }
 
         /// <summary>The slab of a lever door moves to this height (LockdownDoor.targetHeight) and stops there.</summary>
@@ -1488,7 +2208,7 @@ namespace RebuildTheSchool
         private static bool FxKeepsAirborne(CarryState state)
         {
             EventFx fx = state.Fx;
-            if (fx == null || !(fx.Pinned || fx.Riding || fx.Sinking || fx.Pulled))
+            if (fx == null || !(fx.Pinned || fx.Riding || fx.Sinking || fx.Pulled || fx.Craned || fx.OnBelt))
             {
                 return false;
             }
@@ -1507,16 +2227,19 @@ namespace RebuildTheSchool
             }
         }
 
-        /// <summary>Inside a whirlpool's pull (or going down it) a prop on the floor slides instead of settling.</summary>
+        /// <summary>
+        /// Inside a whirlpool's pull (or going down it), or on a running conveyor belt, a prop on the floor slides
+        /// instead of settling.
+        /// </summary>
         private static bool FxHoldsOnFloor(CarryState state)
         {
             EventFx fx = state.Fx;
-            return fx != null && (fx.Sinking || fx.Pulled);
+            return fx != null && (fx.Sinking || fx.Pulled || fx.OnBelt);
         }
 
         /// <summary>
-        /// Riding a student or sinking into a whirlpool replace the flight; true when this step was handled
-        /// here (StepFlight returns), false for an ordinary step.
+        /// Riding a student, sinking into a whirlpool and hanging in a crane's claw replace the flight; true when
+        /// this step was handled here (StepFlight returns), false for an ordinary step.
         /// </summary>
         private bool FxStepSpecial(CarryState state, float dt)
         {
@@ -1533,6 +2256,11 @@ namespace RebuildTheSchool
                     return FxStepSink(state, fx, dt);
                 }
 
+                if (fx.Craned)
+                {
+                    return FxStepCrane(state, fx, dt);
+                }
+
                 if (fx.Riding || _followers.Length > 0)
                 {
                     return FxStepRide(state, fx, dt);
@@ -1544,6 +2272,7 @@ namespace RebuildTheSchool
                 fx.Riding = false;
                 fx.Follower = null;
                 FxAbortSink(state);
+                FxAbortCrane(state);
             }
 
             return false;
