@@ -148,11 +148,16 @@ namespace RebuildTheSchool
             public float GravityFactor = 1f;
             public float GravityTarget = 1f;
             public float RollAngle;
+            // The roll that BaseRotation already contains (a prop that was carried turned over is let go that way)
+            // and the horizontal axis the roll turns about: the pose is BaseRotation turned by RollAngle - RollOrigin.
+            public float RollOrigin;
+            public Vector3 RollAxis;
             public bool RollApplied;
             public bool Pinned;
 
             // Flood.
             public bool Pulled;
+            public bool PullLogged;
             public bool PullGaveUp;
             public float PulledSeconds;
             public bool FloorTouched;
@@ -231,6 +236,10 @@ namespace RebuildTheSchool
         private float _nextAvoidLogTime;
         private float _crowdHeadOffset = CrowdHeadOffsetDefault;
         private GravityEvent _gravityEvent;
+        // What was last written to the log about each event's objects (only the start and the end are logged).
+        private int _loggedFlippers;
+        private int _loggedWhirlpools;
+        private int _loggedStudents;
         private Whirlpool[] _whirlpools = new Whirlpool[0];
         private SphereCollider[] _poolSpheres = new SphereCollider[0];
         private GravityFlipper[] _flippers = new GravityFlipper[0];
@@ -263,6 +272,17 @@ namespace RebuildTheSchool
 
             _nextEventErrorLogTime = Time.unscaledTime + EventErrorLogInterval;
             Debug.LogError("[Rebuild the School] Event handling (" + what + ") failed: " + exception);
+        }
+
+        /// <summary>One line when an event's objects appear (count > 0) and one when they are all gone.</summary>
+        private static void LogEventObjects(string what, int count, ref int logged)
+        {
+            bool changed = (count > 0) != (logged > 0);
+            logged = count;
+            if (changed)
+            {
+                Debug.Log("[Rebuild the School] " + what + (count > 0 ? ": " + count + " found." : ": none left."));
+            }
         }
 
         // ------------------------------------------------------------------------------------------
@@ -353,6 +373,7 @@ namespace RebuildTheSchool
             }
 
             int count = list != null ? list.Count : 0;
+            LogEventObjects("Gravity Chaos: gravity flippers", count, ref _loggedFlippers);
             _flippers = new GravityFlipper[count];
             _flipperBounds = new Bounds[count];
             for (int i = 0; i < count; i++)
@@ -381,11 +402,18 @@ namespace RebuildTheSchool
             int count = list != null ? list.Count : 0;
             _whirlpools = new Whirlpool[count];
             _poolSpheres = new SphereCollider[count];
+            int alive = 0;
             for (int i = 0; i < count; i++)
             {
                 _whirlpools[i] = list[i];
                 _poolSpheres[i] = PoolSphere(list[i]);
+                if (list[i] != null)
+                {
+                    alive++;
+                }
             }
+
+            LogEventObjects("Flood: whirlpools", alive, ref _loggedWhirlpools);
         }
 
         /// <summary>
@@ -408,6 +436,7 @@ namespace RebuildTheSchool
             }
 
             _followers = followers;
+            LogEventObjects("Student Shuffle: students", followers.Length, ref _loggedStudents);
             for (int i = 0; i < _followers.Length; i++)
             {
                 StudentCrowd_Follower follower = _followers[i];
@@ -835,23 +864,44 @@ namespace RebuildTheSchool
         // ------------------------------------------------------------------------------------------
 
         /// <summary>
-        /// The state a released prop starts with. Gravity Chaos: a prop keeps the gravity it has. A floor prop
-        /// that a player on the ceiling picks up is still pulled to the floor when it is let go; only a prop that
-        /// was pinned to the ceiling and is let go by a player who stands on the ceiling too goes on falling up
-        /// (a flipper turns any prop over, FxTouchFlippers). Call it after BeginFlight, before the kick velocity.
+        /// The state a released prop starts with. Gravity Chaos: a prop that was carried takes the gravity of the
+        /// player who carried it. A player on the ceiling carries it turned over (feet up, CarryRoll), so it is
+        /// let go that way and falls up to the ceiling; a player on the floor who took it off the ceiling lets it
+        /// fall to the floor. A kick is the exception: the prop stays as it was (kept pose, own gravity) and flies
+        /// along the way the player looks. A flipper turns any prop over later (FxTouchFlippers). Call it after
+        /// BeginFlight, before the kick velocity.
         /// </summary>
-        private void FxOnRelease(CarryState state)
+        private void FxOnRelease(CarryState state, bool kick)
         {
             EventFx previous = state.Fx;
-            bool ceilingBound = previous != null && (previous.Pinned || previous.GravityTarget < 0f);
             EventFx fx = new EventFx();
-            fx.BaseRotation = state.Root.rotation;
+            Quaternion pose = state.Root.rotation;
+            fx.BaseRotation = pose;
+            bool up;
+            float roll;
+            Vector3 axis;
+            if (kick)
+            {
+                up = previous != null && (previous.Pinned || previous.GravityTarget < 0f);
+                roll = previous != null ? previous.RollAngle : 0f;
+                axis = previous != null ? previous.RollAxis : Vector3.zero;
+            }
+            else
+            {
+                up = PlayerIsFlipped(state.Player);
+                roll = state.CarryRoll;
+                axis = Mathf.Abs(roll) >= 0.05f ? state.CarryRollAxis : Vector3.zero;
+            }
+
+            // Without a roll yet, a flipper (or the end of the event) turns the prop about its own forward line.
+            fx.RollAxis = axis.sqrMagnitude > 0.5f ? axis : pose * Vector3.forward;
+            fx.RollAngle = roll;
+            fx.RollOrigin = roll;
             state.Fx = fx;
             try
             {
                 RefreshEventRegistries(false);
-                if (ceilingBound && _gravityEvent != null && _gravityEvent.Active
-                    && PlayerIsFlipped(state.Player))
+                if (up && _gravityEvent != null && _gravityEvent.Active)
                 {
                     fx.GravityFactor = -1f;
                     fx.GravityTarget = -1f;
@@ -1047,16 +1097,17 @@ namespace RebuildTheSchool
         private void FxApplyPose(CarryState state, Vector3 c)
         {
             EventFx fx = state.Fx;
-            if (fx == null || (Mathf.Abs(fx.RollAngle) < 0.05f && !fx.RollApplied))
+            float turn = fx != null ? fx.RollAngle - fx.RollOrigin : 0f;
+            if (fx == null || (Mathf.Abs(turn) < 0.05f && !fx.RollApplied))
             {
                 state.Body.MovePosition(state.FlightPosition);
                 return;
             }
 
-            Quaternion roll = Quaternion.AngleAxis(fx.RollAngle, fx.BaseRotation * Vector3.forward);
+            Quaternion roll = Quaternion.AngleAxis(turn, fx.RollAxis);
             state.Body.MovePosition(c - roll * state.FlightCenterOffset);
             state.Body.MoveRotation(roll * fx.BaseRotation);
-            fx.RollApplied = Mathf.Abs(fx.RollAngle) >= 0.05f;
+            fx.RollApplied = Mathf.Abs(turn) >= 0.05f;
         }
 
         private void FxNotePinned(CarryState state, bool pinned, Vector3 c)
@@ -1189,21 +1240,34 @@ namespace RebuildTheSchool
             EventFx fx = state.Fx;
             StopFlightSound(state);
 
-            Quaternion turned = state.Root.rotation;
-            Quaternion upright = fx != null ? fx.BaseRotation : turned;
+            // The pose the prop shows now. On the ceiling it is turned over: fx.RollAngle about the roll axis.
+            Quaternion shown = state.Root.rotation;
+            float roll = fx != null ? fx.RollAngle : 0f;
+            Vector3 ownAxis = fx != null && fx.RollAxis.sqrMagnitude > 0.5f ? fx.RollAxis : shown * Vector3.forward;
             float sideYaw = 0f;
-            Quaternion carryRotation = upright;
+            Quaternion carryRotation;
             if (keepRotation)
             {
-                // A kick starts from the pose the prop was released with: the turn-over belongs to the ceiling.
-                state.Body.position = state.FlightPosition;
-                state.Body.rotation = upright;
-                state.Root.SetPositionAndRotation(state.FlightPosition, upright);
-                turned = upright;
+                // A kick leaves the prop exactly as it stands (no turn toward the camera, no snap upright); the
+                // upright pose under its roll is the one it lands in when its gravity returns.
+                carryRotation = Mathf.Abs(roll) < 0.05f ? shown : Quaternion.AngleAxis(-roll, ownAxis) * shown;
+                state.CarryRotation = carryRotation;
+                state.CarryRoll = 0f;
+                state.CarryRollAxis = ownAxis;
             }
             else
             {
-                carryRotation = AimedSideRotation(turned, -ray.direction, candidate.AimNormal, upright, out sideYaw);
+                // The carry goes on from the pose the prop shows: the upright (yaw only) pose, turned by the roll
+                // about the line toward the player. The carry then turns it over or upright by itself, with the
+                // player's own gravity (UpdateHeldFacing): a ceiling prop taken by a player on the floor comes down,
+                // one taken by a player on the ceiling stays up.
+                Vector3 toward = Vector3.ProjectOnPlane(-ray.direction, Vector3.up);
+                Vector3 axis = toward.sqrMagnitude > 0.001f ? toward.normalized : ownAxis;
+                Quaternion unrolled = Mathf.Abs(roll) < 0.05f ? shown : Quaternion.AngleAxis(-roll, axis) * shown;
+                carryRotation = AimedSideRotation(shown, -ray.direction, candidate.AimNormal, unrolled, out sideYaw);
+                state.CarryRotation = unrolled;
+                state.CarryRoll = roll;
+                state.CarryRollAxis = axis;
             }
 
             state.Landed = false;
@@ -1214,8 +1278,6 @@ namespace RebuildTheSchool
             state.SideYaw = sideYaw;
             state.CameraRotation = carryRotation;
             state.TargetRotation = carryRotation;
-            // The carry turns the prop upright by itself (UpdateHeldFacing).
-            state.CarryRotation = turned;
             if (state.EnvironmentObject != null)
             {
                 state.Coverage = state.EnvironmentObject.coverage.Rotated(DirectionFromRotation(carryRotation));
@@ -1356,6 +1418,13 @@ namespace RebuildTheSchool
                     || drift.sqrMagnitude >= WhirlpoolMinHoldPull * WhirlpoolMinHoldPull;
                 if (fx.Pulled)
                 {
+                    if (!fx.PullLogged)
+                    {
+                        fx.PullLogged = true;
+                        Debug.Log("[Rebuild the School] A whirlpool pulls " + state.Root.name + " in ("
+                            + bestFlat.ToString("0.0") + " from its middle).");
+                    }
+
                     fx.PulledSeconds += dt;
                     if (fx.PulledSeconds > WhirlpoolMaxPullSeconds)
                     {

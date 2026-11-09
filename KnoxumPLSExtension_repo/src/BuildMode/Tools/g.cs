@@ -16,6 +16,8 @@ namespace RebuildTheSchool
         // RMB throw and wheel-click kick (20 in the first version): a long, hard throw.
         private const float ThrowSpeed = 40f;
         private const float CarryRotationSpeed = 720f;
+        // Gravity Chaos: how fast a carried prop turns over with its carrier (degrees per second).
+        private const float CarryRollRate = 540f;
         private const float CarryMoveSmoothTime = 0.08f;
         private const float DoorWidthTolerance = 0.05f;
         private static readonly Color CarryHighlightColor = new Color(0.15f, 0.65f, 1f, 1f);
@@ -336,7 +338,11 @@ namespace RebuildTheSchool
             }
 
             Vector3 anchorPosition = carryRay.origin + carryRay.direction * distance;
-            Vector3 anchorOffset = _held.Root.TransformVector(_held.LocalGrabPoint);
+            // Gravity Chaos: a prop carried turned over (feet up) is shown in RolledCarryRotation.
+            Quaternion carryPose = RolledCarryRotation(_held);
+            Vector3 anchorOffset = _held.CarryRoll == 0f
+                ? _held.Root.TransformVector(_held.LocalGrabPoint)
+                : carryPose * Vector3.Scale(_held.Root.lossyScale, _held.LocalGrabPoint);
             // The renderer bounds center is the orbit anchor. A short damped follow removes
             // fixed-step camera jitter without the long lag of the previous spring.
             Vector3 desiredPosition = anchorPosition - anchorOffset;
@@ -348,7 +354,7 @@ namespace RebuildTheSchool
                 Mathf.Infinity,
                 Time.fixedDeltaTime);
             _held.Body.MovePosition(smoothedPosition);
-            _held.Body.MoveRotation(_held.CarryRotation);
+            _held.Body.MoveRotation(carryPose);
             BreakWindowsTouchingProp(_held);
         }
 
@@ -390,6 +396,61 @@ namespace RebuildTheSchool
                 state.CarryRotation,
                 state.TargetRotation,
                 CarryRotationSpeed * Time.fixedDeltaTime);
+
+            // Gravity Chaos: a player who stands on the ceiling carries the prop turned over, feet up, about the
+            // line toward himself (the side that faces him stays toward him); the turn follows his own flip.
+            // The prop takes the gravity of whoever carries it, so it is let go that way (FxOnRelease).
+            Vector3 towardPlayer = Vector3.ProjectOnPlane(-ray.direction, Vector3.up);
+            if (towardPlayer.sqrMagnitude > 0.001f)
+            {
+                state.CarryRollAxis = towardPlayer.normalized;
+            }
+
+            state.CarryRoll = Mathf.MoveTowards(
+                state.CarryRoll,
+                PlayerIsFlipped(state.Player) ? 180f : 0f,
+                CarryRollRate * Time.fixedDeltaTime);
+        }
+
+        /// <summary>The pose the carried prop is shown in: the upright CarryRotation turned over by CarryRoll.</summary>
+        private static Quaternion RolledCarryRotation(CarryState state)
+        {
+            if (Mathf.Abs(state.CarryRoll) < 0.05f)
+            {
+                return state.CarryRotation;
+            }
+
+            Vector3 axis = state.CarryRollAxis;
+            if (axis.sqrMagnitude < 0.5f)
+            {
+                axis = Vector3.ProjectOnPlane(state.CarryRotation * Vector3.forward, Vector3.up);
+            }
+
+            if (axis.sqrMagnitude < 0.001f)
+            {
+                return state.CarryRotation;
+            }
+
+            return Quaternion.AngleAxis(state.CarryRoll, axis.normalized) * state.CarryRotation;
+        }
+
+        /// <summary>
+        /// A prop carried turned over is let go in exactly that pose (not the one a step behind), about the same
+        /// grab point, so the flight starts from what the player sees.
+        /// </summary>
+        private static void SnapCarryPose(CarryState state)
+        {
+            if (Mathf.Abs(state.CarryRoll) < 0.05f)
+            {
+                return;
+            }
+
+            Quaternion pose = RolledCarryRotation(state);
+            Vector3 anchor = state.Root.TransformPoint(state.LocalGrabPoint);
+            Vector3 position = anchor - pose * Vector3.Scale(state.Root.lossyScale, state.LocalGrabPoint);
+            state.Body.position = position;
+            state.Body.rotation = pose;
+            state.Root.SetPositionAndRotation(position, pose);
         }
 
         private void UpdateHeldManualRotation(CarryState state)
@@ -2316,11 +2377,16 @@ namespace RebuildTheSchool
                 // The body stays kinematic and keeps ignoring the player (both set up while carried); the
                 // landing (RestoreBody) gives the prop its original body settings back.
                 // A kick starts where the prop stands (atRest); a carried prop starts at the camera.
+                if (!kick)
+                {
+                    SnapCarryPose(state);
+                }
+
                 BeginFlight(state, ray, throwForward, kick);
                 // The event state comes first: it needs to know where the prop was (on the ceiling or not), and the
                 // kick needs the way the prop is pulled.
                 bool restedOnCeiling = state.Fx != null && state.Fx.Pinned;
-                FxOnRelease(state);
+                FxOnRelease(state, kick);
                 if (kick)
                 {
                     // A prop would land again in the first step: the kick goes a little away from its surface.
@@ -5023,16 +5089,25 @@ namespace RebuildTheSchool
         // ForbiddenNameParts look for).
         private const string LockerBackName = "BackFace";
 
-        // The turned copy is a hair smaller than the locker, so the edges of the real sides cover it.
-        private const float LockerBackScale = 0.996f;
+        // The copy is a flat slab at the open back: this thick (a share of the locker's depth), this far inside
+        // the back edge (units), and a hair smaller in height and width than the locker, so the edges of the
+        // real sides and the top cover it.
+        private const float LockerBackThickness = 0.02f;
+        private const float LockerBackGap = 0.003f;
+        private const float LockerBackScale = 0.998f;
 
         /// <summary>
         /// The red and blue lockers (LockerBuilder: lockerPre and hideLockerPre) have no back; the game never shows
-        /// it because they stand against a wall. A carried locker shows it, so the front is copied onto the back: a
-        /// copy of every mesh of the locker, turned half a circle around the vertical axis through its middle (the
-        /// copy of the front faces back, the two sides swap and lie on each other). It is made once, stays part of
-        /// the locker and is listed in the cell like the locker's own renderers, so the chunk culling shows and hides
-        /// it with them. Returns every renderer of the locker, the copy included.
+        /// it because they stand against a wall. A carried locker shows it, so one of its sides is copied onto the
+        /// back: a copy of every mesh of the locker, turned a quarter circle around the vertical axis through its
+        /// middle, squeezed along the locker's width until it is a flat slab and stretched along its depth until
+        /// that is as wide as the locker, then moved to the open back. The side of the copy that was a side of the
+        /// locker now covers the back (the sides keep their texture and the way up); the rest of the copy is flat
+        /// and lies inside the locker. The locker's width runs along its local X (the lockers of a row stand 2
+        /// units apart along X) and the open back is toward +Z, the wall (LockerBuilder turns the locker with its
+        /// +Z toward the wall). The copy is made once, stays part of the locker and is listed in the cell like
+        /// the locker's own renderers, so the chunk culling shows and hides it with them. Returns every renderer
+        /// of the locker, the copy included.
         /// </summary>
         private static Renderer[] EnsureLockerBack(Cell cell, Transform root, Renderer[] renderers)
         {
@@ -5076,20 +5151,30 @@ namespace RebuildTheSchool
                     }
                 }
 
-                if (!hasBounds)
+                float halfWidth = local.extents.x;
+                float halfDepth = local.extents.z;
+                if (!hasBounds || halfWidth < 0.05f || halfDepth < 0.05f)
                 {
                     return renderers;
                 }
 
-                // p -> c + R * s * (p - c), written as the pose of the holder (the copies keep their own pose
-                // relative to the locker, which the holder then turns).
+                // p -> slabCentre + Q * S * (p - c), written as the pose of the holder (the copies keep their own
+                // pose relative to the locker, which the holder then turns and squeezes). Q is a quarter turn
+                // around the vertical: the copy's left side (-X) lands on the back plane (+Z), turned to face
+                // away from the locker, its depth axis along X.
                 Vector3 c = local.center;
-                float s = LockerBackScale;
+                Quaternion turn = Quaternion.Euler(0f, 90f, 0f);
+                Vector3 squeeze = new Vector3(
+                    LockerBackThickness * halfDepth / halfWidth,
+                    LockerBackScale,
+                    LockerBackScale * halfWidth / halfDepth);
+                Vector3 slabCentre = new Vector3(
+                    c.x, c.y, local.max.z - LockerBackThickness * halfDepth - LockerBackGap);
                 Transform holder = new GameObject(LockerBackName).transform;
                 holder.SetParent(root, false);
-                holder.localRotation = Quaternion.Euler(0f, 180f, 0f);
-                holder.localScale = new Vector3(s, s, s);
-                holder.localPosition = new Vector3(c.x * (1f + s), c.y * (1f - s), c.z * (1f + s));
+                holder.localRotation = turn;
+                holder.localScale = squeeze;
+                holder.localPosition = slabCentre - turn * Vector3.Scale(squeeze, c);
 
                 Vector3 rootScale = root.lossyScale;
                 List<Renderer> copies = new List<Renderer>();
@@ -5117,7 +5202,9 @@ namespace RebuildTheSchool
                 }
 
                 AddRendererReferences(cell, copies);
-                Debug.Log("[Rebuild the School] " + root.name + " got a back (" + copies.Count + " mesh copies).");
+                Debug.Log("[Rebuild the School] " + root.name + " got a back: a side of the locker copied onto it ("
+                    + copies.Count + " mesh copies, locker box " + local.size.x.ToString("0.00") + " wide, "
+                    + local.size.y.ToString("0.00") + " high, " + local.size.z.ToString("0.00") + " deep).");
                 return root.GetComponentsInChildren<Renderer>(true);
             }
             catch (Exception exception)
@@ -5830,6 +5917,10 @@ namespace RebuildTheSchool
             public int ManualRotationSteps;
             // The turn that puts the side the player aimed at toward the camera (see AimedSideRotation).
             public float SideYaw;
+            // Gravity Chaos: the turn-over of the carried prop (0 upright, 180 feet up) about CarryRollAxis, the
+            // horizontal line toward the player. CarryRotation itself stays the upright, yaw-only pose.
+            public float CarryRoll;
+            public Vector3 CarryRollAxis;
             public Quaternion OriginalRotation;
             public CellCoverage Coverage;
             public CellCoverage RemovedHardCoverage;
