@@ -1887,6 +1887,7 @@ namespace RebuildTheSchool
                 Root = root,
                 EnvironmentObject = environmentObject,
                 HasSolidCollider = hasSolidCollider,
+                Locker = IsLocker(root),
                 Renderers = renderers,
                 LocalBounds = new Bounds[renderers.Length],
                 HasLocalBounds = new bool[renderers.Length]
@@ -2515,6 +2516,8 @@ namespace RebuildTheSchool
             public bool Inside;
             public FlightDoor Door;
             public Collider Collider;
+            // A locker whose box stopped the prop (it has no collider to report).
+            public Transform Piece;
             public int EdgeX;
             public int EdgeZ;
             public int EdgeAxis;
@@ -2746,9 +2749,15 @@ namespace RebuildTheSchool
             // Flood: a whirlpool catches the prop's own speed (v) and pulls it in; the pull is a drift on top of
             // the velocity, taken off again after the step.
             Vector3 drift = FxDrift(state, c, half, dt, ref v);
-            // Conveyor belts: a prop that stands on a running belt is carried along; the push is a drift too, and
-            // it is not the speed the prop hits a character with.
+            // Conveyor belts: a prop that stands on a belt is carried along with the belt's speed and direction
+            // only (its own speed is dropped), and the push is not the speed it hits a character with.
             Vector3 belt = FxBeltDrift(state, c, half, dt);
+            if (state.Fx != null && state.Fx.OnBelt)
+            {
+                v.x = 0f;
+                v.z = 0f;
+            }
+
             drift += belt;
             v += drift;
             Vector3 impactVelocity = v - belt;
@@ -2909,6 +2918,13 @@ namespace RebuildTheSchool
                     found = true;
                 }
 
+                // A locker is a bare mesh: no collider stops a prop thrown at it, so its box is swept here.
+                if (FlightLockerSweep(state, c, half, d, out other) && (!found || other.T < candidate.T))
+                {
+                    candidate = other;
+                    found = true;
+                }
+
                 if (!found)
                 {
                     return false;
@@ -3016,7 +3032,9 @@ namespace RebuildTheSchool
                     what = "the ceiling";
                     break;
                 case FlightHitKind.Collider:
-                    what = hit.Collider != null ? DescribePath(hit.Collider.transform) : "a collider";
+                    what = hit.Collider != null
+                        ? DescribePath(hit.Collider.transform)
+                        : (hit.Piece != null ? DescribePath(hit.Piece) : "a collider");
                     break;
                 default:
                     what = hit.Kind.ToString();
@@ -3580,6 +3598,120 @@ namespace RebuildTheSchool
             }
 
             t = tMin;
+            return true;
+        }
+
+        /// <summary>
+        /// The lockers of the floor (BeltManager-like furniture such as a locker row is only a mesh in the cell's
+        /// base: it has no collider, so a plain box cast flies straight through it). The prop's box is grown by the
+        /// locker's box (a point sweep against the expanded box, as HitNpcs does with characters) and the place it
+        /// enters is a contact like a wall's. Only the lockers near the step are looked at, and only lockers: every
+        /// other prop of the registry has colliders of its own.
+        /// </summary>
+        private bool FlightLockerSweep(CarryState state, Vector3 c, Vector3 half, Vector3 d, out FlightHit best)
+        {
+            best = new FlightHit();
+            if (_proxies.Count == 0 || d.sqrMagnitude < 1e-8f)
+            {
+                return false;
+            }
+
+            float reach = d.magnitude + half.magnitude + FlightSkin;
+            float bestT = float.MaxValue;
+            bool found = false;
+            for (int i = 0; i < _proxies.Count; i++)
+            {
+                ProxyProp proxy = _proxies[i];
+                Bounds box;
+                if (!proxy.Locker || proxy.Root == null || proxy.Root == state.Root
+                    || (proxy.Position - c).sqrMagnitude > reach * reach
+                    || !ProxyBox(proxy, out box))
+                {
+                    continue;
+                }
+
+                box.Expand(half * 2f);
+                // A prop that already touches the locker (it lies against it) is not stopped by it again.
+                if (box.Contains(c))
+                {
+                    continue;
+                }
+
+                float entry;
+                Vector3 normal;
+                if (!SegmentEntersBox(c, d, box, out entry, out normal) || entry >= bestT)
+                {
+                    continue;
+                }
+
+                bestT = entry;
+                best.T = entry;
+                best.Normal = normal;
+                best.Kind = FlightHitKind.Collider;
+                best.Piece = proxy.Root;
+                found = true;
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// Does the segment a -> a + delta start outside the box and enter it? entry is the fraction where it enters
+        /// and normal the face it enters through.
+        /// </summary>
+        private static bool SegmentEntersBox(Vector3 a, Vector3 delta, Bounds box, out float entry, out Vector3 normal)
+        {
+            entry = 0f;
+            normal = Vector3.up;
+            float tMin = 0f;
+            float tMax = 1f;
+            int axis = -1;
+            Vector3 low = box.min;
+            Vector3 high = box.max;
+            for (int i = 0; i < 3; i++)
+            {
+                float origin = i == 0 ? a.x : (i == 1 ? a.y : a.z);
+                float step = i == 0 ? delta.x : (i == 1 ? delta.y : delta.z);
+                float lo = i == 0 ? low.x : (i == 1 ? low.y : low.z);
+                float hi = i == 0 ? high.x : (i == 1 ? high.y : high.z);
+                if (Mathf.Abs(step) < 1e-6f)
+                {
+                    if (origin < lo || origin > hi)
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                float t1 = (lo - origin) / step;
+                float t2 = (hi - origin) / step;
+                float nearest = Mathf.Min(t1, t2);
+                // 0..2: entering through the low face of the axis, 3..5: through the high face.
+                if (nearest > tMin)
+                {
+                    tMin = nearest;
+                    axis = t1 < t2 ? i : i + 3;
+                }
+
+                tMax = Mathf.Min(tMax, Mathf.Max(t1, t2));
+                if (tMin > tMax)
+                {
+                    return false;
+                }
+            }
+
+            if (axis < 0 || tMax <= 0f || tMin >= 1f)
+            {
+                return false;
+            }
+
+            entry = Mathf.Max(0f, tMin);
+            int positiveAxis = axis % 3;
+            float sign = axis < 3 ? -1f : 1f;
+            normal = positiveAxis == 0 ? new Vector3(sign, 0f, 0f)
+                : positiveAxis == 1 ? new Vector3(0f, sign, 0f)
+                : new Vector3(0f, 0f, sign);
             return true;
         }
 
@@ -5666,6 +5798,9 @@ namespace RebuildTheSchool
             public Transform Root;
             public EnvironmentObject EnvironmentObject;
             public bool HasSolidCollider;
+            // A locker: a bare mesh in the cell's base with no collider of its own, so the flight has to treat its
+            // box as a wall (FlightLockerSweep); every other prop of the registry has colliders.
+            public bool Locker;
             public Renderer[] Renderers;
             public Bounds[] LocalBounds;
             public bool[] HasLocalBounds;

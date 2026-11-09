@@ -252,9 +252,11 @@ namespace RebuildTheSchool
             // A prop that was let go at the edge of an event spawner room does not ride again.
             public bool RideBlocked;
 
-            // Conveyor belts: the prop stands on a running belt and is carried by it until it is off the belt.
+            // Conveyor belts: the prop stands on a running belt and is carried by it until it is off the belt, and
+            // the push of the last belt it rode, which carries it over a still belt of the chain.
             public bool OnBelt;
             public bool BeltLogged;
+            public Vector3 BeltPush;
 
             // Cranes: a crane holds the prop in its claw (the crane's own sequence runs, FxStepCrane follows it).
             public bool Craned;
@@ -956,13 +958,13 @@ namespace RebuildTheSchool
         /// <summary>
         /// The push of the running belts under the prop: BeltManager's movementAddend (direction * speed, the push
         /// the game adds to a character's movement on a belt; zero while a belt is stopped). A belt acts on the
-        /// prop's footprint at any height, as its trigger acts on a character. False when no running belt is under the
-        /// prop, or when something (a wall, a closed door, another prop) stands in the way of the push: the prop then
-        /// does not ride on and lands. A door that gives way (a swinging one) opens for the prop here, as in flight.
+        /// prop's footprint at any height, as its trigger acts on a character. `overBelt` tells whether the prop
+        /// stands over any belt at all (running or not), which is what a chain of belts needs.
         /// </summary>
-        private bool FxBeltVelocity(CarryState state, Vector3 c, Vector3 half, float dt, out Vector3 velocity)
+        private bool FxBeltRunningPush(Vector3 c, Vector3 half, out Vector3 push, out bool overBelt)
         {
-            velocity = Vector3.zero;
+            push = Vector3.zero;
+            overBelt = false;
             if (_belts.Length == 0 || BeltMoveModField == null)
             {
                 return false;
@@ -986,11 +988,12 @@ namespace RebuildTheSchool
                     continue;
                 }
 
-                MovementModifier push = BeltMoveModField.GetValue(belt) as MovementModifier;
-                if (push != null)
+                overBelt = true;
+                MovementModifier beltPush = BeltMoveModField.GetValue(belt) as MovementModifier;
+                if (beltPush != null)
                 {
-                    sum.x += push.movementAddend.x;
-                    sum.z += push.movementAddend.z;
+                    sum.x += beltPush.movementAddend.x;
+                    sum.z += beltPush.movementAddend.z;
                 }
             }
 
@@ -999,21 +1002,77 @@ namespace RebuildTheSchool
                 return false;
             }
 
+            push = sum;
+            return true;
+        }
+
+        /// <summary>
+        /// Nothing (a wall, a closed door that does not give way, a prop) stands across the way the belt pushes the
+        /// prop: the prop rides on. A door that gives way (a swinging one) opens for the prop here, as in flight.
+        /// </summary>
+        private bool FxBeltPathClear(CarryState state, Vector3 c, Vector3 half, Vector3 push, float dt)
+        {
             FlightHit blocker;
-            if (FindFlightHit(state, c, half, sum * (dt * 1.5f), out blocker))
+            return !FindFlightHit(state, c, half, push * (dt * 1.5f), out blocker);
+        }
+
+        /// <summary>
+        /// The way the belts carry the prop now, or zero. The belts under the prop push it with their own
+        /// direction and speed (several belts add up). A chain of belts is usually one belt at a time: the belt
+        /// room starts the belt the player stands at and stops the others, so the belt after a seam is standing
+        /// still; a prop that comes from a running belt keeps the way it was going over such a belt (fx.BeltPush),
+        /// so a chain carries it on instead of stopping it at the seam. Off every belt, it is forgotten. Sets
+        /// fx.OnBelt for the step.
+        /// </summary>
+        private Vector3 FxBeltCurrent(CarryState state, Vector3 c, Vector3 half, float dt)
+        {
+            EventFx fx = state.Fx;
+            if (fx == null)
             {
-                return false;
+                return Vector3.zero;
             }
 
-            velocity = sum;
-            return true;
+            Vector3 push;
+            bool overBelt;
+            bool running = FxBeltRunningPush(c, half, out push, out overBelt);
+            if (!running)
+            {
+                if (!overBelt)
+                {
+                    // Off the belts: the way the last belt went is forgotten.
+                    fx.BeltPush = Vector3.zero;
+                    return Vector3.zero;
+                }
+
+                if (fx.BeltPush.sqrMagnitude < BeltMinSpeed * BeltMinSpeed)
+                {
+                    return Vector3.zero;
+                }
+
+                // A still belt of the chain ahead: the prop goes on the way the belt it came from sent it.
+                push = fx.BeltPush;
+            }
+
+            if (!FxBeltPathClear(state, c, half, push, dt))
+            {
+                // Something blocks the way: the prop does not ride on (it stops against it and settles there).
+                fx.BeltPush = Vector3.zero;
+                return Vector3.zero;
+            }
+
+            fx.BeltPush = push;
+            fx.OnBelt = true;
+            fx.KeepLanding = true;
+            LogOnBelt(state, fx);
+            return push;
         }
 
         /// <summary>
         /// Conveyor belts, at the start of a flight step: a prop that stands on the floor over a running belt is
         /// carried by it. The push is a drift on top of the velocity (the caller adds it and takes it off again after
-        /// the step, like the whirlpool's pull). While it lasts the prop does not settle (FxHoldsOnFloor): it rides
-        /// until it is completely off the belts and lands where it is.
+        /// the step, like the whirlpool's pull) and the prop's own speed is dropped by the caller: on a belt it moves
+        /// at the belt's speed and in its direction, nothing else. While it lasts the prop does not settle
+        /// (FxHoldsOnFloor): it rides until it is completely off the belts and lands where it is.
         /// </summary>
         private Vector3 FxBeltDrift(CarryState state, Vector3 c, Vector3 half, float dt)
         {
@@ -1031,16 +1090,7 @@ namespace RebuildTheSchool
 
             try
             {
-                Vector3 velocity;
-                if (!FxBeltVelocity(state, c, half, dt, out velocity))
-                {
-                    return Vector3.zero;
-                }
-
-                fx.OnBelt = true;
-                fx.KeepLanding = true;
-                LogOnBelt(state, fx);
-                return velocity;
+                return FxBeltCurrent(state, c, half, dt);
             }
             catch (Exception exception)
             {
@@ -1050,33 +1100,31 @@ namespace RebuildTheSchool
         }
 
         /// <summary>
-        /// A prop that comes down on a running belt does not settle: it stops against the belt (a landing stops a
-        /// prop too) and the belt takes it from there (FxBeltDrift from the next step on).
+        /// A prop that comes down on a belt does not settle there: it stops against the belt (a landing stops a
+        /// prop too) and the belt takes it from the next step on (FxBeltDrift). `v` gets the belt's way for the rest
+        /// of this step and `drift` grows by it, so the caller takes it off again at the end of the step; true when
+        /// the prop came down on a belt.
         /// </summary>
         private bool FxBeltLanding(
             CarryState state, Vector3 c, Vector3 half, float dt, ref Vector3 v, ref Vector3 drift)
         {
-            EventFx fx = state.Fx;
-            if (fx == null || _belts.Length == 0)
+            if (state.Fx == null || _belts.Length == 0)
             {
                 return false;
             }
 
             try
             {
-                Vector3 velocity;
-                if (!FxBeltVelocity(state, c, half, dt, out velocity))
+                Vector3 push = FxBeltCurrent(state, c, half, dt);
+                if (push.sqrMagnitude < BeltMinSpeed * BeltMinSpeed)
                 {
                     return false;
                 }
 
-                fx.OnBelt = true;
-                fx.KeepLanding = true;
-                v.x = drift.x + velocity.x;
-                v.z = drift.z + velocity.z;
-                drift.x += velocity.x;
-                drift.z += velocity.z;
-                LogOnBelt(state, fx);
+                // On the belt the prop moves exactly at the belt's speed: its own speed is gone.
+                v.x = drift.x + push.x;
+                v.z = drift.z + push.z;
+                drift += push;
                 return true;
             }
             catch (Exception exception)
@@ -1967,7 +2015,9 @@ namespace RebuildTheSchool
                     }
 
                     Debug.Log("[Rebuild the School] A lever door stopped on " + (holder != null ? holder.name : "a prop")
-                        + " and stays stuck until it is taken away.");
+                        + " and stays stuck until it is taken away (the prop's top is " + top.ToString("0.00")
+                        + ", the slab's underside is " + slabBox.min.y.ToString("0.00") + ", its height is "
+                        + slabY.ToString("0.00") + " and it moves to " + hold.ToString("0.00") + ").");
                 }
 
                 return;
@@ -1991,8 +2041,10 @@ namespace RebuildTheSchool
         }
 
         /// <summary>
-        /// The top of the highest prop under the slab: one whose footprint overlaps the slab's and that reaches
-        /// higher than the closed slab's underside. Props in flight count; a prop that is carried does not.
+        /// The top of the highest prop under the slab: one whose footprint overlaps the slab's, that reaches below
+        /// the slab's underside (it is really under the slab, not above it) and that reaches higher than the
+        /// closed slab's underside. Props in flight count; a prop that is carried does not. A prop standing higher
+        /// than the slab's underside does not hold the door up: the slab is already below it and cannot rest on it.
         /// </summary>
         private bool TopOfPropUnderSuperDoor(
             Bounds slabBox, float offset, out float top, out Transform holder)
@@ -2010,7 +2062,8 @@ namespace RebuildTheSchool
                     || !SquishTargetBox(target, out prop)
                     || prop.max.x <= slabBox.min.x || prop.min.x >= slabBox.max.x
                     || prop.max.z <= slabBox.min.z || prop.min.z >= slabBox.max.z
-                    || prop.max.y <= offset + SuperDoorPropMinHeight)
+                    || prop.min.y >= slabBox.min.y + SuperDoorPropMinHeight
+                    || prop.max.y <= slabBox.min.y + SuperDoorPropMinHeight)
                 {
                     continue;
                 }
