@@ -1850,6 +1850,10 @@ namespace RebuildTheSchool
                 {
                     state = new SuperDoorState();
                     _superDoorStates[door] = state;
+                    // Once per door and floor: which way it is handled, and how tall its slab is.
+                    Debug.Log("[Rebuild the School] Super door " + door.name + ": "
+                        + (IsLeverDoor(door) ? "a lever/button door (it stops on a prop)" : "an event door (it squishes)")
+                        + "; its opened height is " + door.originalHeight.ToString("0.00") + ".");
                 }
 
                 Bounds slabBox;
