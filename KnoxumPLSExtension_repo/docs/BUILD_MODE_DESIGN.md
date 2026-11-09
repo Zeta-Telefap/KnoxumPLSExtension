@@ -1,8 +1,57 @@
 # Build Mode / Builder Garage — дизайн-документ (черновик)
 
-Статус: **дизайн обсуждается; BepInEx entry point `c` и прототип переноса `g` написаны, но не собраны и не проверены в игре**. Все числа и решения ниже помечены как «предлагается» и могут быть изменены.
+Статус: **дизайн обсуждается; мод `Lifter Frenzy!` (BepInEx entry point `Plugin`, рантайм `PropLifter`) написан, но не собран и не проверен в игре**. Все числа и решения ниже помечены как «предлагается» и могут быть изменены.
 Связанные документы: `CONTEXT.md`, `IDEAS.md`, `BUGS_AND_NEXT_STEPS.md`.
 Подробный порядок написания механик: [`BUILD_MODE_IMPLEMENTATION_PLAN.md`](BUILD_MODE_IMPLEMENTATION_PLAN.md).
+
+---
+
+## 0. Структура исходников (v1.0)
+
+Мод: **Lifter Frenzy!** — плагин `knx.LifterFrenzy`, версия `1.0`, рантайм `LifterFrenzy.PropLifter`
+(один `partial class`, разложенный по папкам). Проект разделён на мелкие файлы; поведение при
+разделении не менялось — это тот же код, разложенный по темам.
+
+```text
+src/LifterFrenzy/
+  Plugin/Plugin.cs                     // BepInPlugin: knx.LifterFrenzy, "Lifter Frenzy!", v1.0
+  Core/PropLifter.Core.cs              // жизненный цикл + общие помощники (клетка, луч, bounds, масса)
+  Core/PropLifter.Tuning.cs            // все числа и имена мода
+  Core/PropLifter.State.cs             // что помнит рантайм: рука, прицел кадра, кэши этажа
+  Core/PropLifter.Input.cs             // G / ЛКМ / ПКМ / R+колесо и патч PlayerClick
+  Core/CarryState.cs                   // один предмет, взятый из мира
+  Carry/PropLifter.Aim.cs              // прицел и подсветка предмета
+  Carry/PropLifter.Hands.cs            // подбор, поза в руках, поворот, выпуск, бросок
+  Carry/PropLifter.Body.cs             // rigidbody, игнор коллайдеров игрока, восстановление
+  Carry/PropLifter.GlowState.cs        // свечение выбранного предмета
+  Flight/PropLifter.Flight.cs           // бросок: скорость двигается шагами мода
+  Flight/PropLifter.Flight.Sweep.cs     // свип по клеткам: стены, двери, окна, шкафы, персонажи
+  Flight/PropLifter.Flight.Types.cs     // типы полёта (дверь на пути, попадание, грани клетки)
+  Placement/PropLifter.Placement.cs     // посадка: клетка, родитель, предпросмотр
+  Placement/PropLifter.Placement.Coverage.cs // списки рендереров и coverage клетки
+  World/PropLifter.Doors.cs             // двери и окна
+  World/PropLifter.Lockers.cs           // шкафы: дублированная задняя грань, клетки
+  World/PropLifter.PropNames.cs         // какие имена объектов — предметы
+  World/PropLifter.Proxies.cs           // реестр предметов этажа для прицела
+  World/PropLifter.Sounds.cs            // звуки мода
+  Events/PropLifter.Events.Core.cs      // какие события идут + точки входа Fx*
+  Events/PropLifter.Events.Release.cs   // выпуск, посадка, возврат в руку
+  Events/PropLifter.Events.Squish.cs    // прижималки, Балдер, Др Рефлекс
+  Events/PropLifter.Events.SuperDoors.cs // супер-двери (LockdownDoor)
+  Events/PropLifter.Events.Flippers.cs  // Gravity Chaos
+  Events/PropLifter.Events.Flood.cs     // наводнение (Whirlpool)
+  Events/PropLifter.Events.Belts.cs     // конвейеры
+  Events/PropLifter.Events.Cranes.cs    // краны
+  Events/PropLifter.Events.Kick.cs      // пинок кликом колёсика
+  Events/PropLifter.Events.Students.cs  // Student Shuffle
+  Events/PropLifter.Events.Avoid.cs     // персонажи обходят предметы
+  Events/PropLifter.Events.Avoid.Geometry.cs // геометрия обхода на полу
+  Events/EventFx.cs, Events/PropFx.cs   // состояние предмета в событии; сплющивание
+```
+
+В разделах ниже файлы `g.cs` и `g.Events.cs` — это то, что теперь лежит в папках `Core/`, `Carry/`,
+`Flight/`, `Placement/`, `World/` и `Events/`; имена `g` и `g2` — исторические (`g` = `PropLifter`,
+`g2` был удалён).
 
 ---
 
@@ -421,7 +470,7 @@ available»), а нажатие поглощалось. К этому добав
 большой предмет (шкаф, парта) почти вплотную к стене. Предмет не должен проходить сквозь стены и пол. Выпуск ЛКМ
 вплотную к стене: предмет падает рядом.
 
-### 12.3 Лог (`BepInEx/LogOutput.log`, префикс `[Rebuild the School]`)
+### 12.3 Лог (`BepInEx/LogOutput.log`, префикс `[Lifter Frenzy]`)
 
 | Строка | Значение |
 |---|---|
@@ -564,12 +613,12 @@ available»), а нажатие поглощалось. К этому добав
 
 ---
 
-## 16. Ванильные события и персонажи (`g`, файл `g.Events.cs`)
+## 16. Ванильные события и персонажи (`PropLifter`, папка `Events/`)
 
 Код этого раздела **не собирался и не запускался в игре**; имена членов игры сверены только по декомпилу BB+.
-`g` теперь `partial`: события лежат в новом файле `g.Events.cs` (его нужно добавить в проект, если проект
-перечисляет файлы), а в `g.cs` — короткие вызовы `Fx…` внутри `try/catch`: ошибка события пишется в лог (не чаще
-раза в 5 с) и обычный полёт не ломается.
+`PropLifter` — один `partial` класс: события лежат в папке `Events/` (по файлу на событие, см. §0), а в
+`Flight/`, `Carry/` и `Placement/` — короткие вызовы `Fx…` внутри `try/catch`: ошибка события пишется в лог
+(не чаще раза в 5 с) и обычный полёт не ломается.
 
 ### 16.1 Что делает
 
@@ -1053,7 +1102,7 @@ conveyor belt(s) and M crane(s).`, `... is on a running conveyor belt...`, `A cr
 останавливается на сплющенном столе, звук, дверь вверх. (б) Бросить предмет в валун и в Доктора Рефлекса: они стоят на
 месте, предмет сплющивается сразу. (в) В комнате кранов бросить предмет в кран: клешня закрывается, предмет поднимается,
 едет к выходу, падает на ленту и едет по ней, пока не сойдёт. (г) Бросить предмет на бегущую ленту в коридоре: он едет вместе
-с лентой до её конца. Если что-то не так, строки журнала с `[Rebuild the School]` покажут, на каком шаге.
+с лентой до её конца. Если что-то не так, строки журнала с `[Lifter Frenzy]` покажут, на каком шаге.
 
 ### 16.12 Восьмой отчёт: цепочка лент, нулевая скорость на ленте, шкафы, высота двери
 

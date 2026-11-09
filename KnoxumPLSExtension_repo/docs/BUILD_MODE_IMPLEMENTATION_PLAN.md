@@ -114,11 +114,12 @@ compile/runtime spike.
 Chaos Mode-файл, туда Build Mode не добавлять. Сначала определить целевой framework и ссылки
 на установленные игровые DLL, после чего создать отдельную сборку, например `KnoxumBuildMode.dll`.
 
-Предлагаемая структура после настройки проекта:
+Предлагаемая структура после настройки проекта (актуальное дерево файлов мода — `README.md`,
+раздел «Структура»; ниже — план Build Mode целиком, включая несделанные папки):
 
 ```text
 src/BuildMode/
-  Plugin/c.cs                         // BepInPlugin entry point: Rebuild the School!
+  Plugin/Plugin.cs                    // BepInPlugin entry point: Lifter Frenzy!
   Runtime/BuildModeRuntime.cs        // singleton/context, вход/выход уровня, cleanup
   Runtime/LevelContext.cs            // текущие ec, builder, player, map, scene key
   Runtime/GameApiProbe.cs            // временные проверки/логи API (удалять или dev-only)
@@ -318,8 +319,8 @@ undo возвращает исходный bin, проходы и NPC работ
 ### Этап 6 — Gravity Gun: перенос мебели и бросок
 
 Управление согласовано: **G поднимает; ЛКМ ставит на клетку под прицелом; ПКМ,
-пока объект удерживается, бросает его вперёд**. Начальный исходник — `src/BuildMode/Tools/g.cs`,
-подключённый из `Plugin/c.cs`. Поднятие читается и в `g.Update`, и как резервный путь в Harmony
+пока объект удерживается, бросает его вперёд**. Начальный исходник — `src/LifterFrenzy/Carry/` и `Flight/`,
+подключённый из `src/LifterFrenzy/Plugin/Plugin.cs`. Поднятие читается и в `g.Update`, и как резервный путь в Harmony
 prefix `PlayerClick.Update`, независимо от обычного клика. Пока объект удерживается, Harmony
 перехватывает клики, чтобы ЛКМ/ПКМ не запускали обычный интеракт одновременно. Код пока не собран и не проверен в BB+.
 

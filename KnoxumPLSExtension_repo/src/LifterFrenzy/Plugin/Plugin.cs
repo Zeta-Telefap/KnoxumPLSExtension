@@ -3,18 +3,18 @@ using BepInEx;
 using HarmonyLib;
 using UnityEngine;
 
-namespace RebuildTheSchool
+namespace LifterFrenzy
 {
     /// <summary>
-    /// BepInEx entry point for Rebuild the School!.
+    /// BepInEx entry point for Lifter Frenzy!.
     /// BepInEx discovers this class through the BepInPlugin attribute; the class name is arbitrary.
     /// </summary>
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
-    public sealed class c : BaseUnityPlugin
+    public sealed class Plugin : BaseUnityPlugin
     {
-        public const string PluginGuid = "knoxum.baldiplus.rebuilders";
-        public const string PluginName = "Rebuild the School!";
-        public const string PluginVersion = "0.1.1";
+        public const string PluginGuid = "knx.LifterFrenzy";
+        public const string PluginName = "Lifter Frenzy!";
+        public const string PluginVersion = "1.0";
 
         private Harmony _harmony;
         private GameObject _runtimeObject;
@@ -25,13 +25,13 @@ namespace RebuildTheSchool
 
             try
             {
-                _runtimeObject = new GameObject("RebuildTheSchool.Runtime");
+                _runtimeObject = new GameObject("LifterFrenzy.Runtime");
                 DontDestroyOnLoad(_runtimeObject);
-                _runtimeObject.AddComponent<g>();
+                _runtimeObject.AddComponent<PropLifter>();
 
                 _harmony = new Harmony(PluginGuid);
-                _harmony.PatchAll(typeof(c).Assembly);
-                g.TryPatchGameInput(_harmony);
+                _harmony.PatchAll(typeof(Plugin).Assembly);
+                PropLifter.TryPatchGameInput(_harmony);
 
                 Logger.LogInfo($"{PluginName} loaded. G picks up the prop under the crosshair; LMB places it, RMB throws it, R + mouse wheel rotates it.");
             }
