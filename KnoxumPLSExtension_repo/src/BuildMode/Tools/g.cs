@@ -936,7 +936,9 @@ namespace RebuildTheSchool
             for (int i = 0; i < all.Length; i++)
             {
                 Door door = all[i];
-                if (door == null || door.ec != environment)
+                // A door of another environment is not of this floor; one that does not say (ec not set) is kept,
+                // as it always was.
+                if (door == null || (door.ec != null && door.ec != environment))
                 {
                     continue;
                 }
